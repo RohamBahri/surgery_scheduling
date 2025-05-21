@@ -62,7 +62,7 @@ def main() -> None:
     # 4)  Train predictors
     # ------------------------------------------------------------------
     lasso_model = train_lasso_predictor(df_warm, PARAMS)
-    # lasso_asym_model = train_lasso_asym(df_warm, PARAMS)
+    lasso_asym_model = train_lasso_asym(df_warm, PARAMS)
     knn_model = train_knn_predictor(df_warm, PARAMS)
 
     H = PARAMS["planning_horizon_days"]
@@ -72,10 +72,10 @@ def main() -> None:
     # 5)  KPI containers
     # ------------------------------------------------------------------
     tags = (
-        "SAA",
+        # "SAA",
         "Det",
         "Lasso",
-        # "LassoAsym",
+        "LassoAsym",
         "KNN",
         "Oracle",
     )
@@ -113,32 +113,32 @@ def main() -> None:
         # 6b) Surgery selection ONCE
         surgeries_base = select_surgeries(df_pool, horizon_start, PARAMS)
         surgeries_lasso = attach_pred(deepcopy(surgeries_base), lasso_model, df_pool)
-        # surgeries_lasso_as = attach_pred(deepcopy(surgeries_base), lasso_asym_model, df_pool)
+        surgeries_lasso_as = attach_pred(deepcopy(surgeries_base), lasso_asym_model, df_pool)
         surgeries_knn = attach_pred(deepcopy(surgeries_base), knn_model, df_pool)
 
         # 6c) Scenario sampling for SAA
-        scen_mat = sample_scenarios(surgeries_base, proc_samples, all_samples, PARAMS)
+        # scen_mat = sample_scenarios(surgeries_base, proc_samples, all_samples, PARAMS)
 
         # 6d) Optimise each model --------------------------------------------
-        res_saa = solve_saa_model(surgeries_base, day_blocks, PARAMS, scen_mat)
+        # res_saa = solve_saa_model(surgeries_base, day_blocks, PARAMS, scen_mat)
         res_det = solve_deterministic_model(surgeries_base, day_blocks, PARAMS)
         res_las = solve_predictive_model(surgeries_lasso, day_blocks, PARAMS)
-        # res_las_a = solve_predictive_model(surgeries_lasso_as, day_blocks, PARAMS)
+        res_las_a = solve_predictive_model(surgeries_lasso_as, day_blocks, PARAMS)
         res_knn = solve_predictive_model(surgeries_knn, day_blocks, PARAMS)
         res_orc = solve_clairvoyant_model(surgeries_base, day_blocks, PARAMS)
 
         # 6e) Evaluate schedules ---------------------------------------------
-        sch_saa = extract_schedule(res_saa["model"], surgeries_base, PARAMS, True)
+        # sch_saa = extract_schedule(res_saa["model"], surgeries_base, PARAMS, True)
         sch_det = extract_schedule(res_det["model"], surgeries_base, PARAMS, True)
         sch_las = extract_schedule(res_las["model"], surgeries_lasso, PARAMS, True)
-        # sch_las_a = extract_schedule(res_las_a["model"], surgeries_lasso_as, PARAMS, True)
+        sch_las_a = extract_schedule(res_las_a["model"], surgeries_lasso_as, PARAMS, True)
         sch_knn = extract_schedule(res_knn["model"], surgeries_knn, PARAMS, True)
         sch_orc = extract_schedule(res_orc["model"], surgeries_base, PARAMS, True)
 
-        kpi_saa = evaluate_schedule_actual_costs(sch_saa, day_blocks, PARAMS)
+        # kpi_saa = evaluate_schedule_actual_costs(sch_saa, day_blocks, PARAMS)
         kpi_det = evaluate_schedule_actual_costs(sch_det, day_blocks, PARAMS)
         kpi_las = evaluate_schedule_actual_costs(sch_las, day_blocks, PARAMS)
-        # kpi_las_a = evaluate_schedule_actual_costs(sch_las_a, day_blocks, PARAMS)
+        kpi_las_a = evaluate_schedule_actual_costs(sch_las_a, day_blocks, PARAMS)
         kpi_knn = evaluate_schedule_actual_costs(sch_knn, day_blocks, PARAMS)
         kpi_orc = evaluate_schedule_actual_costs(sch_orc, day_blocks, PARAMS)
 
@@ -152,10 +152,10 @@ def main() -> None:
                 f"idle={kpi['idle_min_total']:.0f} m"
             )
 
-        print("SAA        :", brief(res_saa["obj"], kpi_saa))
+        # print("SAA        :", brief(res_saa["obj"], kpi_saa))
         print("Det        :", brief(res_det["obj"], kpi_det))
         print("Lasso      :", brief(res_las["obj"], kpi_las))
-        # print("Lasso‑Asym :", brief(res_las_a["obj"], kpi_las_a))
+        print("Lasso‑Asym :", brief(res_las_a["obj"], kpi_las_a))
         print("KNN        :", brief(res_knn["obj"], kpi_knn))
         print("Oracle     :", brief(res_orc["obj"], kpi_orc))
 
@@ -163,18 +163,18 @@ def main() -> None:
         for tag, res, kpi in zip(
             tags,
             (
-                res_saa,
+                # res_saa,
                 res_det,
                 res_las,
-                # res_las_a,
+                res_las_a,
                 res_knn,
                 res_orc,
             ),
             (
-                kpi_saa,
+                # kpi_saa,
                 kpi_det,
                 kpi_las,
-                # kpi_las_a,
+                kpi_las_a,
                 kpi_knn,
                 kpi_orc,
             ),

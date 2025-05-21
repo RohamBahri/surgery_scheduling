@@ -2,4 +2,4 @@ pandas>=1.3
 numpy>=1.21
 scikit-learn>=1.0
 gurobipy>=9.0
-openpyxl≥3.1
+openpyxl>=3.1
