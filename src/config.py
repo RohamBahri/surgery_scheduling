@@ -3,7 +3,7 @@ PARAMS = {
     # -------------------------------------------------------------------------
     # File & temporal split
     # -------------------------------------------------------------------------
-    "excel_file_path": "data/UHNOperating_RoomScheduling2011-2013_modified_Roham.xlsx",
+    "excel_file_path": "data/UHNOperating_RoomScheduling2011-2013.xlsx",
     "warmup_weeks": 52,
     "planning_horizon_days": 7,
     "NUM_HORIZONS": 5,
@@ -14,7 +14,7 @@ PARAMS = {
     "or_day_end_hour": 16,  # 16:00 → planning stops
     "block_size_minutes": 480,  # one block = 8 h
     "blocks_per_day": 1,  # 1 blocks per day per OR
-    "capacity_reduction_percentage": 0.4,  # 0.0 for no reduction, e.g., 0.1 for 10% reduction
+    "capacity_reduction_percentage": 0.6,  # 0.0 for no reduction, e.g., 0.1 for 10% reduction
     "min_blocks_after_reduction": 1,  # Minimum blocks a day can have after reduction
     # -------------------------------------------------------------------------
     # Cost coefficients

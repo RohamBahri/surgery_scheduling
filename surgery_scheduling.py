@@ -24,21 +24,6 @@ from src.solver_utils import (
     solve_clairvoyant_model,
 )
 
-"""
-project/
-├── src/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── data_processing.py
-│       ├── predictors.py
-│       ├── stochastic_utils.py
-│       ├── scheduling_utils.py
-│       ├── solver_utils.py
-└── data/
-        └── UHNOperating_RoomScheduling2011-2013_modified_Roham.xlsx
-surgery_scheduling.py
-"""
-
 
 # =============================================================================
 # MAIN FUNCTION
@@ -228,3 +213,38 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+
+"""
+=== Summary over horizons ===
+SAA planned obj : mean=216918, median=205798, min=194960, max=267710
+SAA actual obj  : mean=275491, median=240465, min=233055, max=366145
+SAA idle        : mean=7654, median=7368, min=6665, max=8528
+SAA overtime    : mean=8956, median=8752, min=5355, max=12116
+SAA runtime     : mean=1200, median=1200, min=1200, max=1200
+Det planned obj : mean=285956, median=300085, min=214395, max=334125
+Det actual obj  : mean=191097, median=186965, min=139005, max=239925
+Det idle        : mean=5470, median=5273, min=4217, max=6784
+Det overtime    : mean=9053, median=8949, min=5109, max=12769
+Det runtime     : mean=5, median=6, min=3, max=6
+Lasso planned obj : mean=54260, median=51295, min=33765, max=80245
+Det runtime     : mean=5, median=6, min=3, max=6
+Lasso planned obj : mean=54260, median=51295, min=33765, max=80245
+Lasso actual obj  : mean=173215, median=173695, min=127615, max=228795
+Lasso idle        : mean=4444, median=4462, min=2819, max=5668
+Lasso overtime    : mean=7085, median=6617, min=4433, max=10110
+Lasso actual obj  : mean=173215, median=173695, min=127615, max=228795
+Lasso idle        : mean=4444, median=4462, min=2819, max=5668
+Lasso overtime    : mean=7085, median=6617, min=4433, max=10110
+Lasso overtime    : mean=7085, median=6617, min=4433, max=10110
+Lasso runtime     : mean=275, median=8, min=6, max=1200
+KNN planned obj : mean=36144, median=39320, min=18920, max=54485
+KNN actual obj  : mean=152680, median=148205, min=122935, max=206240
+KNN idle        : mean=4201, median=3838, min=3514, max=5211
+KNN overtime    : mean=6271, median=6474, min=3432, max=9318
+KNN runtime     : mean=818, median=859, min=90, max=1200
+Oracle planned obj : mean=34830, median=33060, min=21255, max=55790
+Oracle actual obj  : mean=34830, median=33060, min=21255, max=55790
+Oracle idle        : mean=956, median=1527, min=0, max=1634
+Oracle overtime    : mean=832, median=710, min=256, max=1682
+Oracle runtime     : mean=501, median=44, min=26, max=1201
+"""

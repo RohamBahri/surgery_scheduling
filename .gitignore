@@ -7,8 +7,9 @@ __pycache__/
 .env/
 .venv/
 
-# Data files
+# Data and presentation files
 data/
+presentations/
 
 # Jupyter
 .ipynb_checkpoints/

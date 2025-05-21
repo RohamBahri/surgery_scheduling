@@ -269,6 +269,8 @@ def _solve_single_stage(
             m.addConstr(dur_sum - blk_min <= ot[d, b], name=f"ot_{d}_{b}")
             # blk - dur_sum <= it
             m.addConstr(blk_min - dur_sum <= it[d, b], name=f"it_{d}_{b}")
+            # ot + it <= 120
+            m.addConstr(ot[d, b] <= 120, name=f"ot_cap_{d}_{b}")
 
     # ---------- prepare durations dict --------------------------
     if mode == "pred":
