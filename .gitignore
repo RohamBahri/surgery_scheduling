@@ -20,6 +20,7 @@ presentations/
 *.log
 debug_*.lp
 debug_*.sol
+outputs/
 
 # IDE / editor folders
 .vscode/
