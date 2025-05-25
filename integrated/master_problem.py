@@ -1,106 +1,118 @@
-from typing import Any
+"""
+Master problem module for integrated Benders decomposition.
+Builds the two-stage master MIP with assignment, rejection, theta, and eta vars.
+"""
+
+from typing import Any, Dict, List, Tuple
 import gurobipy as gp
 from gurobipy import GRB, quicksum
-
-# Assuming PARAMS and relevant column name constants are in these modules
 from src.config import PARAMS
-from src.constants import (
-    COL_BOOKED_MIN,
-    GUROBI_VAR_THETA_PREFIX, # Assuming you'll add this if not present
-    GUROBI_VAR_ABS_THETA_PREFIX, # Assuming you'll add this if not present
-    GUROBI_VAR_ETA_PREFIX, # Assuming you'll add this if not present
-    GUROBI_VAR_R_PREFIX, # Assuming you'll add this if not present
-    GUROBI_VAR_X_PREFIX, # Assuming you'll add this if not present (for Z vars)
-)
-
-# Define temporary constants if not in constants.py yet
-if "GUROBI_VAR_THETA_PREFIX" not in globals(): GUROBI_VAR_THETA_PREFIX = "theta"
-if "GUROBI_VAR_ABS_THETA_PREFIX" not in globals(): GUROBI_VAR_ABS_THETA_PREFIX = "abs_theta"
-if "GUROBI_VAR_ETA_PREFIX" not in globals(): GUROBI_VAR_ETA_PREFIX = "eta"
-if "GUROBI_VAR_R_PREFIX" not in globals(): GUROBI_VAR_R_PREFIX = "R" # Master R vars are R_s_i
-if "GUROBI_VAR_X_PREFIX" not in globals(): GUROBI_VAR_X_PREFIX = "Z" # Master Z vars are Z_s_i_b
 
 
 def build_benders_master_problem(
-    weekly_data_list: list[tuple[list[dict], dict[int, int], dict[Any, float]]], # Updated type hint
+    weekly_data_list: List[Tuple[List[Dict[str, Any]], List[int], Dict[int, float]]],
     num_features: int,
-    initial_theta: dict[int, float] = None,
-) -> tuple[gp.Model, dict, dict, dict, dict]:
+    params: Dict[str, Any],
+    initial_theta: Dict[int, float] = None,
+) -> Tuple[
+    gp.Model,
+    Dict[Tuple[int, int, int], gp.Var],  # Z_vars
+    Dict[Tuple[int, int], gp.Var],  # R_vars
+    Dict[int, gp.Var],  # theta_vars
+    Dict[int, gp.Var],  # eta_vars
+]:
     """
-    Construct the integrated Benders master MIP.
+    Construct the Benders master problem.
 
     Args:
-      weekly_data_list: list of (surgeries_info, daily_blocks, actual_durations_map)
-                        per historical week.
-      num_features: number of features for the regression vector theta.
-      initial_theta: Optional dictionary mapping feature index j to warm-start value.
+        weekly_data_list: Sequence of (surgeries, blocks, actual_map) for each scenario week.
+            - surgeries: list of surgery dicts for that week
+            - blocks:    list of block capacities (minutes) for each block index
+            - actual_map: dict mapping surgery['id'] -> realized duration
+        num_features:     Number of features in regression (p).
+        params:           Parameter dict containing keys:
+                          - "cost_rejection_per_case"
+                          - "benders_lambda_l1_theta"
+        initial_theta:    Optional warm-start values mapping feature index -> theta.
 
     Returns:
-      model: the Gurobi Model
-      Z_vars: dict mapping (s, i, b) -> binary var Z_{s,i,b} for week s
-      R_vars: dict mapping (s, i)   -> binary var R_{s,i} for week s
-      theta_vars: dict mapping j -> continuous var theta_j
-      eta_vars: dict mapping s -> continuous var eta_s
+        model:      Gurobi Model for the master problem.
+        Z_vars:     Mapping (week, surgery_index, block_index) -> binary Var.
+        R_vars:     Mapping (week, surgery_index) -> binary reject Var.
+        theta_vars: Mapping feature_index -> continuous theta Var.
+        eta_vars:   Mapping week -> continuous eta Var for recourse cost.
     """
-    model = gp.Model("Benders_Master_Theta_Learning")
-    model.Params.OutputFlag = 0
+    # Initialize model
+    model = gp.Model("BendersMaster")
+    # Master parameters (could be set here)
+    # model.Params.OutputFlag = 0
 
-    # Solver parameters from PARAMS
-    model.Params.TimeLimit = PARAMS["gurobi_timelimit"]
-    model.Params.MIPGap = PARAMS["gurobi_mipgap"]
-    model.Params.Threads = PARAMS["gurobi_threads"]
-    model.Params.OutputFlag = PARAMS["gurobi_output_flag"]
-    model.Params.LazyConstraints = 1 # Essential for Benders
+    # Extract parameters
+    c_rej = PARAMS["cost_rejection_per_case"]
+    lambda_l1 = PARAMS["benders_lambda_l1_theta"]
 
-    num_training_weeks = len(weekly_data_list)
+    # 1) Decision variables
+    Z_vars: Dict[Tuple[int, int, int], gp.Var] = {}
+    R_vars: Dict[Tuple[int, int], gp.Var] = {}
+    eta_vars: Dict[int, gp.Var] = {}
 
-    # Decision variables
-    theta_vars = model.addVars(
-        range(num_features), lb=-GRB.INFINITY, ub=GRB.INFINITY, name=GUROBI_VAR_THETA_PREFIX
-    )
-    if initial_theta:
-        for j, val in initial_theta.items():
-            if j in theta_vars: # Check if index is valid
-                theta_vars[j].Start = val
+    for s, (surgeries, blocks, _) in enumerate(weekly_data_list):
+        # Rejection var per surgery
+        for i, surg in enumerate(surgeries):
+            R_vars[(s, i)] = model.addVar(vtype=GRB.BINARY, name=f"R_s{s}_i{i}")
+            # Assignment var per block index
+            for b in range(len(blocks)):
+                Z_vars[(s, i, b)] = model.addVar(
+                    vtype=GRB.BINARY, name=f"Z_s{s}_i{i}_b{b}"
+                )
+        # Recourse cost var
+        eta_vars[s] = model.addVar(lb=0.0, name=f"eta_s{s}")
 
-    abs_theta_penalty_vars = model.addVars(range(num_features), lb=0.0, name=GUROBI_VAR_ABS_THETA_PREFIX)
-    for j in range(num_features):
-        model.addConstr(abs_theta_penalty_vars[j] >= theta_vars[j], name=f"t_pos_{j}")
-        model.addConstr(abs_theta_penalty_vars[j] >= -theta_vars[j], name=f"t_neg_{j}")
+    # Theta variables and L1 proxies
+    theta_vars: Dict[int, gp.Var] = {
+        j: model.addVar(lb=-GRB.INFINITY, name=f"theta_{j}")
+        for j in range(num_features)
+    }
+    abs_theta_vars: Dict[int, gp.Var] = {
+        j: model.addVar(lb=0, name=f"abs_theta_{j}") for j in theta_vars
+    }
 
-    eta_vars = model.addVars(range(num_training_weeks), lb=0.0, name=GUROBI_VAR_ETA_PREFIX)
-
-    Z_vars = {}
-    R_vars = {}
-    for s_idx, (surgeries_in_week, daily_blocks_in_week, _) in enumerate(weekly_data_list): # Unpack correctly
-        num_block_slots_in_week = sum(daily_blocks_in_week.values())
-        for i_idx in range(len(surgeries_in_week)):
-            R_vars[s_idx, i_idx] = model.addVar(vtype=GRB.BINARY, name=f"{GUROBI_VAR_R_PREFIX}_{s_idx}_{i_idx}")
-            for b_idx_flat in range(num_block_slots_in_week):
-                Z_vars[s_idx, i_idx, b_idx_flat] = model.addVar(vtype=GRB.BINARY, name=f"{GUROBI_VAR_X_PREFIX}_{s_idx}_{i_idx}_{b_idx_flat}")
-
-    # Assignment constraints
-    for s_idx, (surgeries_in_week, daily_blocks_in_week, _) in enumerate(weekly_data_list):
-        num_block_slots_in_week = sum(daily_blocks_in_week.values())
-        for i_idx in range(len(surgeries_in_week)):
-            model.addConstr(
-                quicksum(Z_vars[s_idx, i_idx, b_idx_flat] for b_idx_flat in range(num_block_slots_in_week)) + R_vars[s_idx, i_idx] == 1,
-                name=f"assign_week{s_idx}_surg{i_idx}",
-            )
-
-    # Objective
-    cost_rejection_param = PARAMS["cost_rejection_per_case"]
-    l1_regularization_param = PARAMS["benders_lambda_l1_theta"]
-
-    rejection_cost_expr = quicksum(
-        cost_rejection_param * surgeries_in_week[i_idx][COL_BOOKED_MIN] * R_vars[s_idx, i_idx]
-        for s_idx, (surgeries_in_week, _, _) in enumerate(weekly_data_list)
-        for i_idx in range(len(surgeries_in_week))
-    )
-    recourse_cost_expr = quicksum(eta_vars[s_idx] for s_idx in range(num_training_weeks))
-    l1_penalty_expr = l1_regularization_param * quicksum(abs_theta_penalty_vars[j] for j in range(num_features))
-
-    model.setObjective(rejection_cost_expr + recourse_cost_expr + l1_penalty_expr, GRB.MINIMIZE)
     model.update()
+
+    # 2) Constraints
+    # 2a) Assignment: sum_b Z + R = 1
+    for s, (surgeries, blocks, _) in enumerate(weekly_data_list):
+        for i in range(len(surgeries)):
+            model.addConstr(
+                quicksum(Z_vars[(s, i, b)] for b in range(len(blocks))) + R_vars[(s, i)]
+                == 1,
+                name=f"assign_s{s}_i{i}",
+            )
+    # 2b) Recourse cost cuts: eta_s >= Q_s(...) added via callback
+    # No static cuts here; will use lazy constraints
+
+    # 2c) L1 linkage for theta
+    for j in theta_vars:
+        model.addConstr(theta_vars[j] <= abs_theta_vars[j], name=f"l1_pos_{j}")
+        model.addConstr(-theta_vars[j] <= abs_theta_vars[j], name=f"l1_neg_{j}")
+
+    # 3) Objective
+    # Rejection cost + eta recourse + lambda * ||theta||_1
+    obj_rej = quicksum(
+        c_rej * surgeries[i]["booked_time_minutes"] * R_vars[(s, i)]
+        for s, (surgeries, _, _) in enumerate(weekly_data_list)
+        for i in range(len(surgeries))
+    )
+    obj_rec = quicksum(eta_vars[s] for s in eta_vars)
+    obj_reg = lambda_l1 * quicksum(abs_theta_vars[j] for j in abs_theta_vars)
+
+    model.setObjective(obj_rej + obj_rec + obj_reg, GRB.MINIMIZE)
+    model.update()
+
+    # 4) Warm-start theta if available
+    if initial_theta is not None:
+        for j, val in initial_theta.items():
+            if j in theta_vars:
+                theta_vars[j].Start = val
 
     return model, Z_vars, R_vars, theta_vars, eta_vars

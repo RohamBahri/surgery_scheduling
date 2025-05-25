@@ -53,10 +53,10 @@ PARAMS: dict[str, any] = {
     # -------------------------------------------------------------------------
     # Integrated Model (Predict-then-Optimize with Gurobi) Settings
     # -------------------------------------------------------------------------
-    "epsilon_block_mae": 480,  # Epsilon for per-block MAE constraint (minutes)
+    "epsilon_block_mae": 100,  # Epsilon for per-block MAE constraint (minutes)
     "feature_scaling": "std",  # "std" for standardization, "raw" for no scaling
     "max_error_bound": 1000,
-    "prediction_error_weight": 10,  # Weight for prediction error in the objective
+    "prediction_error_weight": 50,  # Weight for prediction error in the objective
     "time_limit_monolithic": 36000,
     # -------------------------------------------------------------------------
     # Gurobi Solver Parameters (can be overridden by debug_mode logic)
@@ -69,7 +69,7 @@ PARAMS: dict[str, any] = {
     # -------------------------------------------------------------------------
     # Benders Decomposition Settings (for integrated theta learning)
     # -------------------------------------------------------------------------
-    "benders_lambda_l1_theta": 0.01,  # L1 regularization for theta in Benders master
+    "benders_lambda_l1_theta": 10,  # L1 regularization for theta in Benders master
     "theta_bound": 200,
     "benders_parallel_subproblems": True,  # Whether to solve Benders subproblems in parallel
     "benders_max_workers": None,  # Max workers for parallel subproblems (None means ThreadPoolExecutor default)
