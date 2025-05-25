@@ -1,462 +1,567 @@
-from datetime import timedelta
-import pandas as pd
-import numpy as np
-import re
+"""
+Utilities for processing and evaluating surgery schedules.
+Includes functions to extract schedules from optimization models,
+evaluate costs based on actual durations, and select surgeries for
+planning horizons.
+"""
 
-from .data_processing import (
-    NUMERIC_FEATURES,
-    CATEGORICAL_FEATURES,
-    ALL_FEATURES,
-    add_time_features,
+import logging
+import re
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
+
+import gurobipy as gp  # For type hinting Model
+import numpy as np
+import pandas as pd
+
+from src.constants import (
+    ALL_FEATURE_COLS,
+    CATEGORICAL_FEATURE_COLS,
+    COL_ACTUAL_DUR_MIN,
+    COL_ACTUAL_START,
+    COL_ASSIGNED_BLOCK,
+    COL_ASSIGNED_DAY,
+    COL_BOOKED_MIN,
+    COL_BOOKED_MIN,
+    COL_PROCEDURE_DURATION_MIN,
+    COL_MAIN_PROCEDURE_ID,
+    COL_PROC_ID,
+    COL_SURGERY_ID,
+    COL_ACTUAL_DUR_MIN,
+    COL_ASSIGNED_BLOCK,
+    COL_ASSIGNED_DAY,
+    COL_PROC_ID,
+    COL_SURGERY_ID,
+    DEFAULT_GUROBI_MODEL_NAME,
+    DEFAULT_LOGGER_NAME,
+    GUROBI_BINARY_THRESHOLD,
+    GUROBI_VAR_R_PREFIX,
+    GUROBI_VAR_X_PREFIX,
+    MIN_PROCEDURE_DURATION,
+    REGEX_NUMERICAL_VALUES,
+    UNKNOWN_CATEGORY,
 )
+from src.data_processing import add_time_features
+
+
+# Setup logger
+logger = logging.getLogger(DEFAULT_LOGGER_NAME)
 
 
 def extract_schedule(
-    model,  
-    surgeries: list[dict],
-    params: dict, 
-    include_block: bool = True
+    model: Optional[gp.Model],
+    surgeries_input_list: List[Dict[str, Any]],
+    # params: Dict[str, Any], # params was unused, removing for now
+    include_block_column: bool = True,
 ) -> pd.DataFrame:
+    """Extracts a surgery schedule from a solved Gurobi optimization model.
+
+    Converts Gurobi decision variable values (x[i,d,b] for assignment,
+    r[i] for rejection) into a structured pandas DataFrame.
+
+    Args:
+        model: The solved Gurobi model object. Can be None if no solution.
+        surgeries_input_list: A list of surgery dictionaries, in the same order
+            as they were indexed (0 to N-1) in the Gurobi model. Each dict must
+            contain at least 'id' (original surgery identifier), 'proc_id',
+            'booked_min', and 'actual_dur_min'.
+        include_block_column: If True, the output DataFrame includes an
+            'AssignedBlock' column.
+
+    Returns:
+        A pandas DataFrame representing the schedule. Columns include:
+        - 'SurgeryID': Original surgery identifier.
+        - 'ProcID': Procedure ID.
+        - 'AssignedDay': Day index (0 to H-1) or "Rejected".
+        - 'AssignedBlock': Block index (0 to B-1) or None/pd.NA if rejected
+                           or if `include_block_column` is False.
+        - 'BookedMin': Booked duration.
+        - 'ActualDurMin': Actual duration.
     """
-    Extracts the surgery schedule from a solved Gurobi optimization model.
+    output_columns: List[str] = [
+        COL_SURGERY_ID,
+        COL_PROC_ID,
+        COL_ASSIGNED_DAY,
+        COL_BOOKED_MIN,
+        COL_ACTUAL_DUR_MIN,  # Using constant COL_BOOKED_MIN
+    ]
+    if include_block_column:
+        output_columns.append(COL_ASSIGNED_BLOCK)
 
-    Converts Gurobi decision variable values (x[i,d,b] for assignment, 
-    r[i] for rejection) into a structured pandas DataFrame. 
-    Ensures that day and block indices are integers.
-
-    Parameters
-    ----------
-    model : gurobipy.Model
-        The solved Gurobi model object.
-    surgeries : list of dict
-        A list of surgery dictionaries, in the same order as they were
-        indexed (0 to N-1) in the Gurobi model. Each dictionary must contain
-        at least 'id' (original surgery identifier), 'proc_id', 
-        'booked_min', and 'actual_dur_min'.
-    params : dict
-        The parameter dictionary (currently used for logging model name, optional).
-    include_block : bool, optional
-        If True (default), the output DataFrame will include an 'AssignedBlock'
-        column. If False, only 'AssignedDay' is included.
-
-    Returns
-    -------
-    pd.DataFrame
-        A DataFrame representing the schedule. Columns include:
-        - SurgeryID: The original identifier of the surgery.
-        - ProcID: The procedure ID.
-        - AssignedDay: The day index (0 to H-1) to which the surgery is
-                       assigned, or the string "Rejected".
-        - AssignedBlock: The block index (0 to B-1) within the assigned day,
-                         or None if rejected or if include_block is False.
-                         This column will be of object type to accommodate
-                         integers and None, preventing automatic float conversion
-                         if rejections are present.
-        - BookedMin: Booked duration of the surgery.
-        - ActualDurMin: Actual duration of the surgery.
-    
-    Notes
-    -----
-    - It is crucial that the `surgeries` list matches the indexing used when
-      defining variables in the Gurobi model.
-    - The function assumes variable names like "x[i,d,b]" and "r[i]".
-    - `AssignedBlock` is intentionally typed to handle `None` for rejected cases
-      without forcing the column to float, which can cause issues with strict
-      integer checks later.
-    """
-    output_cols = ["SurgeryID", "ProcID", "AssignedDay", "BookedMin", "ActualDurMin"]
-    if include_block:
-        output_cols.append("AssignedBlock")
-
-    model_name_for_log = "GurobiModel"
-    if hasattr(model, 'ModelName') and model.ModelName: 
+    model_name_for_log = DEFAULT_GUROBI_MODEL_NAME
+    if model and hasattr(model, "ModelName") and model.ModelName:
         model_name_for_log = model.ModelName
-    
+
     if model is None or model.SolCount == 0:
-        print(f"[extract_schedule] Model '{model_name_for_log}' is None or has no solution. Returning empty DataFrame.")
-        return pd.DataFrame(columns=output_cols)
+        logger.warning(
+            f"Model '{model_name_for_log}' is None or has no solution. "
+            "Returning empty schedule DataFrame."
+        )
+        return pd.DataFrame(columns=output_columns)
 
-    assignment = {}  # surgery_idx -> (day_idx, block_idx) or "Rejected"
-    num_pat = re.compile(r"\d+") # Pre-compile regex for extracting numbers
+    # surgery_idx -> (day_idx, block_idx) or "Rejected"
+    assignments: Dict[int, Any] = {}
+    # Pre-compile regex for extracting numbers from variable names
+    numerical_pattern = re.compile(REGEX_NUMERICAL_VALUES)
 
-    # Iterate through Gurobi variables to find assignments and rejections
+    logger.debug(f"Extracting schedule from Gurobi model '{model_name_for_log}'.")
     for var in model.getVars():
         try:
             var_value = var.X
-        except AttributeError: # Should not happen if SolCount > 0
-            continue # Skip if .X is not available
-
-        if abs(var_value) < 0.5: # Consider values < 0.5 as not selected
+        except AttributeError:  # Should not happen if SolCount > 0
+            logger.warning(
+                f"Variable {var.VarName} has no solution value '.X'. Skipping."
+            )
             continue
 
-        name = var.VarName
-        extracted_indices = list(map(int, num_pat.findall(name)))
+        # Consider values < GUROBI_BINARY_THRESHOLD (e.g., 0.5) as not selected for binary vars
+        if abs(var_value) < GUROBI_BINARY_THRESHOLD:
+            continue
 
-        if name.startswith("x") and len(extracted_indices) >= 3:
+        var_name = var.VarName
+        # Extract all integer sequences from the variable name
+        indices_str = numerical_pattern.findall(var_name)
+        if not indices_str:  # No numbers found, not a structured variable like x[i,d,b]
+            continue
+
+        extracted_indices = list(map(int, indices_str))
+
+        if var_name.startswith(GUROBI_VAR_X_PREFIX) and len(extracted_indices) >= 3:
             # Assignment variable: x[i, d, b]
             surgery_idx, day_idx, block_idx = extracted_indices[:3]
-            assignment[surgery_idx] = (day_idx, block_idx) # Store as tuple of ints
-        elif name.startswith("r") and extracted_indices:
+            assignments[surgery_idx] = (day_idx, block_idx)
+        elif var_name.startswith(GUROBI_VAR_R_PREFIX) and extracted_indices:
             # Rejection variable: r[i]
             surgery_idx = extracted_indices[0]
             # Only mark as rejected if not already assigned by an x-variable
-            # (which would be a model inconsistency if both x and r are 1)
-            assignment.setdefault(surgery_idx, "Rejected")
+            # (A model inconsistency if both x[i,d,b]=1 and r[i]=1 for same i)
+            assignments.setdefault(surgery_idx, "Rejected")
 
-    # Construct the DataFrame from the assignments
-    schedule_rows = []
-    unassigned_in_loop_count = 0
-    for i, surg_data in enumerate(surgeries):
-        assigned_slot = assignment.get(i)
+    schedule_rows_list: List[Dict[str, Any]] = []
+    unassigned_surgeries_count = 0
 
-        row_data = {
-            "SurgeryID": surg_data.get("id", i), # Fallback to index if 'id' is missing
-            "ProcID": surg_data["proc_id"],
-            "AssignedDay": None, # Initialize
-            "BookedMin": surg_data["booked_min"],
-            "ActualDurMin": surg_data["actual_dur_min"],
+    for i, surgery_data in enumerate(surgeries_input_list):
+        assigned_slot = assignments.get(i)
+
+        row_data_dict: Dict[str, Any] = {
+            COL_SURGERY_ID: surgery_data.get(
+                "id", i
+            ),  # Fallback to index 'i' if 'id' is missing
+            COL_PROC_ID: surgery_data["proc_id"],
+            COL_ASSIGNED_DAY: None,  # Initialize
+            COL_BOOKED_MIN: surgery_data[COL_BOOKED_MIN],
+            COL_ACTUAL_DUR_MIN: surgery_data[
+                COL_ACTUAL_DUR_MIN
+            ],  # Assuming this key exists
         }
-        if include_block:
-            row_data["AssignedBlock"] = None # Initialize for object type column
+        if include_block_column:
+            row_data_dict[COL_ASSIGNED_BLOCK] = (
+                pd.NA
+            )  # Initialize with pd.NA for nullable int
 
         if assigned_slot is None:
-            # This surgery was neither explicitly scheduled nor rejected by Gurobi vars
-            # This can happen if a constraint sum(x_i) + r_i = 1 is violated or Gurobi solution is incomplete.
-            # Forcing it to "Rejected" might hide underlying issues.
-            # Current behavior: It will be missing from assignment, leading to "Unassigned" below.
-            # Consider how to handle this case: error, warning, or default to rejected.
-            # For now, it will be implicitly handled by `assigned_slot` being None.
-            # This surgery won't be added to schedule_rows if we want to strictly reflect solver output.
-            # However, usually, we want to account for all surgeries.
-            # Forcing to "Rejected" if no assignment is found by Gurobi vars for robustness:
-            # print(f"[extract_schedule] Warning: Surgery index {i} (ID: {surg_data.get('id', 'N/A')}) "
-            #       f"had no Gurobi assignment (x=0, r=0). Marking as 'ImpliedRejected'.")
-            # row_data["AssignedDay"] = "ImpliedRejected" 
-            # schedule_rows.append(row_data)
-            # unassigned_in_loop_count +=1
-            # continue # Or, if we want to skip it and report:
-            print(f"[extract_schedule] Warning: Surgery index {i} (ID: {surg_data.get('id', 'N/A')}) "
-                  f"had no decision (x=0, r=0) from Gurobi variables. Skipping from schedule output.")
-            unassigned_in_loop_count += 1
-            continue
-
+            # Surgery was neither explicitly scheduled nor rejected by Gurobi vars.
+            # This could indicate an issue with model constraints (e.g., sum(x_i) + r_i = 1 violated)
+            # or an incomplete Gurobi solution.
+            logger.warning(
+                f"Surgery index {i} (ID: {surgery_data.get('id', 'N/A')}) "
+                f"had no Gurobi assignment (x=0, r=0). It will be excluded from the schedule."
+            )
+            unassigned_surgeries_count += 1
+            continue  # Skip this surgery from the output schedule
 
         if assigned_slot == "Rejected":
-            row_data["AssignedDay"] = "Rejected"
-            # AssignedBlock remains None
-        else: # It's a tuple (day_idx, block_idx)
-            day_idx, block_idx = assigned_slot # These are already integers
-            row_data["AssignedDay"] = day_idx
-            if include_block:
-                row_data["AssignedBlock"] = block_idx
-        
-        schedule_rows.append(row_data)
-    
-    if unassigned_in_loop_count > 0:
-         print(f"[extract_schedule] Model '{model_name_for_log}': {unassigned_in_loop_count}/{len(surgeries)} "
-               "surgeries had no assignment/rejection variable set to 1 in the Gurobi solution.")
+            row_data_dict[COL_ASSIGNED_DAY] = "Rejected"
+            # COL_ASSIGNED_BLOCK remains pd.NA
+        else:  # It's a tuple (day_idx, block_idx)
+            day_idx_assigned, block_idx_assigned = (
+                assigned_slot  # These are already integers
+            )
+            row_data_dict[COL_ASSIGNED_DAY] = day_idx_assigned
+            if include_block_column:
+                row_data_dict[COL_ASSIGNED_BLOCK] = block_idx_assigned
 
-    # Create DataFrame, explicitly set dtype for AssignedBlock if it exists
-    # to handle mix of int and None without upcasting to float.
-    schedule_df = pd.DataFrame(schedule_rows, columns=output_cols)
-    
-    if include_block and "AssignedBlock" in schedule_df.columns:
-        # Ensure AssignedBlock can hold integers and pandas' NA, not float NaN
-        # This helps prevent type issues in downstream functions.
-        # pd.Int64Dtype() is the nullable integer type.
+        schedule_rows_list.append(row_data_dict)
+
+    if unassigned_surgeries_count > 0:
+        logger.warning(
+            f"Model '{model_name_for_log}': {unassigned_surgeries_count}/{len(surgeries_input_list)} "
+            "surgeries had no assignment/rejection variable set to 1. They were excluded."
+        )
+
+    schedule_df = pd.DataFrame(schedule_rows_list, columns=output_columns)
+
+    # Ensure 'AssignedBlock' can hold integers and pandas' NA (nullable integer type)
+    if include_block_column and COL_ASSIGNED_BLOCK in schedule_df.columns:
         try:
-            schedule_df["AssignedBlock"] = schedule_df["AssignedBlock"].astype(pd.Int64Dtype())
+            schedule_df[COL_ASSIGNED_BLOCK] = schedule_df[COL_ASSIGNED_BLOCK].astype(
+                pd.Int64Dtype()
+            )
         except Exception as e:
-            # Fallback if Int64Dtype() fails (e.g., very old pandas or unexpected data)
-            # It might remain object or get converted to float if NAs are present.
-            # The per-row conversion in evaluate_schedule_actual_costs will be the safety net.
-            print(f"[extract_schedule] Warning: Could not cast 'AssignedBlock' to Int64Dtype: {e}. "
-                  "Column dtype might be object or float.")
-
-
+            logger.warning(
+                f"Could not cast '{COL_ASSIGNED_BLOCK}' to Int64Dtype: {e}. "
+                "Column dtype might be object or float, which could affect downstream logic."
+            )
+    logger.debug(f"Extracted schedule with {len(schedule_df)} entries.")
     return schedule_df
 
 
 def evaluate_schedule_actual_costs(
     schedule_df: pd.DataFrame,
-    day_blocks: dict[int, int],
-    params: dict,
-) -> dict:
+    daily_block_capacities: Dict[int, int],  # Renamed from day_blocks for clarity
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Computes operational costs (overtime, idle, rejection) for a schedule.
+
+    Uses actual surgery durations for cost calculation.
+
+    Args:
+        schedule_df: DataFrame of the schedule, typically from `extract_schedule`.
+            Expected columns: 'AssignedDay', 'AssignedBlock' (optional),
+            'ActualDurMin', 'BookedMin'.
+        daily_block_capacities: Dict mapping day index (0 to H-1) to the number
+            of available OR blocks on that day.
+        params: Configuration dictionary. Must include:
+            - 'planning_horizon_days' (int)
+            - 'block_size_minutes' (int)
+            - 'cost_overtime_per_min' (float)
+            - 'cost_idle_per_min' (float)
+            - 'cost_rejection_per_case' (float)
+
+    Returns:
+        A dictionary containing KPIs:
+        - 'total_actual_cost': Sum of overtime, idle, and rejection costs.
+        - 'scheduled_count': Number of successfully scheduled surgeries.
+        - 'rejected_count': Number of rejected surgeries.
+        - 'overtime_minutes_total': Total overtime minutes.
+        - 'idle_minutes_total': Total idle time minutes.
+        - 'overtime_matrix': 2D numpy array (H x max_blocks) of overtime per block.
+        - 'idle_matrix': 2D numpy array (H x max_blocks) of idle time per block.
+
+    Raises:
+        KeyError: If required parameters are missing from `params`.
     """
-    Computes actual operational costs (overtime, idle time, rejection) for a
-    given schedule, using the true (actual) surgery durations.
+    try:
+        horizon_days = params["planning_horizon_days"]
+        block_duration_minutes = params["block_size_minutes"]
+        cost_overtime_per_min = params["cost_overtime_per_min"]
+        cost_idle_per_min = params["cost_idle_per_min"]
+        cost_rejection_per_case = params["cost_rejection_per_case"]
+    except KeyError as e:
+        logger.error(f"Missing parameter for schedule cost evaluation: {e}")
+        raise
 
-    Parameters
-    ----------
-    schedule_df : pd.DataFrame
-        The schedule, typically output from `extract_schedule`.
-        Expected columns: 'AssignedDay', 'AssignedBlock' (optional),
-        'ActualDurMin', 'BookedMin'.
-        'AssignedDay' contains day indices (int) or "Rejected" (str).
-        'AssignedBlock' should contain block indices (int) or be missing/None.
-    day_blocks : dict[int, int]
-        A dictionary mapping each day index (0 to H-1) to the number of
-        available OR blocks on that day.
-    params : dict
-        A dictionary containing configuration parameters, including:
-        - 'planning_horizon_days' (H)
-        - 'block_size_minutes'
-        - 'cost_overtime_per_min'
-        - 'cost_idle_per_min'
-        - 'cost_rejection_per_case'
-
-    Returns
-    -------
-    dict
-        A dictionary containing various Key Performance Indicators (KPIs):
-        - 'total_actual_cost': The sum of overtime, idle, and rejection costs.
-        - 'scheduled': Count of surgeries successfully scheduled and costed.
-        - 'rejected': Count of surgeries explicitly marked as "Rejected".
-        - 'overtime_min_total': Total minutes of overtime across all blocks.
-        - 'idle_min_total': Total minutes of idle time across all blocks.
-        - 'overtime_matrix': A 2D numpy array (H x max_blocks) of overtime per block.
-        - 'idle_matrix': A 2D numpy array (H x max_blocks) of idle time per block.
-    """
-    H = params["planning_horizon_days"]
-    blk_min = params["block_size_minutes"]
-    c_ot = params["cost_overtime_per_min"]
-    c_idle = params["cost_idle_per_min"]
-    c_rej = params["cost_rejection_per_case"]
-
-    # Determine max blocks per day for matrix shape robustly
-    max_b_per_day = 0
-    if day_blocks and day_blocks.values():
-        max_b_per_day = max(day_blocks.values())
-    if H > 0 and max_b_per_day == 0 : # If horizon exists but no blocks, ensure matrices have 1 col
-        max_b_per_day = 1 
-    if H == 0: # No planning horizon, no capacity.
-        max_b_per_day = 0
-
+    # Determine max blocks per day for matrix shapes
+    max_blocks_in_any_day = 0
+    if daily_block_capacities and daily_block_capacities.values():
+        max_blocks_in_any_day = max(daily_block_capacities.values())
+    if horizon_days > 0 and max_blocks_in_any_day == 0:
+        # If horizon exists but no blocks defined, matrices should still have 1 column
+        # to avoid issues with empty arrays if some logic expects at least one block.
+        max_blocks_in_any_day = 1
 
     # Initialize capacity, overtime, and idle time matrices
-    # Ensure H is not zero before creating matrices of this shape.
-    if H > 0:
-        cap_matrix = np.zeros((H, max_b_per_day))
-        for d_idx, num_d_blocks in day_blocks.items():
-            if 0 <= d_idx < H: # Ensure day index is within horizon
-                # Iterate up to the minimum of actual blocks for the day or matrix width
-                for b_idx in range(min(num_d_blocks, max_b_per_day)):
-                    cap_matrix[d_idx, b_idx] = blk_min
-        ot_matrix = np.zeros_like(cap_matrix)
-        idle_matrix = cap_matrix.copy() # Start with all blocks being fully idle
-    else: # No planning horizon
-        cap_matrix = np.array([[]]) # Empty 2D array
-        ot_matrix = np.array([[]])
-        idle_matrix = np.array([[]])
+    if horizon_days > 0:
+        # capacity_matrix stores the capacity (in minutes) of each block
+        capacity_matrix = np.zeros((horizon_days, max_blocks_in_any_day))
+        for day_idx, num_blocks_on_day in daily_block_capacities.items():
+            if 0 <= day_idx < horizon_days:  # Ensure day_idx is within horizon
+                # Fill capacity for actual blocks available on this day, up to matrix width
+                for block_idx in range(min(num_blocks_on_day, max_blocks_in_any_day)):
+                    capacity_matrix[day_idx, block_idx] = block_duration_minutes
 
+        overtime_matrix = np.zeros_like(capacity_matrix)
+        # Idle time starts as full capacity for all defined blocks
+        idle_matrix = capacity_matrix.copy()
+    else:  # No planning horizon, implies no capacity or operations
+        capacity_matrix = np.array([[]], dtype=float)  # Ensure 2D for consistency
+        overtime_matrix = np.array([[]], dtype=float)
+        idle_matrix = np.array([[]], dtype=float)
 
-    rejection_cost_total = 0.0
-    num_scheduled_processed = 0
-    num_rejected_processed = 0
-    num_skipped_rows = 0
+    total_rejection_cost: float = 0.0
+    num_scheduled_surgeries: int = 0
+    num_rejected_surgeries: int = 0
+    num_skipped_schedule_rows: int = 0
 
-    # Check if 'AssignedBlock' column exists for block-level accounting
-    has_block_column = "AssignedBlock" in schedule_df.columns
+    has_block_column = COL_ASSIGNED_BLOCK in schedule_df.columns
 
-    if schedule_df.empty and H == 0: # No schedule and no horizon means zero costs
-        pass # Costs will remain zero
-    elif schedule_df.empty and H > 0: # No schedule but horizon exists, all capacity is idle
-        rejection_cost_total = 0.0 # No surgeries to reject
-        # Idle time will be sum of all cap_matrix, ot will be 0.
-        # num_scheduled_processed and num_rejected_processed remain 0.
-    elif H == 0 and not schedule_df.empty: # Horizon is 0, but schedule has entries (should not happen)
-        print("[evaluate_schedule_actual_costs] Warning: Schedule DataFrame is not empty, but planning horizon is 0. All scheduled cases effectively rejected.")
+    # Handle edge cases for empty schedule or zero horizon
+    if schedule_df.empty and horizon_days == 0:  # No schedule, no horizon = zero costs
+        pass  # All costs and counts remain zero
+    elif schedule_df.empty and horizon_days > 0:  # No schedule, but horizon exists
+        # All defined capacity is idle. No surgeries means no rejections.
+        pass  # overtime_matrix is already zeros, idle_matrix reflects full capacity
+    elif horizon_days == 0 and not schedule_df.empty:
+        logger.warning(
+            "Schedule is not empty, but planning horizon is 0. "
+            "All non-rejected surgeries in schedule will be treated as rejected for cost."
+        )
         for _, row_data in schedule_df.iterrows():
-            if row_data["AssignedDay"] != "Rejected": # Count non-rejected as implicitly rejected due to no capacity
-                 rejection_cost_total += c_rej * row_data["BookedMin"] # Or a different penalty
-            else: # Already rejected
-                 rejection_cost_total += c_rej * row_data["BookedMin"]
-            num_rejected_processed +=1 # Count all as rejected in this edge case
-    
+            # Use COL_BOOKED_MIN for rejection cost as per original logic for r[i] obj term
+            total_rejection_cost += cost_rejection_per_case * row_data[COL_BOOKED_MIN]
+            num_rejected_surgeries += 1
     # Main processing loop only if H > 0 and schedule_df is not empty
-    elif H > 0 and not schedule_df.empty:
+    elif horizon_days > 0 and not schedule_df.empty:
         for _, row_data in schedule_df.iterrows():
-            assigned_day = row_data["AssignedDay"]
-            
-            if assigned_day == "Rejected":
-                rejection_cost_total += c_rej * row_data["BookedMin"]
-                num_rejected_processed += 1
+            assigned_day_val = row_data[COL_ASSIGNED_DAY]
+
+            if assigned_day_val == "Rejected":
+                total_rejection_cost += (
+                    cost_rejection_per_case * row_data[COL_BOOKED_MIN]
+                )
+                num_rejected_surgeries += 1
                 continue
 
             # Process scheduled surgeries
-            # Ensure assigned_day is an integer (it should be if not "Rejected")
-            if not isinstance(assigned_day, (int, np.integer)):
-                # print(f"  [Skipped in eval] Row with SurgID {row_data.get('SurgeryID', 'N/A')}: "
-                #       f"AssignedDay '{assigned_day}' is not an integer. Skipping.")
-                num_skipped_rows += 1
+            if not isinstance(assigned_day_val, (int, np.integer)):
+                logger.debug(
+                    f"Skipping row: AssignedDay '{assigned_day_val}' is not an integer. "
+                    f"SurgeryID: {row_data.get(COL_SURGERY_ID, 'N/A')}."
+                )
+                num_skipped_schedule_rows += 1
                 continue
-            
-            day_idx = int(assigned_day) # Should be safe now
 
-            if not (0 <= day_idx < H): # Check if day is within planning horizon
-                # print(f"  [Skipped in eval] Row with SurgID {row_data.get('SurgeryID', 'N/A')}: "
-                #       f"AssignedDay {day_idx} is out of horizon [0, {H-1}). Skipping.")
-                num_skipped_rows += 1
+            day_idx_assigned = int(assigned_day_val)
+
+            if not (0 <= day_idx_assigned < horizon_days):
+                logger.debug(
+                    f"Skipping row: AssignedDay {day_idx_assigned} is out of horizon "
+                    f"[0, {horizon_days-1}). SurgeryID: {row_data.get(COL_SURGERY_ID, 'N/A')}."
+                )
+                num_skipped_schedule_rows += 1
                 continue
 
             if has_block_column:
-                raw_block_val = row_data.get("AssignedBlock")
-                block_idx = None
-                if pd.notna(raw_block_val): # Handles None and pd.NA
+                assigned_block_val = row_data.get(COL_ASSIGNED_BLOCK)
+                block_idx_assigned: Optional[int] = None
+
+                if pd.notna(assigned_block_val):  # Handles None, np.nan, pd.NA
                     try:
-                        # Convert to float first (to handle "20.0") then to int
-                        block_idx = int(float(raw_block_val))
+                        block_idx_assigned = int(
+                            float(assigned_block_val)
+                        )  # float() handles "20.0"
                     except (ValueError, TypeError):
-                        # print(f"  [Skipped in eval] Row with SurgID {row_data.get('SurgeryID', 'N/A')}: "
-                        #       f"Block value '{raw_block_val}' could not be converted to int. Skipping.")
-                        num_skipped_rows += 1
-                        continue # Skip this surgery if block is invalid
-                
+                        logger.debug(
+                            f"Skipping row: AssignedBlock '{assigned_block_val}' not convertible to int. "
+                            f"SurgeryID: {row_data.get(COL_SURGERY_ID, 'N/A')}."
+                        )
+                        num_skipped_schedule_rows += 1
+                        continue
+
                 # Check if block_idx is valid for the given day_idx
-                if block_idx is None or not (0 <= block_idx < day_blocks.get(day_idx, 0)):
-                    # print(f"  [Skipped in eval] Row with SurgID {row_data.get('SurgeryID', 'N/A')}: "
-                    #       f"AssignedBlock {block_idx} is invalid for Day {day_idx} (capacity: {day_blocks.get(day_idx,0)}). Skipping.")
-                    num_skipped_rows += 1
+                num_blocks_on_assigned_day = daily_block_capacities.get(
+                    day_idx_assigned, 0
+                )
+                if block_idx_assigned is None or not (
+                    0 <= block_idx_assigned < num_blocks_on_assigned_day
+                ):
+                    logger.debug(
+                        f"Skipping row: AssignedBlock {block_idx_assigned} is invalid for Day {day_idx_assigned} "
+                        f"(capacity: {num_blocks_on_assigned_day} blocks). SurgeryID: {row_data.get(COL_SURGERY_ID, 'N/A')}."
+                    )
+                    num_skipped_schedule_rows += 1
                     continue
 
-                # If all checks pass, account for the surgery in the block
-                actual_duration = row_data["ActualDurMin"]
-                
+                # All checks pass, account for the surgery in the block
+                actual_duration = row_data[COL_ACTUAL_DUR_MIN]
+
                 # Ensure indices are within bounds of ot_matrix/idle_matrix
-                if day_idx < ot_matrix.shape[0] and block_idx < ot_matrix.shape[1]:
-                    used_idle_time = min(idle_matrix[day_idx, block_idx], actual_duration)
-                    idle_matrix[day_idx, block_idx] -= used_idle_time
-                    overtime_duration = actual_duration - used_idle_time
-                    ot_matrix[day_idx, block_idx] += overtime_duration
-                    num_scheduled_processed += 1
+                if (
+                    day_idx_assigned < overtime_matrix.shape[0]
+                    and block_idx_assigned < overtime_matrix.shape[1]
+                ):
+
+                    # Reduce idle time by the portion of duration covered by it
+                    time_covered_by_idle = min(
+                        idle_matrix[day_idx_assigned, block_idx_assigned],
+                        actual_duration,
+                    )
+                    idle_matrix[
+                        day_idx_assigned, block_idx_assigned
+                    ] -= time_covered_by_idle
+
+                    # Any remaining duration is overtime
+                    overtime_for_this_surgery = actual_duration - time_covered_by_idle
+                    if overtime_for_this_surgery > 0:
+                        overtime_matrix[
+                            day_idx_assigned, block_idx_assigned
+                        ] += overtime_for_this_surgery
+
+                    num_scheduled_surgeries += 1
                 else:
-                    # This should not happen if day_idx/block_idx checks above and matrix creation are correct
-                    # print(f"  [Skipped in eval - Matrix Index] Row with SurgID {row_data.get('SurgeryID', 'N/A')}: "
-                    #       f"Day {day_idx} or Block {block_idx} out of bounds for cost matrices. Skipping.")
-                    num_skipped_rows += 1
+                    # This should ideally not be reached if matrix creation and index checks are correct
+                    logger.warning(
+                        f"Matrix index out of bounds for Day {day_idx_assigned}, Block {block_idx_assigned}. "
+                        f"SurgeryID: {row_data.get(COL_SURGERY_ID, 'N/A')}. This indicates an internal logic issue."
+                    )
+                    num_skipped_schedule_rows += 1
                     continue
+            else:  # Day-level accounting (if no 'AssignedBlock' column)
+                logger.warning(
+                    f"'{COL_ASSIGNED_BLOCK}' column missing. Day-level cost accounting is not fully "
+                    "implemented in this version. Skipping surgery cost calculation."
+                )
+                num_skipped_schedule_rows += 1
 
-            else: # Day-level accounting (fallback if no 'AssignedBlock' column)
-                # This path should ideally not be taken if extract_schedule works as intended.
-                # For simplicity, this example assumes block-level data is always present.
-                # If day-level accounting is needed, it would sum durations per day and compare to daily capacity.
-                print("[evaluate_schedule_actual_costs] Warning: 'AssignedBlock' column missing, day-level accounting not fully implemented here.")
-                num_skipped_rows +=1 # Count as skipped for now
+    if num_skipped_schedule_rows > 0:
+        logger.warning(
+            f"Skipped {num_skipped_schedule_rows} rows from schedule_df during cost "
+            "evaluation due to invalid/missing day/block assignments or data issues."
+        )
 
-    if num_skipped_rows > 0:
-        print(f"[evaluate_schedule_actual_costs] Warning: Skipped {num_skipped_rows} rows from schedule_df during cost calculation due to invalid day/block assignments or data issues.")
-
-    total_op_cost = ot_matrix.sum() * c_ot + idle_matrix.sum() * c_idle
-    final_total_cost = total_op_cost + rejection_cost_total
+    total_operational_cost = (
+        overtime_matrix.sum() * cost_overtime_per_min
+        + idle_matrix.sum() * cost_idle_per_min
+    )
+    final_total_actual_cost = total_operational_cost + total_rejection_cost
 
     return {
-        "total_actual_cost": final_total_cost,
-        "scheduled": num_scheduled_processed,
-        "rejected": num_rejected_processed,
-        "overtime_min_total": float(ot_matrix.sum()),
-        "idle_min_total": float(idle_matrix.sum()),
-        "overtime_matrix": ot_matrix,
+        "total_actual_cost": final_total_actual_cost,
+        "scheduled_count": num_scheduled_surgeries,
+        "rejected_count": num_rejected_surgeries,
+        "overtime_minutes_total": float(overtime_matrix.sum()),
+        "idle_minutes_total": float(idle_matrix.sum()),
+        "overtime_matrix": overtime_matrix,
         "idle_matrix": idle_matrix,
     }
 
 
 def select_surgeries(
-    df_schedule_pool: pd.DataFrame,
-    horizon_start: pd.Timestamp,
-    params: dict,
-    predictor=None, # Model object for predictions
-) -> list[dict]:
+    df_scheduling_pool: pd.DataFrame,
+    horizon_start_timestamp: pd.Timestamp,
+    params: Dict[str, Any],
+    predictor_model: Optional[Any] = None,  # e.g., scikit-learn model
+) -> List[Dict[str, Any]]:
+    """Selects surgeries for a planning horizon and optionally predicts durations.
+
+    Filters surgeries from `df_scheduling_pool` that fall within the
+    `planning_horizon_days` starting from `horizon_start_timestamp`.
+    If `predictor_model` is provided, it's used to predict surgery durations.
+
+    Args:
+        df_scheduling_pool: DataFrame of all available surgeries. Must include
+            'actual_start', 'main_procedure_id', 'booked_time_minutes',
+            'procedure_duration_min', and feature columns if predictor is used.
+        horizon_start_timestamp: Start timestamp of the planning horizon.
+        params: Configuration dictionary. Must contain 'planning_horizon_days'.
+        predictor_model: Optional trained ML model with a `.predict(X)` method.
+
+    Returns:
+        List of surgery dictionaries for the horizon. Each dict includes 'id'
+        (original index), 'proc_id', 'booked_min', 'actual_dur_min', and
+        'predicted_dur_min' (if predictor_model is used).
+
+    Raises:
+        KeyError: If 'planning_horizon_days' is missing or if feature columns
+            are missing when a predictor model is provided.
     """
-    Selects elective surgeries scheduled to start within the given planning horizon.
-    Optionally attaches predicted durations if a predictor model is provided.
+    try:
+        planning_horizon_days = params["planning_horizon_days"]
+    except KeyError as e:
+        logger.error(f"Missing 'planning_horizon_days' in params for select_surgeries.")
+        raise
 
-    Parameters
-    ----------
-    df_schedule_pool : pd.DataFrame
-        DataFrame containing all surgeries available for scheduling.
-        Must include 'actual_start', 'main_procedure_id', 
-        'booked_time_minutes', 'procedure_duration_min', and feature columns
-        if a predictor is used.
-    horizon_start : pd.Timestamp
-        The starting timestamp of the planning horizon.
-    params : dict
-        Parameter dictionary, must contain 'planning_horizon_days'.
-        Also used for feature column names if predictor is active.
-    predictor : model object, optional
-        A trained machine learning model with a `.predict(X)` method
-        for predicting surgery durations. If None, no predictions are made.
+    horizon_start_date_norm = horizon_start_timestamp.normalize().date()
+    # Horizon end is inclusive of the H-th day. Day 0 to Day H-1.
+    horizon_end_date_norm = (
+        horizon_start_timestamp.normalize() + timedelta(days=planning_horizon_days - 1)
+    ).date()
 
-    Returns
-    -------
-    list[dict]
-        A list of dictionaries, where each dictionary represents a selected surgery
-        and contains keys like 'id', 'proc_id', 'booked_min', 'actual_dur_min',
-        and 'predicted_dur_min' (if predictor is used).
-        The 'id' corresponds to the index of the surgery in `df_schedule_pool`.
-    """
-    H = params["planning_horizon_days"]
-    # Horizon end is inclusive of the H-th day.
-    # If H=7, horizon_start is Day 0, horizon_end is Day 6.
-    horizon_end_date = (horizon_start + timedelta(days=H - 1)).date()
-    horizon_start_date = horizon_start.date()
-
-    # Filter surgeries that fall within the planning horizon date range
-    pool_in_horizon = df_schedule_pool[
-        (df_schedule_pool["actual_start"].dt.date >= horizon_start_date) &
-        (df_schedule_pool["actual_start"].dt.date <= horizon_end_date)
-    ].copy() # Use .copy() to avoid SettingWithCopyWarning
-
-    if pool_in_horizon.empty:
-        # print(
-        #     f"[select_surgeries] No surgeries in pool for horizon "
-        #     f"{horizon_start_date}–{horizon_end_date}."
-        # )
+    # Filter surgeries within the planning horizon date range
+    # Ensure 'actual_start' is datetime before filtering
+    if (
+        COL_ACTUAL_START not in df_scheduling_pool.columns
+        or not pd.api.types.is_datetime64_any_dtype(
+            df_scheduling_pool[COL_ACTUAL_START]
+        )
+    ):
+        logger.error(
+            f"'{COL_ACTUAL_START}' is missing or not datetime in df_scheduling_pool."
+        )
+        # Depending on strictness, could raise error or return empty list
         return []
 
-    # Prepare features for prediction if a predictor is provided
-    if predictor is not None:
-        # Ensure temporal features are present for the predictor
-        pool_in_horizon = add_time_features(pool_in_horizon)
-        
-        # Check for all required feature columns
-        # ALL_FEATURES is assumed to be defined (e.g., from data_processing.py)
-        missing_features = [col for col in ALL_FEATURES if col not in pool_in_horizon.columns]
-        if missing_features:
-            raise KeyError(f"[select_surgeries] Missing feature columns for prediction: {missing_features}")
+    surgeries_in_horizon_df = df_scheduling_pool[
+        (
+            df_scheduling_pool[COL_ACTUAL_START].dt.normalize().dt.date
+            >= horizon_start_date_norm
+        )
+        & (
+            df_scheduling_pool[COL_ACTUAL_START].dt.normalize().dt.date
+            <= horizon_end_date_norm
+        )
+    ].copy()  # Use .copy() to avoid SettingWithCopyWarning
 
-        X_to_predict = pool_in_horizon[ALL_FEATURES].copy()
+    if surgeries_in_horizon_df.empty:
+        logger.info(
+            f"No surgeries found in scheduling pool for horizon "
+            f"{horizon_start_date_norm} to {horizon_end_date_norm}."
+        )
+        return []
+
+    # Prepare features and predict if a predictor_model is provided
+    if predictor_model is not None:
+        # Ensure temporal features are present for the predictor
+        # add_time_features modifies DataFrame in-place or returns modified copy
+        surgeries_in_horizon_df = add_time_features(surgeries_in_horizon_df)
+
+        # Check for all required feature columns in the subset
+        # ALL_FEATURE_COLS is assumed to be defined (e.g., from constants.py)
+        missing_features = [
+            col
+            for col in ALL_FEATURE_COLS
+            if col not in surgeries_in_horizon_df.columns
+        ]
+        if missing_features:
+            msg = f"Missing feature columns for prediction: {missing_features}"
+            logger.error(msg)
+            raise KeyError(msg)
+
+        X_to_predict = surgeries_in_horizon_df[ALL_FEATURE_COLS].copy()
         # Ensure categorical features are strings and handle NaNs for OneHotEncoder
-        for cat_col in CATEGORICAL_FEATURES: # Assumed to be defined
-            X_to_predict[cat_col] = X_to_predict[cat_col].astype(str).fillna("Unknown")
-        
+        for cat_col in CATEGORICAL_FEATURE_COLS:
+            X_to_predict[cat_col] = (
+                X_to_predict[cat_col].astype(str).fillna(UNKNOWN_CATEGORY)
+            )
+
         try:
-            predictions = predictor.predict(X_to_predict).clip(min=1.0).round()
-            pool_in_horizon["predicted_dur_min"] = predictions
+            predictions = predictor_model.predict(X_to_predict)
+            # Clip predictions to be at least MIN_PROCEDURE_DURATION and round
+            surgeries_in_horizon_df["predicted_dur_min"] = np.maximum(
+                predictions, MIN_PROCEDURE_DURATION
+            ).round()
+            logger.debug(
+                f"Generated predictions for {len(surgeries_in_horizon_df)} surgeries."
+            )
         except Exception as e:
-            print(f"[select_surgeries] Error during prediction: {e}. Predicted durations will not be available.")
-            pool_in_horizon["predicted_dur_min"] = np.nan # Or some fallback
+            logger.error(
+                f"Error during prediction in select_surgeries: {e}", exc_info=True
+            )
+            # Fallback: no "predicted_dur_min" column or fill with NaN/booked_min
+            surgeries_in_horizon_df["predicted_dur_min"] = np.nan
 
     # Construct the list of surgery dictionaries
-    surgeries_for_horizon = []
-    for original_idx, row_data in pool_in_horizon.iterrows():
-        surgery_dict = {
-            "id": original_idx, # Original index from df_schedule_pool
-            "proc_id": row_data["main_procedure_id"],
-            "booked_min": row_data["booked_time_minutes"],
-            "actual_dur_min": row_data["procedure_duration_min"],
+    selected_surgeries_list: List[Dict[str, Any]] = []
+    for original_idx, row_data in surgeries_in_horizon_df.iterrows():
+        surgery_dict: Dict[str, Any] = {
+            "id": original_idx,  # Original index from df_scheduling_pool
+            "proc_id": row_data[COL_MAIN_PROCEDURE_ID],
+            COL_BOOKED_MIN: row_data[
+                COL_BOOKED_MIN
+            ],  # Use consistent booked_min key
+            # Ensure actual_dur_min is present, otherwise problem for Oracle/evaluation
+            COL_ACTUAL_DUR_MIN: row_data[COL_PROCEDURE_DURATION_MIN],
         }
-        if predictor is not None and "predicted_dur_min" in row_data:
-            predicted_val = row_data["predicted_dur_min"]
-            if pd.notna(predicted_val):
-                surgery_dict["predicted_dur_min"] = predicted_val
-            # else:
-                # If prediction failed or resulted in NaN, key won't be added
-                # or could be set to a fallback like booked_min
-                # surgery_dict["predicted_dur_min"] = row_data["booked_time_minutes"] 
-        surgeries_for_horizon.append(surgery_dict)
+        if "predicted_dur_min" in row_data and pd.notna(row_data["predicted_dur_min"]):
+            surgery_dict["predicted_dur_min"] = row_data["predicted_dur_min"]
+        # If prediction failed or wasn't run, 'predicted_dur_min' might be missing or NaN.
+        # Downstream solvers using 'predicted_dur_min' must handle its potential absence
+        # or have a fallback (e.g., to COL_BOOKED_MIN).
 
-    # print(
-    #     f"[select_surgeries] Selected {len(surgeries_for_horizon)} surgeries "
-    #     f"for {H}-day horizon starting {horizon_start_date}."
-    # )
-    return surgeries_for_horizon
+        selected_surgeries_list.append(surgery_dict)
+
+    logger.info(
+        f"Selected {len(selected_surgeries_list)} surgeries for {planning_horizon_days}-day "
+        f"horizon starting {horizon_start_date_norm}."
+    )
+    return selected_surgeries_list
