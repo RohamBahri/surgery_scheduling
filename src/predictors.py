@@ -508,165 +508,104 @@ def _precompute_feature_matrix_for_theta(
     return full_feature_matrix, final_column_to_index_map
 
 
-PredictorFunctionType = Callable[[Dict[str, Any]], float]
-
-
 def make_theta_predictor(
     theta_json_path: Union[str, Path],
     df_pool_for_scaling_and_lookup: pd.DataFrame,
-    scaling_method: str = SCALING_STD,
-) -> Optional[PredictorFunctionType]:
-    """Creates a fast predictor function from a JSON file of theta coefficients.
-
-    The predictor function takes a single surgery dictionary as input and
-    returns a predicted duration. It uses precomputed feature transformations
-    based on `df_pool_for_scaling_and_lookup`.
-
-    Args:
-        theta_json_path: Path to the JSON file containing theta coefficients.
-            The JSON keys should match feature names (numeric, or "col=val"
-            for categorical, or constants like "bias").
-        df_pool_for_scaling_and_lookup: DataFrame used for:
-            1. Calculating scaling parameters (mean, std) if `scaling_method` is "std".
-            2. Looking up base feature values for a surgery if not provided in
-               the input `surgery_dict` to the predictor function.
-            It must contain all raw features needed, including `COL_ACTUAL_START`
-            and `COL_BOOKED_MIN`.
-        scaling_method: Scaling to apply to numeric features ("std" or "raw").
-
-    Returns:
-        A predictor function `func(surgery_dict) -> float_prediction`, or None
-        if the theta file cannot be loaded or is invalid.
+    scaling_method: str = SCALING_STD,          # keep for API consistency
+) -> Optional[Callable[[Dict[str, Any]], float]]:
+    """
+    Fast θ-based predictor (std-scaled features only).
     """
     logger.info(f"Creating theta predictor from: {theta_json_path}")
-    theta_coefficients: Dict[str, float]
+
+    # ------------------------------------------------------------------ #
+    # 1. Load θ                                                           #
+    # ------------------------------------------------------------------ #
     try:
-        theta_coefficients = json.loads(Path(theta_json_path).read_text())
-    except FileNotFoundError:
-        logger.error(f"Theta JSON file not found: {theta_json_path}")
-        return None
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding theta JSON file: {theta_json_path}")
-        return None
-
-    # Standardize booked time key in theta_coefficients (compatibility)
-    if (
-        COL_BOOKED_MIN not in theta_coefficients
-        and COL_BOOKED_MIN in theta_coefficients
-    ):
-        theta_coefficients[COL_BOOKED_MIN] = theta_coefficients.pop(
-            COL_BOOKED_MIN
+        theta_coefficients: Dict[str, float] = json.loads(
+            Path(theta_json_path).read_text()
         )
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        logger.error(f"Cannot load theta JSON ({exc}).")
+        return None
 
-    # Define the order of features for matrix construction and theta vector
-    # Numeric features first, then others from theta_coefficients keys
-    ordered_feature_names = THETA_NUMERIC_KEYS_RAW + [
-        key for key in theta_coefficients if key not in THETA_NUMERIC_KEYS_RAW
+    # Harmonise legacy alias ------------------------------------------- #
+    if "booked_min" in theta_coefficients and COL_BOOKED_MIN not in theta_coefficients:
+        theta_coefficients[COL_BOOKED_MIN] = theta_coefficients.pop("booked_min")
+
+    # ------------------------------------------------------------------ #
+    # 2. Feature ordering & θ vector                                      #
+    # ------------------------------------------------------------------ #
+    ordered_feature_names: List[str] = THETA_NUMERIC_KEYS_RAW + [
+        k for k in theta_coefficients if k not in THETA_NUMERIC_KEYS_RAW
     ]
-
-    # Create the theta vector aligned with ordered_feature_names
-    # Fallback for 'booked_time_minutes' alias if 'booked_min' was the primary key in JSON
     theta_vector_np = np.asarray(
-        [
-            theta_coefficients.get(
-                k,  # Primary key lookup
-                (
-                    theta_coefficients.get(
-                        k.replace(COL_BOOKED_MIN, COL_BOOKED_MIN), 0.0
-                    )
-                    if k == COL_BOOKED_MIN
-                    else 0.0
-                ),
-            )
-            for k in ordered_feature_names
-        ],
-        dtype=float,
+        [theta_coefficients.get(k, 0.0) for k in ordered_feature_names], dtype=float
     )
 
-    # Precompute the full feature matrix for all surgeries in df_pool_for_scaling_and_lookup
-    # This matrix (F_pool) will be used for fast lookups.
-    # `_precompute_feature_matrix_for_theta` also returns col_to_idx, but we rely on `ordered_feature_names`
+    # ------------------------------------------------------------------ #
+    # 3. Pre-compute feature matrix                                       #
+    # ------------------------------------------------------------------ #
+    if scaling_method.lower() != SCALING_STD:
+        raise ValueError(
+            "make_theta_predictor is now hard-wired for SCALING_STD only."
+        )
+
+    # Ensure index == 'id' --------------------------------------------- #
+    if "id" in df_pool_for_scaling_and_lookup.columns and (
+        df_pool_for_scaling_and_lookup.index.name != "id"
+    ):
+        df_pool_for_scaling_and_lookup = df_pool_for_scaling_and_lookup.set_index(
+            "id", drop=False
+        )
+
     try:
         F_pool_matrix, _ = _precompute_feature_matrix_for_theta(
             df_pool_for_scaling_and_lookup, ordered_feature_names, scaling_method
         )
     except KeyError as e:
-        logger.error(
-            f"Theta predictor: Missing required column in df_pool for precomputation: {e}"
-        )
+        logger.error(f"Pre-compute failed: {e}")
         return None
 
     base_predictions_for_pool = F_pool_matrix @ theta_vector_np
 
-    # Create a mapping from original DataFrame index (surgery ID) to row position in F_pool_matrix
-    # This allows quick retrieval of the base prediction for a surgery.
-    original_id_to_matrix_row_idx: Dict[Any, int] = {
-        idx_val: pos for pos, idx_val in enumerate(df_pool_for_scaling_and_lookup.index)
+    id_to_row: Dict[Any, int] = {
+        idx: pos for pos, idx in enumerate(df_pool_for_scaling_and_lookup.index)
     }
 
-    # Check if COL_BOOKED_MIN is in df_pool for potential override logic
-    # If not, the override logic won't work as intended.
-    if COL_BOOKED_MIN not in df_pool_for_scaling_and_lookup.columns:
-        logger.warning(
-            f"'{COL_BOOKED_MIN}' not in df_pool_for_scaling_and_lookup. "
-            "Theta predictor's booked_min override logic might not function correctly."
-        )
-        can_override_booked_min = False
-    else:
-        can_override_booked_min = True
+    # Mean / σ for booked-time column (needed for scaled delta) -------- #
+    mu_b = df_pool_for_scaling_and_lookup[COL_BOOKED_MIN].mean()
+    sigma_b = df_pool_for_scaling_and_lookup[COL_BOOKED_MIN].std(ddof=0)
+    if sigma_b == 0.0:
+        sigma_b = 1.0  # avoid div-by-zero
 
-    def _predict_single_surgery_theta(surgery_details_dict: Dict[str, Any]) -> float:
-        """Inner predictor function using precomputed data."""
-        surgery_id = surgery_details_dict["id"]
+    # Position of booked_min coeff in θ vector ------------------------- #
+    booked_coeff_idx = THETA_NUMERIC_KEYS_RAW.index(COL_BOOKED_MIN)
+    booked_coeff_val = theta_vector_np[booked_coeff_idx]
+
+    # ------------------------------------------------------------------ #
+    # 4. Predictor closure                                                #
+    # ------------------------------------------------------------------ #
+    def _predict_single_surgery_theta(surg_dict: Dict[str, Any]) -> float:
+        sid = surg_dict["id"]
+
         try:
-            matrix_row_idx = original_id_to_matrix_row_idx[surgery_id]
-            prediction = float(base_predictions_for_pool[matrix_row_idx])
+            row_idx = id_to_row[sid]
+            pred = float(base_predictions_for_pool[row_idx])
         except KeyError:
-            # This case should ideally not happen if surgery_details_dict["id"]
-            # always refers to an ID present during precomputation.
-            # If it can happen, we might need to compute features on-the-fly.
-            logger.error(
-                f"Theta predictor: Surgery ID {surgery_id} not found in precomputed map. "
-                "This indicates a mismatch or an unseen surgery. Returning 0.0."
-            )  # Or handle by re-computing features, but that defeats "fast" purpose.
-            return 0.0  # Fallback, or raise error
+            logger.error(f"Surgery ID {sid} not in θ cache – returning 0.0.")
+            return 0.0
 
-        # Optional override if 'booked_min' is provided in surgery_details_dict
-        # and is different from the one in df_pool_for_scaling_and_lookup
-        # This logic assumes the first coefficient in theta_vector_np corresponds to 'booked_min'
-        if COL_BOOKED_MIN in surgery_details_dict and can_override_booked_min:
-            try:
-                original_booked_min = df_pool_for_scaling_and_lookup.at[
-                    surgery_id, COL_BOOKED_MIN
-                ]
-                override_booked_min = float(surgery_details_dict[COL_BOOKED_MIN])
+        # -------- scaled booked-time override (optional) -------------- #
+        if COL_BOOKED_MIN in surg_dict:
+            orig_b = df_pool_for_scaling_and_lookup.at[sid, COL_BOOKED_MIN]
+            new_b = float(surg_dict[COL_BOOKED_MIN])
 
-                # Only apply delta if the first feature in theta_vector_np IS booked_min's coefficient
-                # And THETA_NUMERIC_KEYS_RAW[0] is indeed COL_BOOKED_MIN
-                if (
-                    ordered_feature_names[0] == THETA_NUMERIC_KEYS_RAW[0]
-                    and THETA_NUMERIC_KEYS_RAW[0] == COL_BOOKED_MIN
-                ):
-                    booked_min_coeff = theta_vector_np[0]
-                    # The delta must be applied based on scaled difference if original features were scaled
-                    # This is complex: if scaling was 'std', the delta should be (new_val_scaled - old_val_scaled) * coeff
-                    # Original implementation just used raw difference * coeff.
-                    # For simplicity and matching original, using raw difference:
-                    delta_duration = (
-                        override_booked_min - original_booked_min
-                    ) * booked_min_coeff
-                    prediction += delta_duration
-                else:
-                    logger.warning(
-                        "Theta predictor: Booked_min override attempted but feature order/coeff mapping is unclear."
-                    )
+            if new_b != orig_b:
+                delta_scaled = (new_b - mu_b) / sigma_b - (orig_b - mu_b) / sigma_b
+                pred += delta_scaled * booked_coeff_val
 
-            except Exception as e:  # Catch float conversion errors or missing .at[id]
-                logger.warning(
-                    f"Theta predictor: Error during booked_min override for surg_id {surgery_id}: {e}"
-                )
+        return max(MIN_PROCEDURE_DURATION, round(pred, 1))
 
-        return max(MIN_PROCEDURE_DURATION, round(prediction, 1))
-
-    logger.info("Theta predictor function created successfully.")
+    logger.info("Theta predictor (std-scaled) created successfully.")
     return _predict_single_surgery_theta

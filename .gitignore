@@ -11,6 +11,7 @@ venv/
 # Data and presentation files
 data/
 presentations/
+figures/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -25,3 +26,6 @@ outputs/
 # IDE / editor folders
 .vscode/
 .idea/
+
+# tmp files
+tmp_*

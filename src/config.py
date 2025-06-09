@@ -18,7 +18,7 @@ PARAMS: dict[str, any] = {
     "theta_path": "outputs/final_theta.json",  # For integrated model coefficients
     "warmup_weeks": 52,  # Duration of the warm-up period in weeks
     "planning_horizon_days": 7,  # Duration of each planning horizon in days
-    "NUM_HORIZONS": 10,  # Number of planning horizons to simulate
+    "NUM_HORIZONS": 20,  # Number of planning horizons to simulate
     # -------------------------------------------------------------------------
     # Operating Room Calendar & Capacity Settings
     # -------------------------------------------------------------------------
@@ -28,6 +28,8 @@ PARAMS: dict[str, any] = {
     "blocks_per_day": 1,  # Number of blocks per OR per day (typically 1 for 8h blocks)
     "capacity_reduction_percentage": 0.6,  # Factor to reduce historical capacity (0.0 to 1.0)
     "min_blocks_after_reduction": 1,  # Min blocks per day after reduction
+    "min_procedure_duration": 1,  # Minimum procedure duration in minutes
+    "max_procedure_duration": 480,  # Maximum procedure duration in minutes
     # -------------------------------------------------------------------------
     # Cost Coefficients for Optimization
     # -------------------------------------------------------------------------
@@ -37,8 +39,8 @@ PARAMS: dict[str, any] = {
     # -------------------------------------------------------------------------
     # Sampling / SAA & Machine Learning Hyperparameters
     # -------------------------------------------------------------------------
-    "run_saa": False,  # If True, runs the Sample Average Approximation model
-    "saa_scenarios": 10,  # Number of scenarios for SAA
+    "run_saa": True,  # If True, runs the Sample Average Approximation model
+    "saa_scenarios": 100,  # Number of scenarios for SAA
     "saa_random_seed": 42,  # Random seed for SAA scenario generation
     "knn_neighbors": 5,  # Default number of neighbors for KNN predictor
     "knn_k_options": [3, 5, 7, 9, 11],  # Grid of k values for KNN tuning
@@ -53,15 +55,19 @@ PARAMS: dict[str, any] = {
     # -------------------------------------------------------------------------
     # Integrated Model (Predict-then-Optimize with Gurobi) Settings
     # -------------------------------------------------------------------------
-    "epsilon_block_mae": 100,  # Epsilon for per-block MAE constraint (minutes)
+    "epsilon_block_mae": 60,  # Epsilon for per-block MAE constraint (minutes)
     "feature_scaling": "std",  # "std" for standardization, "raw" for no scaling
-    "max_error_bound": 1000,
     "prediction_error_weight": 50,  # Weight for prediction error in the objective
-    "time_limit_monolithic": 36000,
+    # -------------------------------------------------------------------------
+    # Integrated Joint Predict-and-Optimize Settings
+    # -------------------------------------------------------------------------
+    "integrated_alpha": 0.1,          # Trade-off weight α ∈ [0,1] between prediction loss and scheduling cost
+    "integrated_lambda": 0.5,         # L1 penalty λ on regression coefficients θ_j
+    "num_planning_weeks": 10,  # Number of weeks to plan in the integrated model
     # -------------------------------------------------------------------------
     # Gurobi Solver Parameters (can be overridden by debug_mode logic)
     # -------------------------------------------------------------------------
-    "gurobi_timelimit": 600,  # Default Gurobi time limit in seconds
+    "gurobi_timelimit": 1800,  # Default Gurobi time limit in seconds
     "gurobi_mipgap": 0.01,  # Default Gurobi MIP gap
     "gurobi_heuristics": 0.05,  # Default Gurobi heuristics aggressiveness
     "gurobi_output_flag": 0,  # 0 for silent, 1 for verbose

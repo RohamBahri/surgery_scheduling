@@ -3,6 +3,7 @@ Core Gurobi model building and solving utilities for surgery scheduling.
 Includes implementations for deterministic, predictive, clairvoyant, SAA,
 and integrated optimization models.
 """
+
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,10 +31,6 @@ from src.constants import (
     GUROBI_VAR_ZSPILL_PREFIX,
     MAX_OVERTIME_MINUTES_PER_BLOCK,
     NUMERIC_FEATURE_COLS,
-    SCALING_RAW,  # Default scaling for _build_feature_matrix if not specified
-    SCALING_STD,
-    GUROBI_VAR_BLK_ABS_ERR_PREFIX,  # For integrated model
-    GUROBI_VAR_BLK_SIGNED_ERR_PREFIX,  # For integrated model
 )
 from src.data_processing import add_time_features  # For _build_feature_matrix
 
@@ -364,6 +361,161 @@ def solve_saa_model(
         )
 
     return {"obj": obj_val, "status": model_saa.Status, "model": model_saa}
+
+
+def solve_saa_benders(
+    surgeries_info: List[Dict[str, Any]],
+    daily_block_counts: Dict[int, int],
+    params_config: Dict[str, float],
+    scenario_duration_matrix: np.ndarray,
+) -> Dict[str, Any]:
+    """
+    Solve the Sample Average Approximation (SAA) via Benders decomposition.
+
+    Parameters
+    ----------
+    surgeries_info : list of dict
+        Metadata for each surgery (unused directly but kept for consistency).
+    daily_block_counts : dict[int, int]
+        Mapping from day index to number of OR blocks available that day.
+    params_config : dict
+        Configuration parameters including:
+            - block_size_minutes: int
+            - cost_overtime_per_min: float
+            - cost_idle_per_min: float
+            - cost_rejection_per_case: float
+    scenario_duration_matrix : np.ndarray, shape (n_surgeries, n_scenarios)
+        Matrix of durations (in minutes) for each surgery under each scenario.
+
+    Returns
+    -------
+    result : dict
+        Dictionary with keys:
+            - status: Gurobi termination status code
+            - obj: optimal objective value or None if not optimal
+            - model: the Gurobi model object (with solution attributes)
+    """
+    # Input validation
+    num_surgeries = len(surgeries_info)
+    if (
+        not isinstance(scenario_duration_matrix, np.ndarray)
+        or scenario_duration_matrix.ndim != 2
+    ):
+        raise ValueError("scenario_duration_matrix must be a 2-D numpy array")
+    if scenario_duration_matrix.shape[0] != num_surgeries:
+        raise ValueError(
+            f"scenario_duration_matrix row count ({scenario_duration_matrix.shape[0]})"
+            f" must equal number of surgeries ({num_surgeries})"
+        )
+    n_scenarios = scenario_duration_matrix.shape[1]
+
+    # Build list of blocks (day, block_index)
+    blocks: List[Tuple[int, int]] = []
+    for day, count in daily_block_counts.items():
+        if count < 1:
+            continue
+        for block in range(count):
+            blocks.append((day, block))
+    if not blocks:
+        raise ValueError("No operating room blocks provided in daily_block_counts.")
+
+    # Extract parameters
+    try:
+        block_size = params_config["block_size_minutes"]
+        cost_ot = params_config["cost_overtime_per_min"]
+        cost_it = params_config["cost_idle_per_min"]
+        reject_cost = params_config["cost_rejection_per_case"]
+        planning_horizon_days = params_config["planning_horizon_days"]
+    except KeyError as e:
+        raise KeyError(f"Missing required parameter: {e.args[0]}")
+
+    # Initialize model
+    model = gp.Model("SAA_Benders")
+    set_gurobi_model_parameters(model, params_config)
+    model.Params.LazyConstraints = 1
+
+    # First-stage decision variables
+    x = model.addVars(
+        ((i, d, b) for i in range(num_surgeries) for (d, b) in blocks),
+        vtype=GRB.BINARY,
+        name="x",
+    )
+    r = model.addVars(range(num_surgeries), vtype=GRB.BINARY, name="r")
+    theta = model.addVar(lb=0.0, name="theta")
+
+    # Constraints: each surgery is assigned exactly once or rejected
+    for i in range(num_surgeries):
+        model.addConstr(
+            quicksum(x[i, d, b] for (d, b) in blocks) + r[i] == 1,
+            name=f"assign_reject_{i}",
+        )
+
+    model_durations: Dict[int, float] = {
+        i: float(surg[COL_BOOKED_MIN])
+        for i, surg in enumerate(surgeries_info)
+    }
+
+    # Re‐build the same list of (day, block) tuples
+    all_block_tuples = [
+        (d, b)
+        for d in range(params_config["planning_horizon_days"])
+        for b in range(daily_block_counts.get(d, 0))
+    ]
+
+    if all_block_tuples:
+        _add_single_case_spillover_constraints(
+            model,                # your Gurobi model
+            x,                    # the x[i,d,b] vars
+            model_durations,      # dict of booked‐time durations
+            all_block_tuples,     # list of (day, block) pairs
+            block_size            # e.g. params_config["block_size_minutes"]
+        )
+
+    model.setObjective(
+        quicksum(reject_cost * r[i] for i in range(num_surgeries))
+        + theta,
+        GRB.MINIMIZE,
+    )
+
+    def _benders_callback(m: gp.Model, where: int) -> None:
+        """
+        Gurobi callback to add Benders cuts (lazy constraints).
+        """
+        if where != GRB.Callback.MIPSOL:
+            return
+
+        # Retrieve current solution values for x
+        x_val = m.cbGetSolution(x)
+
+        # Compute expected recourse cost across scenarios
+        total_rec = 0.0
+        for k in range(n_scenarios):
+            rec_k = 0.0
+            durations_k = scenario_duration_matrix[:, k]
+            for d, b in blocks:
+                assigned_time = sum(
+                    durations_k[i] * x_val[(i, d, b)] for i in range(num_surgeries)
+                )
+                if assigned_time > block_size:
+                    rec_k += cost_ot * (assigned_time - block_size)
+                else:
+                    rec_k += cost_it * (block_size - assigned_time)
+            total_rec += rec_k
+        avg_rec = total_rec / n_scenarios
+
+        # Add Benders cut
+        m.cbLazy(theta >= avg_rec)
+        logger.debug(f"Benders cut added: theta >= {avg_rec:.2f}")
+
+    # Optimize with lazy cuts
+    logger.info("Starting Benders decomposition solve (SAA_Benders)")
+    model.optimize(_benders_callback)
+
+    status = model.Status
+    obj_val = model.ObjVal if status == GRB.OPTIMAL else None
+    logger.info(f"Benders solve complete: status={status}, obj={obj_val}")
+
+    return {"status": status, "obj": obj_val, "model": model}
 
 
 def _solve_single_stage_deterministic_model(

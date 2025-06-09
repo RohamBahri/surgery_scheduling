@@ -10,7 +10,7 @@ import logging
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Optional  
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 import numpy as np
 
@@ -56,7 +56,8 @@ from src.solver_utils import (
     solve_clairvoyant_model,
     solve_deterministic_model,
     solve_predictive_model,
-    solve_saa_model,
+    # solve_saa_model,
+    solve_saa_benders as solve_saa_model,
 )
 from src.stochastic_utils import sample_scenarios, build_empirical_distributions
 
@@ -75,6 +76,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(DEFAULT_LOGGER_NAME)
 
+logging.getLogger("gurobipy").setLevel(logging.WARNING)
 
 # Type alias for solver functions used in the main loop
 SolverFunctionType = Callable[
@@ -305,7 +307,7 @@ def main() -> None:
 
         if theta_predictor_func is not None:
             surgeries_map_for_solvers["Integrated"] = (
-                solve_predictive_model, 
+                solve_predictive_model,
                 attach_pred(
                     deepcopy(base_surgeries_list_for_horizon),
                     theta_predictor_func,
@@ -444,7 +446,9 @@ def main() -> None:
             "aggregated_output_file", "outputs/agg_results.json"
         )
         save_aggregated_results(
-            output_data_structure, aggregated_output_path, method_tags_to_aggregate=method_tags_ordered
+            output_data_structure,
+            aggregated_output_path,
+            method_tags_to_aggregate=method_tags_ordered,
         )
     elif not output_data_structure.get(JSON_KEY_HORIZONS):
         logger.info("No horizons were processed. Skipping final summary and saving.")
