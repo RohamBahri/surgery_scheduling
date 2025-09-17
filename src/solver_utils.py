@@ -1,10 +1,4 @@
-"""
-Core Gurobi model building and solving utilities for surgery scheduling.
-Includes implementations for deterministic, predictive, clairvoyant, SAA,
-and integrated optimization models with graduated overtime costs.
-
-All models use consistent objective functions, constraints, and variable bounds.
-"""
+"""Utility functions for building and solving surgery scheduling models."""
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,27 +113,16 @@ def solve_saa_model(
     config: AppConfig,
     scenario_duration_matrix: np.ndarray,
 ) -> Dict[str, Any]:
-    """
-    Solve the Sample Average Approximation (SAA) via Benders decomposition
-    with graduated overtime costs and consistent objective function.
+    """Solve the Sample Average Approximation scheduling model.
 
-    All operational costs (OT/idle) are treated as recourse costs.
+    Args:
+        surgeries_info: Metadata for each surgery
+        daily_block_counts: Number of blocks available by day
+        config: Application configuration
+        scenario_duration_matrix: Scenario durations per surgery
 
-    Parameters
-    ----------
-    surgeries_info : list of dict
-        Metadata for each surgery.
-    daily_block_counts : dict[int, int]
-        Mapping from day index to number of OR blocks available that day.
-    config : AppConfig
-        Application configuration.
-    scenario_duration_matrix : np.ndarray, shape (n_surgeries, n_scenarios)
-        Matrix of durations (in minutes) for each surgery under each scenario.
-
-    Returns
-    -------
-    result : dict
-        Dictionary with keys: status, obj, model
+    Returns:
+        Dictionary containing solver status, objective value, and model
     """
     # Input validation
     num_surgeries = len(surgeries_info)
@@ -232,15 +215,15 @@ def solve_saa_model(
 
     model.setObjective(rejection_cost_total + theta, GRB.MINIMIZE)
 
-    def _benders_callback_graduated(m: gp.Model, where: int) -> None:
-        """Gurobi callback to add Benders cuts with graduated overtime costs."""
+    def _optimization_callback(model: gp.Model, where: int) -> None:
+        """Gurobi callback to add Benders cuts during the solve."""
         if where != GRB.Callback.MIPSOL:
             return
 
         # Retrieve current solution values for x
-        x_val = m.cbGetSolution(x)
+        x_val = model.cbGetSolution(x)
 
-        # Compute expected recourse cost across scenarios with graduated overtime
+        # Compute expected recourse cost across scenarios
         total_rec = 0.0
         for k in range(n_scenarios):
             rec_k = 0.0
@@ -260,16 +243,16 @@ def solve_saa_model(
         avg_rec = total_rec / n_scenarios
 
         # Add Benders cut
-        m.cbLazy(theta >= avg_rec)
+        model.cbLazy(theta >= avg_rec)
         logger.debug(f"Benders cut added: theta >= {avg_rec:.2f}")
 
     # Optimize with lazy cuts
-    logger.info("Starting Benders decomposition solve (SAA)")
-    model.optimize(_benders_callback_graduated)
+    logger.info("Starting SAA optimization")
+    model.optimize(_optimization_callback)
 
     status = model.Status
     obj_val = model.ObjVal if status == GRB.OPTIMAL else None
-    logger.info(f"Benders solve complete: status={status}, obj={obj_val}")
+    logger.info("SAA optimization finished: status=%s, obj=%s", status, obj_val)
 
     return {"status": status, "obj": obj_val, "model": model}
 
@@ -282,21 +265,20 @@ def _solve_single_stage_deterministic_model(
     model_name_suffix: str,
     is_lp_relaxation: bool = False,
 ) -> Dict[str, Any]:
-    """Core solver for single-stage deterministic assignment models with graduated overtime costs.
+    """Core solver for deterministic assignment models.
 
-    This function builds and solves models like "Deterministic" (using booked times),
-    "Predictive" (using ML predictions), or "Clairvoyant" (using actual durations).
+    Builds and solves variants such as deterministic, predictive, or clairvoyant models.
 
     Args:
-        surgeries_info: List of surgery data.
-        daily_block_counts: Maps day index to number of blocks.
-        config: Application configuration.
-        duration_key_for_model: The key in surgery_info dicts to use for durations.
-        model_name_suffix: Suffix for the Gurobi model name.
-        is_lp_relaxation: If True, relaxes binary variables to continuous.
+        surgeries_info: List of surgery data
+        daily_block_counts: Maps day index to number of blocks
+        config: Application configuration
+        duration_key_for_model: Key in surgery dictionaries for durations
+        model_name_suffix: Suffix for the Gurobi model name
+        is_lp_relaxation: If True, relaxes binary variables to continuous
 
     Returns:
-        Dictionary with "obj", "status", and "model".
+        Dictionary with objective, status, and model information
     """
 
     num_surgeries = len(surgeries_info)
@@ -483,10 +465,7 @@ def solve_clairvoyant_model(
 
 
 def validate_model_consistency(config: AppConfig) -> None:
-    """
-    Validate that all model parameters are consistent.
-    Call this function before running any models to catch configuration issues.
-    """
+    """Validate that configuration parameters are consistent before solving."""
     logger.info("Validating model consistency...")
 
     # Check cost parameters exist
@@ -522,7 +501,7 @@ def validate_model_consistency(config: AppConfig) -> None:
     # Check cost hierarchy makes sense
     normal_cost = config.costs.overtime_per_min
 
-    logger.info("✓ Model consistency validated")
+    logger.info("Model consistency validated")
     logger.info(f"  Duration bounds: [{min_dur}, {max_dur}] minutes")
     logger.info(f"  Overtime threshold: {ot_threshold} minutes")
     logger.info(f"  Overtime costs: ${normal_cost}/min (normal)")
