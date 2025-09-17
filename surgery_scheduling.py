@@ -1,4 +1,3 @@
-# surgery_scheduling.py
 """
 Main script for running elective surgery scheduling experiments.
 
@@ -6,6 +5,7 @@ This script loads and processes surgery data, trains predictive models,
 simulates scheduling over multiple horizons using various methods (deterministic,
 predictive, SAA, clairvoyant), evaluates the schedules, and outputs results.
 """
+
 import logging
 from copy import deepcopy
 from datetime import timedelta
@@ -14,19 +14,11 @@ from typing import Any, Callable, Dict, List, Tuple, Optional
 
 import numpy as np
 
-
-from src.config import PARAMS
+from src.config import CONFIG
 from src.constants import (
-    COL_ACTUAL_START,
-    COL_OPERATING_ROOM,
-    DEFAULT_LOGGER_NAME,
-    HORIZON_START_DATE_PARAM_KEY,
-    JSON_KEY_CONFIG,
-    JSON_KEY_CONFIG_NUM_HORIZONS,
-    JSON_KEY_CONFIG_SAA_SCENARIOS,
-    JSON_KEY_HORIZONS,
-    LOG_DATE_FORMAT,
-    LOG_FORMAT,
+    DataColumns,
+    JSONKeys,
+    LoggingConstants,
 )
 from src.data_processing import (
     attach_pred,
@@ -46,6 +38,8 @@ from src.predictors import (
     train_knn_predictor,
     train_lasso_asym,
     train_lasso_predictor,
+    train_xgboost_predictor,
+    tune_knn_k_for_optimization,
 )
 from src.scheduling_utils import (
     evaluate_schedule_actual_costs,
@@ -56,8 +50,10 @@ from src.solver_utils import (
     solve_clairvoyant_model,
     solve_deterministic_model,
     solve_predictive_model,
-    # solve_saa_model,
-    solve_saa_benders as solve_saa_model,
+    solve_saa_model,
+    solve_knn_model,
+    solve_utilization_maximization_model,
+    solve_balanced_utilization_model,
 )
 from src.stochastic_utils import sample_scenarios, build_empirical_distributions
 
@@ -67,20 +63,19 @@ ROOT_DIR = Path(__file__).resolve().parent
 # Configure basic logging
 logging.basicConfig(
     level=logging.INFO,
-    format=LOG_FORMAT,
-    datefmt=LOG_DATE_FORMAT,
+    format=LoggingConstants.LOG_FORMAT,
+    datefmt=LoggingConstants.LOG_DATE_FORMAT,
     handlers=[
         logging.StreamHandler(),  # Log to console
-        # logging.FileHandler("surgery_scheduling.log") # Optional: log to file
     ],
 )
-logger = logging.getLogger(DEFAULT_LOGGER_NAME)
+logger = logging.getLogger(LoggingConstants.DEFAULT_LOGGER_NAME)
 
 logging.getLogger("gurobipy").setLevel(logging.WARNING)
 
 # Type alias for solver functions used in the main loop
 SolverFunctionType = Callable[
-    [List[Dict[str, Any]], Dict[int, int], Dict[str, Any], Any], Dict[str, Any]
+    [List[Dict[str, Any]], Dict[int, int], Any, Any], Dict[str, Any]
 ]
 
 
@@ -88,7 +83,7 @@ def _generate_brief_console_output(
     planned_objective: Optional[float], kpi_results: Dict[str, Any]
 ) -> str:
     """Generates a brief summary string for console output for one method's results."""
-    if kpi_results is None or not kpi_results:  # Check if kpi_results is empty or None
+    if kpi_results is None or not kpi_results:
         return "plan=NA | kpi_results=NA"
 
     obj_str = f"{planned_objective:.0f}" if planned_objective is not None else "NA"
@@ -112,14 +107,17 @@ def main() -> None:
     """Main function to run the elective surgery scheduling experiment."""
 
     logger.info(
-        "\n" + "=" * 30 + " Elective Surgery Scheduling – 8h Blocks " + "=" * 30
+        "\n"
+        + "=" * 30
+        + " Elective Surgery Scheduling – 8h Blocks with Graduated Overtime"
+        + "=" * 30
     )
 
     # --- 1. Load & Split Data ---
     logger.info("Loading and splitting data...")
-    all_surgeries_df = load_data(PARAMS)
+    all_surgeries_df = load_data(CONFIG)
     df_warm_up, df_pool_initial, horizon_start_date_initial = split_data(
-        all_surgeries_df, PARAMS
+        all_surgeries_df, CONFIG
     )
 
     # Make mutable copies for the loop
@@ -129,43 +127,34 @@ def main() -> None:
     # --- 2. Build Empirical Distributions (for SAA) ---
     logger.info("Building empirical distributions for SAA...")
     procedure_duration_samples, all_pooled_duration_samples = (
-        build_empirical_distributions(df_warm_up, PARAMS)
+        build_empirical_distributions(df_warm_up, CONFIG)
     )
 
     # --- 3. Configuration & Output Setup ---
-    run_saa_flag = PARAMS.get("run_saa", False)
-    is_debug_mode = PARAMS.get("debug_mode", False)
+    run_saa_flag = CONFIG.saa.run_saa
+    is_debug_mode = CONFIG.debug_mode
     save_results_flag = not is_debug_mode
 
-    # Update PARAMS if in debug mode (original logic)
+    # Update CONFIG if in debug mode
     if is_debug_mode:
         logger.warning(
             "Running in DEBUG MODE. Overriding some parameters for a faster run."
         )
-        PARAMS.update(
-            {
-                "run_saa": False,  # Often SAA is slow, disable in debug
-                "gurobi_timelimit": PARAMS.get(
-                    "gurobi_timelimit_debug", 10
-                ),  # Use specific debug keys or defaults
-                "gurobi_mipgap": PARAMS.get("gurobi_mipgap_debug", 0.10),
-                "NUM_HORIZONS": PARAMS.get(
-                    "num_horizons_debug", 1
-                ),  # Control number of horizons in debug
-            }
-        )
-        run_saa_flag = PARAMS["run_saa"]  # Re-fetch after potential override
-        # Gurobi params in PARAMS will be picked up by set_gurobi_model_parameters
+        CONFIG.saa.run_saa = False  # Often SAA is slow, disable in debug
+        CONFIG.gurobi.timelimit = CONFIG.gurobi.timelimit_debug
+        CONFIG.gurobi.mipgap = CONFIG.gurobi.mipgap_debug
+        CONFIG.data.num_horizons = CONFIG.gurobi.num_horizons_debug
+        run_saa_flag = CONFIG.saa.run_saa  # Re-fetch after potential override
 
     # Initialize output structure
     output_data_structure: Dict[str, Any] = {}
     if save_results_flag:
         output_data_structure = initialize_output_structure(
-            PARAMS.get("saa_scenarios", 0), PARAMS.get("NUM_HORIZONS", 0)
+            CONFIG.saa.scenarios, CONFIG.data.num_horizons
         )
         logger.info(
-            f"Results will be saved. SAA Scenarios: {output_data_structure[JSON_KEY_CONFIG].get(JSON_KEY_CONFIG_SAA_SCENARIOS, 'N/A')}, "
-            f"Num Horizons: {output_data_structure[JSON_KEY_CONFIG].get(JSON_KEY_CONFIG_NUM_HORIZONS, 'N/A')}."
+            f"Results will be saved. SAA Scenarios: {output_data_structure[JSONKeys.CONFIG].get(JSONKeys.CONFIG_SAA_SCENARIOS, 'N/A')}, "
+            f"Num Horizons: {output_data_structure[JSONKeys.CONFIG].get(JSONKeys.CONFIG_NUM_HORIZONS, 'N/A')}."
         )
     else:
         logger.info(
@@ -174,37 +163,67 @@ def main() -> None:
 
     # --- 4. Train Predictive Models ---
     logger.info("Training predictive models...")
-    lasso_model = train_lasso_predictor(df_warm_up, PARAMS)
-    lasso_asym_model = train_lasso_asym(df_warm_up, PARAMS)
-    knn_model = train_knn_predictor(df_warm_up, PARAMS)
+    lasso_model = train_lasso_predictor(df_warm_up, CONFIG)
+    lasso_asym_model = train_lasso_asym(df_warm_up, CONFIG)
+    knn_model = train_knn_predictor(df_warm_up, CONFIG)
+    xgboost_model = train_xgboost_predictor(df_warm_up, CONFIG)
 
-    theta_predictor_func: Optional[Callable[[Dict[str, Any]], float]] = None
-    theta_json_file_path = ROOT_DIR / PARAMS["theta_path"]
-    if theta_json_file_path.exists():
+    # Tune K for KNN solver
+    logger.info("Tuning K parameter for KNN optimization...")
+    optimal_k = tune_knn_k_for_optimization(df_warm_up, CONFIG)
+    CONFIG.ml.knn_neighbors = optimal_k
+    logger.info(f"Optimal K for KNN optimization: {optimal_k}")
+
+    # Load multiple theta predictors for different alpha values
+    theta_predictors: Dict[str, Callable[[Dict[str, Any]], float]] = {}
+    theta_dir = ROOT_DIR / Path(CONFIG.data.theta_path).parent
+    theta_alpha_files = list(theta_dir.glob("theta_alpha_*.json"))
+
+    if theta_alpha_files:
         logger.info(
-            f"Found theta JSON at {theta_json_file_path}. Creating theta predictor."
+            f"Found {len(theta_alpha_files)} theta files for different alpha values."
         )
-        # Pass all_surgeries_df for scaling reference, as it was used in training run_integrated.py
-        theta_predictor_func = make_theta_predictor(
-            theta_json_file_path, all_surgeries_df
-        )
+        for theta_file in sorted(theta_alpha_files):
+            # Extract alpha value from filename
+            alpha_str = theta_file.stem.replace("theta_alpha_", "")
+            try:
+                alpha_val = float(alpha_str)
+                predictor = make_theta_predictor(theta_file, all_surgeries_df)
+                if predictor is not None:
+                    theta_predictors[f"Integrated_{alpha_str}"] = predictor
+                    logger.info(f"Created theta predictor for alpha={alpha_val}")
+            except ValueError:
+                logger.warning(
+                    f"Could not parse alpha value from filename: {theta_file}"
+                )
     else:
-        logger.warning(
-            f"Theta JSON file {theta_json_file_path} not found. Skipping 'Integrated' (theta) model."
-        )
+        # Fallback to original single theta file
+        theta_json_file_path = ROOT_DIR / CONFIG.data.theta_path
+        if theta_json_file_path.exists():
+            logger.info(
+                f"Found single theta JSON at {theta_json_file_path}. Creating theta predictor."
+            )
+            theta_predictor_func = make_theta_predictor(
+                theta_json_file_path, all_surgeries_df
+            )
+            if theta_predictor_func is not None:
+                theta_predictors["Integrated"] = theta_predictor_func
+        else:
+            logger.warning(f"No theta JSON files found. Skipping integrated models.")
 
     # --- 5. Define Methods to Run & Report ---
-    # These tags are used for structuring results and console output
-    # Order here defines console output order.
     method_tags_ordered: List[str] = []
     if run_saa_flag:
         method_tags_ordered.append("SAA")
-    if theta_predictor_func is not None:
-        method_tags_ordered.append("Integrated")
-    method_tags_ordered.extend(["Det", "Lasso", "LassoAsym", "KNN", "Oracle"])
+    # Add all integrated models (sorted by alpha value for consistent ordering)
+    for integrated_method_name in sorted(theta_predictors.keys()):
+        method_tags_ordered.append(integrated_method_name)
+    method_tags_ordered.extend(
+        ["Det", "Lasso", "LassoAsym", "KNN", "XGBoost", "UtilMax", "BalancedUtil", "Oracle"]
+    )
 
-    planning_horizon_duration_days = PARAMS["planning_horizon_days"]
-    num_horizons_to_run = PARAMS["NUM_HORIZONS"]  # Can be overridden by debug mode
+    planning_horizon_duration_days = CONFIG.data.planning_horizon_days
+    num_horizons_to_run = CONFIG.data.num_horizons
 
     # --- 6. Horizon Loop ---
     logger.info(f"Starting simulation for {num_horizons_to_run} horizons.")
@@ -214,17 +233,14 @@ def main() -> None:
         )
 
         # Filter df_pool for surgeries whose actual_start falls within the current horizon window
-        # Using normalized dates for robust comparison
         horizon_mask = (
-            current_pool_df[COL_ACTUAL_START].dt.normalize().dt.date
+            current_pool_df[DataColumns.ACTUAL_START].dt.normalize().dt.date
             >= current_horizon_start_date.normalize().date()
         ) & (
-            current_pool_df[COL_ACTUAL_START].dt.normalize().dt.date
+            current_pool_df[DataColumns.ACTUAL_START].dt.normalize().dt.date
             <= current_horizon_end_date.normalize().date()
         )
-        df_surgeries_for_this_horizon_ref = current_pool_df[
-            horizon_mask
-        ]  # This is just for OR count
+        df_surgeries_for_this_horizon_ref = current_pool_df[horizon_mask]
 
         if df_surgeries_for_this_horizon_ref.empty:
             logger.info(
@@ -233,7 +249,7 @@ def main() -> None:
             break
 
         num_operating_rooms_active = df_surgeries_for_this_horizon_ref[
-            COL_OPERATING_ROOM
+            DataColumns.OPERATING_ROOM
         ].nunique()
         logger.info(
             f"\n--- Horizon {h_idx+1}/{num_horizons_to_run} | "
@@ -242,19 +258,13 @@ def main() -> None:
         )
 
         # a) Compute daily block capacity and select surgeries for this horizon
-        # Pass the original horizon start date to compute_block_capacity via params
-        params_for_capacity = {
-            **PARAMS,
-            HORIZON_START_DATE_PARAM_KEY: current_horizon_start_date,
-        }
         daily_block_capacities = compute_block_capacity(
-            df_surgeries_for_this_horizon_ref, params_for_capacity
+            df_surgeries_for_this_horizon_ref, CONFIG, current_horizon_start_date
         )
 
-        # Select surgeries from the *current full pool* that are *candidates* for this horizon
-        # `select_surgeries` will internally filter by date based on `current_horizon_start_date`
+        # Select surgeries from the current full pool that are candidates for this horizon
         base_surgeries_list_for_horizon = select_surgeries(
-            current_pool_df, current_horizon_start_date, PARAMS
+            current_pool_df, current_horizon_start_date, CONFIG
         )
         if not base_surgeries_list_for_horizon:
             logger.warning(
@@ -262,14 +272,13 @@ def main() -> None:
             )
             # Advance to next horizon period
             current_pool_df = current_pool_df[
-                current_pool_df[COL_ACTUAL_START].dt.normalize().dt.date
+                current_pool_df[DataColumns.ACTUAL_START].dt.normalize().dt.date
                 > current_horizon_end_date.normalize().date()
-            ]  # Remove processed part from pool
+            ]
             current_horizon_start_date += timedelta(days=planning_horizon_duration_days)
             continue
 
         # b) Prepare surgery lists for each predictive model
-        # `attach_pred` modifies the list in-place (or returns modified list)
         surgeries_map_for_solvers: Dict[str, Tuple[Callable, List[Dict[str, Any]]]] = {
             "Det": (
                 solve_deterministic_model,
@@ -291,26 +300,51 @@ def main() -> None:
                     current_pool_df,
                 ),
             ),
-            "KNN": (
-                solve_predictive_model,
-                attach_pred(
-                    deepcopy(base_surgeries_list_for_horizon),
-                    knn_model,
-                    current_pool_df,
-                ),
-            ),
             "Oracle": (
                 solve_clairvoyant_model,
                 deepcopy(base_surgeries_list_for_horizon),
             ),
         }
 
-        if theta_predictor_func is not None:
-            surgeries_map_for_solvers["Integrated"] = (
+        if xgboost_model is not None:
+            surgeries_map_for_solvers["XGBoost"] = (
                 solve_predictive_model,
                 attach_pred(
                     deepcopy(base_surgeries_list_for_horizon),
-                    theta_predictor_func,
+                    xgboost_model,
+                    current_pool_df,
+                ),
+            )
+
+            surgeries_map_for_solvers["UtilMax"] = (
+                solve_utilization_maximization_model,
+                attach_pred(
+                    deepcopy(base_surgeries_list_for_horizon),
+                    xgboost_model,
+                    current_pool_df,
+                ),
+            )
+
+            surgeries_map_for_solvers["BalancedUtil"] = (
+                solve_balanced_utilization_model,
+                attach_pred(
+                    deepcopy(base_surgeries_list_for_horizon),
+                    xgboost_model,
+                    current_pool_df,
+                ),
+            )
+        else:
+            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping.")
+            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping UtilMax too.")
+            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping BalancedUtil too.")
+
+       # Add all integrated models to surgeries_map_for_solvers
+        for integrated_method_name, theta_predictor in theta_predictors.items():
+            surgeries_map_for_solvers[integrated_method_name] = (
+                solve_predictive_model,
+                attach_pred(
+                    deepcopy(base_surgeries_list_for_horizon),
+                    theta_predictor,
                     current_pool_df,
                 ),
             )
@@ -319,24 +353,18 @@ def main() -> None:
         horizon_method_results: Dict[str, Dict[str, Any]] = {}
 
         # d) Optional SAA model run
-        if "SAA" in method_tags_ordered:  # Check if SAA is actually supposed to run
+        if "SAA" in method_tags_ordered:
             logger.info(f"Horizon {h_idx+1}: Running SAA model...")
-            # SAA uses its own scenario matrix, not a single prediction.
-            # Base surgeries for SAA should be the same as for deterministic.
-            # Ensure `base_surgeries_list_for_horizon` has 'booked_min' and 'proc_id'
             saa_scenario_matrix = sample_scenarios(
-                base_surgeries_list_for_horizon,  # Use the original list for SAA
+                base_surgeries_list_for_horizon,
                 procedure_duration_samples,
                 all_pooled_duration_samples,
-                PARAMS,
+                CONFIG,
             )
-            # SAA model solver function signature needs scenario_matrix
-            # Modifying solve_saa_model to accept it as last arg if not already.
-            # solve_saa_model(surgeries, day_blocks, params, scen_mat)
             saa_solver_result = solve_saa_model(
                 base_surgeries_list_for_horizon,
                 daily_block_capacities,
-                PARAMS,
+                CONFIG,
                 saa_scenario_matrix,
             )
             if saa_solver_result and saa_solver_result.get("model"):
@@ -344,7 +372,7 @@ def main() -> None:
                     saa_solver_result["model"], base_surgeries_list_for_horizon, True
                 )
                 saa_kpi_results = evaluate_schedule_actual_costs(
-                    saa_schedule_df, daily_block_capacities, PARAMS
+                    saa_schedule_df, daily_block_capacities, CONFIG
                 )
                 horizon_method_results["SAA"] = {
                     "res": saa_solver_result,
@@ -357,16 +385,51 @@ def main() -> None:
                 horizon_method_results["SAA"] = {
                     "res": {"obj": None},
                     "kpi": {},
-                }  # Placeholder for missing result
+                }
+
+        # Handle KNN separately
+        if "KNN" in method_tags_ordered:
+            logger.info(f"Horizon {h_idx+1}: Running KNN model...")
+            knn_solver_result = solve_knn_model(
+                deepcopy(base_surgeries_list_for_horizon),
+                daily_block_capacities,
+                CONFIG,
+                historical_data=df_warm_up,  # Pass warm-up data as historical data
+            )
+
+            if knn_solver_result and knn_solver_result.get("model"):
+                knn_schedule_df = extract_schedule(
+                    knn_solver_result["model"], base_surgeries_list_for_horizon, True
+                )
+                knn_kpi_results = evaluate_schedule_actual_costs(
+                    knn_schedule_df, daily_block_capacities, CONFIG
+                )
+                
+                # Log KNN debug info if available
+                if "knn_debug" in knn_solver_result:
+                    debug_info = knn_solver_result["knn_debug"]
+                    logger.info(f"KNN Debug - K: {debug_info['k_used']}, "
+                               f"Unique neighbors: {debug_info['unique_neighbors']}, "
+                               f"Coverage: {debug_info['neighbor_coverage']:.1%}, "
+                               f"Scenario mean: {debug_info['scenario_mean']:.1f}")
+                
+                horizon_method_results["KNN"] = {
+                    "res": knn_solver_result,
+                    "kpi": knn_kpi_results,
+                }
+            else:
+                logger.warning(f"KNN model failed to solve for horizon {h_idx+1}. Skipping KNN results.")
+                horizon_method_results["KNN"] = {
+                    "res": {"obj": None},
+                    "kpi": {},
+                }
 
         # e) Run other deterministic/predictive models
         for method_tag, (
             solver_func,
             surgeries_for_method,
         ) in surgeries_map_for_solvers.items():
-            if (
-                not surgeries_for_method
-            ):  # Skip if attach_pred returned empty (e.g., model was None)
+            if not surgeries_for_method:
                 logger.warning(
                     f"Horizon {h_idx+1}: No surgeries to process for method {method_tag}. Skipping."
                 )
@@ -374,13 +437,10 @@ def main() -> None:
                 continue
 
             logger.info(f"Horizon {h_idx+1}: Running {method_tag} model...")
-            # Ensure solver_func is not None (e.g. if a predictor failed to train)
-            # This check should be implicitly handled if surgeries_for_method is correctly prepared
 
-            # The solver functions might need **kwargs if they accept lp_relax etc.
-            # For now, assuming they take (surgeries, day_blocks, params)
+            # The solver functions take (surgeries, day_blocks, config)
             solver_result = solver_func(
-                surgeries_for_method, daily_block_capacities, PARAMS
+                surgeries_for_method, daily_block_capacities, CONFIG
             )
 
             if solver_result and solver_result.get("model"):
@@ -388,7 +448,7 @@ def main() -> None:
                     solver_result["model"], surgeries_for_method, True
                 )
                 kpi_results = evaluate_schedule_actual_costs(
-                    schedule_df, daily_block_capacities, PARAMS
+                    schedule_df, daily_block_capacities, CONFIG
                 )
                 horizon_method_results[method_tag] = {
                     "res": solver_result,
@@ -401,7 +461,7 @@ def main() -> None:
                 horizon_method_results[method_tag] = {
                     "res": {"obj": None},
                     "kpi": {},
-                }  # Placeholder
+                }
 
         # f) Console summary for this horizon
         logger.info(f"--- Horizon {h_idx+1} Summary ---")
@@ -410,52 +470,54 @@ def main() -> None:
                 planned_obj = horizon_method_results[tag_to_print]["res"].get("obj")
                 kpis = horizon_method_results[tag_to_print]["kpi"]
                 logger.info(
-                    f"  {tag_to_print:<10}: {_generate_brief_console_output(planned_obj, kpis)}"
+                    f"  {tag_to_print:<12}: {_generate_brief_console_output(planned_obj, kpis)}"
                 )
             else:
-                logger.info(f"  {tag_to_print:<10}: Results not available.")
+                logger.info(f"  {tag_to_print:<12}: Results not available.")
 
         # g) Save per-horizon detailed results
         if save_results_flag:
+            total_blocks = sum(daily_block_capacities.values())
             append_horizon_results(
                 output_data_structure,
                 horizon_index=h_idx + 1,
                 horizon_start_date=current_horizon_start_date.date(),
+                total_blocks=total_blocks,
                 per_method_results=horizon_method_results,
             )
 
         # h) Advance to the next planning period
-        # Remove processed part of the pool (surgeries up to current_horizon_end_date)
         current_pool_df = current_pool_df[
-            current_pool_df[COL_ACTUAL_START].dt.normalize().dt.date
+            current_pool_df[DataColumns.ACTUAL_START].dt.normalize().dt.date
             > current_horizon_end_date.normalize().date()
         ]
         current_horizon_start_date += timedelta(days=planning_horizon_duration_days)
 
     # --- 7. Aggregate & Save Final Results ---
-    if save_results_flag and output_data_structure.get(
-        JSON_KEY_HORIZONS
-    ):  # Check if any horizons were processed
+    if save_results_flag and output_data_structure.get(JSONKeys.HORIZONS):
         logger.info("Aggregating results and saving output files...")
         print_console_summary(method_tags_ordered, output_data_structure)
 
-        detailed_output_path = PARAMS.get("output_file", "outputs/results.json")
+        detailed_output_path = CONFIG.data.output_file
         save_detailed_results(output_data_structure, detailed_output_path)
 
-        aggregated_output_path = PARAMS.get(
-            "aggregated_output_file", "outputs/agg_results.json"
-        )
+        aggregated_output_path = CONFIG.data.aggregated_output_file
         save_aggregated_results(
             output_data_structure,
             aggregated_output_path,
             method_tags_to_aggregate=method_tags_ordered,
         )
-    elif not output_data_structure.get(JSON_KEY_HORIZONS):
+    elif not output_data_structure.get(JSONKeys.HORIZONS):
         logger.info("No horizons were processed. Skipping final summary and saving.")
-    else:  # Not save_results_flag
+    else:
         logger.info(
             "Summary and saving skipped as per configuration (debug_mode or save_results=False)."
         )
+
+    # Log graduated overtime configuration
+    logger.info(f"\n--- Configuration Summary ---")
+    logger.info(f"  Overtime cost: ${CONFIG.costs.overtime_per_min:.2f}/min")
+    logger.info(f"  Idle time cost: ${CONFIG.costs.idle_per_min:.2f}/min")
 
     logger.info("\n" + "=" * 30 + " Experiment Finished " + "=" * 30)
 
@@ -467,24 +529,3 @@ if __name__ == "__main__":
         logger.critical(
             f"An unhandled error occurred in main execution: {e}", exc_info=True
         )
-
-"""
-project/
-├── src/
-│   ├── config.py
-│   ├── constants.py
-│   ├── data_processing.py
-│   ├── solver_utils.py
-│   ├── predictors.py
-│   ├── scheduling_utils.py
-│   └── stochastic_utils.py
-│   └── output.py
-│   └── __init__.py
-├── integrated/
-│   ├── run_integrated.py
-│   ├── master_problem.py
-│   ├── sub_problem.py
-│   ├── callbacks.py
-│   └── __init__.py
-└── surgery_scheduling.py
-"""

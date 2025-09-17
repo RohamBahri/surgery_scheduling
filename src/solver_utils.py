@@ -1,7 +1,9 @@
 """
 Core Gurobi model building and solving utilities for surgery scheduling.
 Includes implementations for deterministic, predictive, clairvoyant, SAA,
-and integrated optimization models.
+and integrated optimization models with graduated overtime costs.
+
+All models use consistent objective functions, constraints, and variable bounds.
 """
 
 import logging
@@ -12,34 +14,23 @@ from gurobipy import GRB, quicksum
 import numpy as np
 import pandas as pd
 
-from src.config import PARAMS  # For solver parameters and debug mode
+from src.config import AppConfig, CONFIG
 from src.constants import (
-    ALL_FEATURE_COLS,
-    CATEGORICAL_FEATURE_COLS,
-    COL_ACTUAL_DUR_MIN,  # Assuming it's added to constants.py
-    COL_BOOKED_MIN,
-    DEFAULT_LOGGER_NAME,
-    GUROBI_MIP_FOCUS_FEASIBILITY,
-    GUROBI_OUTPUT_FLAG_SILENT,
-    GUROBI_PRESOLVE_AUTO,
-    GUROBI_THREADS_ALL_CORES,
-    GUROBI_VAR_IT_PREFIX,
-    GUROBI_VAR_OT_PREFIX,
-    GUROBI_VAR_R_PREFIX,
-    GUROBI_VAR_THETA_PREFIX,
-    GUROBI_VAR_X_PREFIX,
-    GUROBI_VAR_ZSPILL_PREFIX,
-    MAX_OVERTIME_MINUTES_PER_BLOCK,
-    NUMERIC_FEATURE_COLS,
+    DataColumns,
+    FeatureColumns,
+    ScheduleColumns,
+    DomainConstants,
+    GurobiConstants,
+    LoggingConstants,
 )
-from src.data_processing import add_time_features  # For _build_feature_matrix
+from src.data_processing import add_time_features
 
-logger = logging.getLogger(DEFAULT_LOGGER_NAME)
+logger = logging.getLogger(LoggingConstants.DEFAULT_LOGGER_NAME)
 
 
 def set_gurobi_model_parameters(
     model: gp.Model,
-    params_config: Dict[str, Any] = PARAMS,
+    config: AppConfig = CONFIG,
     override_timelimit: Optional[float] = None,
     override_mipgap: Optional[float] = None,
     override_heuristics: Optional[float] = None,
@@ -48,48 +39,38 @@ def set_gurobi_model_parameters(
 ) -> None:
     """Sets common Gurobi parameters for a model.
 
-    Uses defaults from `params_config` (typically `src.config.PARAMS`),
-    with specific overrides possible. `debug_mode` in `params_config`
-    influences default time limit, MIP gap, and heuristics.
+    Uses defaults from `config`, with specific overrides possible.
+    `debug_mode` in `config` influences default time limit, MIP gap, and heuristics.
 
     Args:
         model: The Gurobi model to configure.
-        params_config: Dictionary containing base Gurobi settings and debug_mode flag.
+        config: Application configuration containing Gurobi settings.
         override_timelimit: Specific time limit in seconds.
         override_mipgap: Specific MIP gap.
         override_heuristics: Specific heuristics aggressiveness (0 to 1).
         override_output_flag: Gurobi OutputFlag (0=silent, 1=verbose).
         override_threads: Number of threads for Gurobi (0=auto).
     """
-    is_debug_mode = params_config.get("debug_mode", False)
+    is_debug_mode = config.debug_mode
 
-    # Default Gurobi parameters from config or fallback values
-    default_timelimit = params_config.get("gurobi_timelimit", 600)
-    default_mipgap = params_config.get("gurobi_mipgap", 0.01)
-    default_heuristics = params_config.get("gurobi_heuristics", 0.05)
-    default_output_flag = params_config.get(
-        "gurobi_output_flag", GUROBI_OUTPUT_FLAG_SILENT
-    )
-    default_threads = params_config.get("gurobi_threads", GUROBI_THREADS_ALL_CORES)
-    default_presolve = params_config.get("gurobi_presolve", GUROBI_PRESOLVE_AUTO)
-    default_mip_focus = params_config.get("gurobi_mipfocus", 0)  # 0 = balanced
+    # Default Gurobi parameters from config
+    default_timelimit = config.gurobi.timelimit
+    default_mipgap = config.gurobi.mipgap
+    default_heuristics = config.gurobi.heuristics
+    default_output_flag = config.gurobi.output_flag
+    default_threads = config.gurobi.threads
+    default_presolve = config.gurobi.presolve
+    default_mip_focus = config.gurobi.mip_focus
 
     # Apply debug mode adjustments if active
     if is_debug_mode:
         logger.debug(
             f"Gurobi debug mode active for model {model.ModelName}. Applying fast-solve settings."
         )
-        # Override defaults with debug-specific values if not explicitly provided in PARAMS
-        # Or, if PARAMS already has debug-specific values, those will be used by default_... above.
-        # This logic gives precedence to PARAMS if specific gurobi_xxx_debug keys were set.
-        # For simplicity, we'll use fixed debug values here if is_debug_mode is true,
-        # unless specific overrides are passed to this function.
-        effective_timelimit = 60.0
-        effective_mipgap = 0.20
+        effective_timelimit = config.gurobi.timelimit_debug
+        effective_mipgap = config.gurobi.mipgap_debug
         effective_heuristics = 0.50
-        effective_mip_focus = (
-            GUROBI_MIP_FOCUS_FEASIBILITY  # Focus on finding feasible solutions quickly
-        )
+        effective_mip_focus = GurobiConstants.MIP_FOCUS_FEASIBILITY
     else:
         effective_timelimit = default_timelimit
         effective_mipgap = default_mipgap
@@ -114,286 +95,51 @@ def set_gurobi_model_parameters(
     )
 
     # Set parameters on the Gurobi model
+    model.setParam(GRB.Param.OutputFlag, 0)  # Always silent by default
     model.setParam(GRB.Param.TimeLimit, effective_timelimit)
     model.setParam(GRB.Param.MIPGap, effective_mipgap)
     model.setParam(GRB.Param.Heuristics, effective_heuristics)
     model.setParam(GRB.Param.OutputFlag, effective_output_flag)
     model.setParam(GRB.Param.Threads, effective_threads)
-    model.setParam(
-        GRB.Param.Presolve, default_presolve
-    )  # Presolve usually best left to auto or from PARAMS
-    if (
-        effective_mip_focus != 0 or is_debug_mode
-    ):  # Only set MIPFocus if non-default or debug
+    model.setParam(GRB.Param.Presolve, default_presolve)
+    if effective_mip_focus != 0 or is_debug_mode:
         model.setParam(GRB.Param.MIPFocus, effective_mip_focus)
 
-    # logger.debug(
-    #     f"Gurobi params for model {model.ModelName}: TimeLimit={effective_timelimit:.1f}s, "
-    #     f"MIPGap={effective_mipgap:.3f}, Heuristics={effective_heuristics:.2f}, "
-    #     f"OutputFlag={effective_output_flag}, Threads={effective_threads}, "
-    #     f"Presolve={default_presolve}, MIPFocus={effective_mip_focus}."
-    # )
-
-
-def _add_single_case_spillover_constraints(
-    model: gp.Model,
-    assignment_vars: Dict[Tuple[int, int, int], gp.Var],  # x[i,d,b]
-    surgery_durations: Dict[int, float],  # duration for surgery i
-    block_tuples_list: List[Tuple[int, int]],  # (day_idx, block_idx)
-    block_capacity_minutes: float,
-) -> None:
-    """Adds constraints to allow one surgery per block to exceed block capacity.
-
-    This models a "spillover" case where a single long surgery can run over
-    the nominal block time, and its full duration is counted against capacity
-    for overtime calculation purposes (handled by main capacity constraints).
-    This helper adds the binary variables and linking constraints.
-
-    Args:
-        model: The Gurobi model.
-        assignment_vars: Gurobi variables for surgery assignments (x_idb).
-        surgery_durations: Dictionary mapping surgery index to its duration.
-        block_tuples_list: List of (day, block) tuples where capacity applies.
-        block_capacity_minutes: Nominal capacity of a block in minutes.
-    """
-    num_surgeries = len(surgery_durations)
-
-    # z_spill[i, d, b]: Binary, 1 if surgery i is the designated spillover case in block (d,b)
-    z_spill_vars = model.addVars(
-        [(i, d, b) for (d, b) in block_tuples_list for i in range(num_surgeries)],
-        vtype=GRB.BINARY,
-        name=GUROBI_VAR_ZSPILL_PREFIX,
-    )
-
-    for day_idx, block_idx in block_tuples_list:
-        # At most one surgery can be the spillover case in a given block
-        model.addConstr(
-            quicksum(z_spill_vars[i, day_idx, block_idx] for i in range(num_surgeries))
-            <= 1,
-            name=f"one_spill_limit_{day_idx}_{block_idx}",
-        )
-
-        for surg_idx in range(num_surgeries):
-            # If surgery i is a spillover in (d,b), it must be assigned to (d,b)
-            # z_spill[i,d,b] <= x[i,d,b]
-            model.addConstr(
-                z_spill_vars[surg_idx, day_idx, block_idx]
-                <= assignment_vars[surg_idx, day_idx, block_idx],
-                name=f"link_z_x_{surg_idx}_{day_idx}_{block_idx}",
-            )
-
-        # Capacity constraint with spillover: sum(dur_i * x_idb) <= C + sum(dur_i * z_idb)
-        # This means the total scheduled duration can exceed C by at most the duration
-        # of the single designated spillover case.
-        # The OT/IT variables then correctly capture deviation from C.
-        model.addConstr(
-            quicksum(
-                surgery_durations[i] * assignment_vars[i, day_idx, block_idx]
-                for i in range(num_surgeries)
-            )
-            <= block_capacity_minutes
-            + quicksum(
-                surgery_durations[i] * z_spill_vars[i, day_idx, block_idx]
-                for i in range(num_surgeries)
-            ),
-            name=f"capacity_with_spillover_{day_idx}_{block_idx}",
-        )
-    logger.debug("Added single-case spillover constraints to the model.")
+    if model.ModelName and "PredictedTime" in model.ModelName:
+        # Aggressive settings for prediction-based models
+        model.setParam(GRB.Param.MIPFocus, 1)  # Focus on feasibility
+        model.setParam(GRB.Param.Cuts, 2)  # Moderate cuts
+        model.setParam(GRB.Param.Heuristics, 0.5)  # More heuristics
+        model.setParam(GRB.Param.ImpliedCuts, 2)  # Aggressive implied cuts
 
 
 def solve_saa_model(
     surgeries_info: List[Dict[str, Any]],
     daily_block_counts: Dict[int, int],
-    params_config: Dict[str, Any],
-    scenario_duration_matrix: np.ndarray,
-) -> Dict[str, Any]:
-    """Solves the Sample Average Approximation (SAA) model.
-
-    This is a two-stage stochastic programming model where first-stage decisions
-    are surgery assignments (x_idb) and rejections (r_i). Second-stage (recourse)
-    variables are overtime and idle time, calculated for each scenario based on
-    sampled durations.
-
-    Args:
-        surgeries_info: List of surgery data dictionaries. Each must contain
-            `COL_BOOKED_MIN` and optionally 'predicted_dur_min' for initial spillover logic.
-        daily_block_counts: Maps day index to the number of blocks available.
-        params_config: Main configuration dictionary. Used for costs, horizon length,
-            number of SAA scenarios, block size, and Gurobi settings.
-        scenario_duration_matrix: Numpy array (num_surgeries x num_scenarios)
-            of sampled surgery durations for each scenario.
-
-    Returns:
-        Dictionary with "obj" (objective value), "status" (Gurobi status),
-        and "model" (the solved Gurobi model object). Returns obj=None if no solution.
-    """
-    num_surgeries = len(surgeries_info)
-    planning_horizon_days = params_config["planning_horizon_days"]
-    num_saa_scenarios = params_config["saa_scenarios"]
-    block_size_min = params_config["block_size_minutes"]
-    cost_rejection = params_config["cost_rejection_per_case"]
-    cost_overtime = params_config["cost_overtime_per_min"]
-    cost_idle = params_config["cost_idle_per_min"]
-
-    model_saa = gp.Model("SAA_Scheduling")
-    set_gurobi_model_parameters(model_saa, params_config)
-
-    # --- First-stage variables ---
-    # x_vars[i, d, b]: surgery i assigned to block b on day d
-    x_vars = model_saa.addVars(
-        [
-            (i, d, b)
-            for i in range(num_surgeries)
-            for d in range(planning_horizon_days)
-            for b in range(daily_block_counts.get(d, 0))
-        ],
-        vtype=GRB.BINARY,
-        name=GUROBI_VAR_X_PREFIX,
-    )
-    # r_vars[i]: surgery i is rejected
-    r_vars = model_saa.addVars(
-        num_surgeries, vtype=GRB.BINARY, name=GUROBI_VAR_R_PREFIX
-    )
-
-    # --- Assignment constraints (first-stage) ---
-    for i in range(num_surgeries):
-        model_saa.addConstr(
-            quicksum(
-                x_vars[i, d, b]
-                for d in range(planning_horizon_days)
-                for b in range(daily_block_counts.get(d, 0))
-            )
-            + r_vars[i]
-            == 1,
-            name=f"assign_or_reject_{i}",
-        )
-
-    # Durations for spillover constraints (can use booked or predicted)
-    # Using predicted if available, else booked, for the deterministic part of spillover.
-    # The scenarios use their own sampled durations.
-    spillover_durations: Dict[int, float] = {
-        i: surg.get("predicted_dur_min", surg[COL_BOOKED_MIN])
-        for i, surg in enumerate(surgeries_info)
-    }
-
-    all_block_tuples = [
-        (d, b)
-        for d in range(planning_horizon_days)
-        for b in range(daily_block_counts.get(d, 0))
-    ]
-    if all_block_tuples:  # Only add if there are blocks
-        _add_single_case_spillover_constraints(
-            model_saa, x_vars, spillover_durations, all_block_tuples, block_size_min
-        )
-
-    # --- Second-stage (recourse) variables and constraints ---
-    total_expected_recourse_cost = gp.LinExpr()
-
-    for k_scen in range(num_saa_scenarios):
-        # ot_scen[d, b, k]: overtime in block (d,b) for scenario k
-        ot_scen_vars = model_saa.addVars(
-            [
-                (d, b)
-                for d in range(planning_horizon_days)
-                for b in range(daily_block_counts.get(d, 0))
-            ],
-            lb=0.0,
-            name=f"{GUROBI_VAR_OT_PREFIX}_scen{k_scen}",
-        )
-        # it_scen[d, b, k]: idle time in block (d,b) for scenario k
-        it_scen_vars = model_saa.addVars(
-            [
-                (d, b)
-                for d in range(planning_horizon_days)
-                for b in range(daily_block_counts.get(d, 0))
-            ],
-            lb=0.0,
-            name=f"{GUROBI_VAR_IT_PREFIX}_scen{k_scen}",
-        )
-
-        for d_day in range(planning_horizon_days):
-            for b_block in range(daily_block_counts.get(d_day, 0)):
-                # Sum of sampled durations for surgeries assigned to this block in this scenario
-                sum_sampled_durations_in_block = quicksum(
-                    scenario_duration_matrix[i, k_scen] * x_vars[i, d_day, b_block]
-                    for i in range(num_surgeries)
-                )
-
-                # Overtime constraint
-                model_saa.addConstr(
-                    sum_sampled_durations_in_block - block_size_min
-                    <= ot_scen_vars[d_day, b_block],
-                    name=f"ot_calc_{d_day}_{b_block}_scen{k_scen}",
-                )
-                # Idle time constraint
-                model_saa.addConstr(
-                    block_size_min - sum_sampled_durations_in_block
-                    <= it_scen_vars[d_day, b_block],
-                    name=f"it_calc_{d_day}_{b_block}_scen{k_scen}",
-                )
-
-        scenario_recourse_cost = (
-            cost_overtime * ot_scen_vars.sum() + cost_idle * it_scen_vars.sum()
-        )
-        total_expected_recourse_cost += (
-            1.0 / num_saa_scenarios
-        ) * scenario_recourse_cost
-
-    # --- Objective function ---
-    rejection_cost_total = cost_rejection * quicksum(
-        surgeries_info[i][COL_BOOKED_MIN] * r_vars[i] for i in range(num_surgeries)
-    )
-    model_saa.setObjective(
-        rejection_cost_total + total_expected_recourse_cost, GRB.MINIMIZE
-    )
-
-    logger.info(
-        f"Optimizing SAA model ({num_surgeries} surgeries, {num_saa_scenarios} scenarios)..."
-    )
-    model_saa.optimize()
-
-    obj_val = model_saa.ObjVal if model_saa.SolCount > 0 else None
-    if obj_val is None:
-        logger.warning("SAA model optimization did not find a feasible solution.")
-    else:
-        logger.info(
-            f"SAA model optimized. Objective: {obj_val:.2f}, Status: {model_saa.Status}"
-        )
-
-    return {"obj": obj_val, "status": model_saa.Status, "model": model_saa}
-
-
-def solve_saa_benders(
-    surgeries_info: List[Dict[str, Any]],
-    daily_block_counts: Dict[int, int],
-    params_config: Dict[str, float],
+    config: AppConfig,
     scenario_duration_matrix: np.ndarray,
 ) -> Dict[str, Any]:
     """
-    Solve the Sample Average Approximation (SAA) via Benders decomposition.
+    Solve the Sample Average Approximation (SAA) via Benders decomposition
+    with graduated overtime costs and consistent objective function.
+
+    All operational costs (OT/idle) are treated as recourse costs.
 
     Parameters
     ----------
     surgeries_info : list of dict
-        Metadata for each surgery (unused directly but kept for consistency).
+        Metadata for each surgery.
     daily_block_counts : dict[int, int]
         Mapping from day index to number of OR blocks available that day.
-    params_config : dict
-        Configuration parameters including:
-            - block_size_minutes: int
-            - cost_overtime_per_min: float
-            - cost_idle_per_min: float
-            - cost_rejection_per_case: float
+    config : AppConfig
+        Application configuration.
     scenario_duration_matrix : np.ndarray, shape (n_surgeries, n_scenarios)
         Matrix of durations (in minutes) for each surgery under each scenario.
 
     Returns
     -------
     result : dict
-        Dictionary with keys:
-            - status: Gurobi termination status code
-            - obj: optimal objective value or None if not optimal
-            - model: the Gurobi model object (with solution attributes)
+        Dictionary with keys: status, obj, model
     """
     # Input validation
     num_surgeries = len(surgeries_info)
@@ -420,28 +166,35 @@ def solve_saa_benders(
         raise ValueError("No operating room blocks provided in daily_block_counts.")
 
     # Extract parameters
-    try:
-        block_size = params_config["block_size_minutes"]
-        cost_ot = params_config["cost_overtime_per_min"]
-        cost_it = params_config["cost_idle_per_min"]
-        reject_cost = params_config["cost_rejection_per_case"]
-        planning_horizon_days = params_config["planning_horizon_days"]
-    except KeyError as e:
-        raise KeyError(f"Missing required parameter: {e.args[0]}")
+    block_size = config.operating_room.block_size_minutes
+    cost_ot_normal = config.costs.overtime_per_min
+    cost_it = config.costs.idle_per_min
+    reject_cost = config.costs.rejection_per_case
 
     # Initialize model
-    model = gp.Model("SAA_Benders")
-    set_gurobi_model_parameters(model, params_config)
-    model.Params.LazyConstraints = 1
+    model = gp.Model("SAA_Benders_GraduatedOT")
+    set_gurobi_model_parameters(model, config)
+    model.Params.LazyConstraints = GurobiConstants.LAZY_CONSTRAINTS_ENABLED
 
     # First-stage decision variables
     x = model.addVars(
-        ((i, d, b) for i in range(num_surgeries) for (d, b) in blocks),
+        (
+            (i, d, b)
+            for i in range(num_surgeries)
+            for (d, b) in blocks
+            if i < len(surgeries_info)  # Ensure index is valid
+        ),
         vtype=GRB.BINARY,
         name="x",
     )
     r = model.addVars(range(num_surgeries), vtype=GRB.BINARY, name="r")
     theta = model.addVar(lb=0.0, name="theta")
+
+    # Auxiliary variables for structural constraints (not in objective)
+    ot_aux = model.addVars(
+        blocks, lb=0.0, ub=config.costs.max_overtime_minutes, name="ot_aux"
+    )
+    it_aux = model.addVars(blocks, lb=0.0, ub=block_size, name="it_aux")
 
     # Constraints: each surgery is assigned exactly once or rejected
     for i in range(num_surgeries):
@@ -450,44 +203,44 @@ def solve_saa_benders(
             name=f"assign_reject_{i}",
         )
 
+    # Structural constraints using two-inequality slack style
     model_durations: Dict[int, float] = {
-        i: float(surg[COL_BOOKED_MIN])
-        for i, surg in enumerate(surgeries_info)
+        i: float(surg[DataColumns.BOOKED_MIN]) for i, surg in enumerate(surgeries_info)
     }
 
-    # Re‐build the same list of (day, block) tuples
-    all_block_tuples = [
-        (d, b)
-        for d in range(params_config["planning_horizon_days"])
-        for b in range(daily_block_counts.get(d, 0))
-    ]
+    for d, b in blocks:
+        total_duration = quicksum(
+            model_durations[i] * x[i, d, b] for i in range(num_surgeries)
+        )
+        total_ot = ot_aux[d, b]
 
-    if all_block_tuples:
-        _add_single_case_spillover_constraints(
-            model,                # your Gurobi model
-            x,                    # the x[i,d,b] vars
-            model_durations,      # dict of booked‐time durations
-            all_block_tuples,     # list of (day, block) pairs
-            block_size            # e.g. params_config["block_size_minutes"]
+        # Two-inequality style for better performance
+        model.addConstr(
+            total_duration - block_size <= total_ot,
+            name=f"ot_calc_{d}_{b}",
+        )
+        model.addConstr(
+            block_size - total_duration <= it_aux[d, b],
+            name=f"it_calc_{d}_{b}",
         )
 
-    model.setObjective(
-        quicksum(reject_cost * r[i] for i in range(num_surgeries))
-        + theta,
-        GRB.MINIMIZE,
+    # Objective: only rejection cost, all OT/idle in recourse (theta)
+    rejection_cost_total = quicksum(
+        reject_cost * surgeries_info[i][DataColumns.BOOKED_MIN] * r[i]
+        for i in range(num_surgeries)
     )
 
-    def _benders_callback(m: gp.Model, where: int) -> None:
-        """
-        Gurobi callback to add Benders cuts (lazy constraints).
-        """
+    model.setObjective(rejection_cost_total + theta, GRB.MINIMIZE)
+
+    def _benders_callback_graduated(m: gp.Model, where: int) -> None:
+        """Gurobi callback to add Benders cuts with graduated overtime costs."""
         if where != GRB.Callback.MIPSOL:
             return
 
         # Retrieve current solution values for x
         x_val = m.cbGetSolution(x)
 
-        # Compute expected recourse cost across scenarios
+        # Compute expected recourse cost across scenarios with graduated overtime
         total_rec = 0.0
         for k in range(n_scenarios):
             rec_k = 0.0
@@ -497,7 +250,10 @@ def solve_saa_benders(
                     durations_k[i] * x_val[(i, d, b)] for i in range(num_surgeries)
                 )
                 if assigned_time > block_size:
-                    rec_k += cost_ot * (assigned_time - block_size)
+                    overtime = assigned_time - block_size
+                    # Graduated overtime cost
+                    capped_overtime = min(overtime, config.costs.max_overtime_minutes)
+                    rec_k += cost_ot_normal * capped_overtime
                 else:
                     rec_k += cost_it * (block_size - assigned_time)
             total_rec += rec_k
@@ -508,8 +264,8 @@ def solve_saa_benders(
         logger.debug(f"Benders cut added: theta >= {avg_rec:.2f}")
 
     # Optimize with lazy cuts
-    logger.info("Starting Benders decomposition solve (SAA_Benders)")
-    model.optimize(_benders_callback)
+    logger.info("Starting Benders decomposition solve (SAA)")
+    model.optimize(_benders_callback_graduated)
 
     status = model.Status
     obj_val = model.ObjVal if status == GRB.OPTIMAL else None
@@ -521,38 +277,37 @@ def solve_saa_benders(
 def _solve_single_stage_deterministic_model(
     surgeries_info: List[Dict[str, Any]],
     daily_block_counts: Dict[int, int],
-    params_config: Dict[str, Any],
-    duration_key_for_model: str,  # e.g. COL_BOOKED_MIN, "predicted_dur_min", COL_ACTUAL_DUR_MIN
+    config: AppConfig,
+    duration_key_for_model: str,
     model_name_suffix: str,
     is_lp_relaxation: bool = False,
 ) -> Dict[str, Any]:
-    """Core solver for single-stage deterministic assignment models.
+    """Core solver for single-stage deterministic assignment models with graduated overtime costs.
 
     This function builds and solves models like "Deterministic" (using booked times),
     "Predictive" (using ML predictions), or "Clairvoyant" (using actual durations).
 
     Args:
-        surgeries_info: List of surgery data. Each dict must contain `COL_BOOKED_MIN`
-            and the `duration_key_for_model`.
+        surgeries_info: List of surgery data.
         daily_block_counts: Maps day index to number of blocks.
-        params_config: Main configuration dictionary for costs, block size, etc.
-        duration_key_for_model: The key in surgery_info dicts to use for durations
-            in the model's capacity constraints.
-        model_name_suffix: Suffix for the Gurobi model name (e.g., "Booked", "Pred").
+        config: Application configuration.
+        duration_key_for_model: The key in surgery_info dicts to use for durations.
+        model_name_suffix: Suffix for the Gurobi model name.
         is_lp_relaxation: If True, relaxes binary variables to continuous.
 
     Returns:
-        Dictionary with "obj", "status", and "model". Obj is None if no solution.
+        Dictionary with "obj", "status", and "model".
     """
+
     num_surgeries = len(surgeries_info)
-    planning_horizon_days = params_config["planning_horizon_days"]
-    block_size_min = params_config["block_size_minutes"]
-    cost_rejection = params_config["cost_rejection_per_case"]
-    cost_overtime = params_config["cost_overtime_per_min"]
-    cost_idle = params_config["cost_idle_per_min"]
+    planning_horizon_days = config.data.planning_horizon_days
+    block_size_min = config.operating_room.block_size_minutes
+    cost_rejection = config.costs.rejection_per_case
+    cost_overtime_normal = config.costs.overtime_per_min
+    cost_idle = config.costs.idle_per_min
 
     model_det = gp.Model(f"SingleStage_{model_name_suffix}")
-    set_gurobi_model_parameters(model_det, params_config)
+    set_gurobi_model_parameters(model_det, config)
 
     var_type = GRB.CONTINUOUS if is_lp_relaxation else GRB.BINARY
 
@@ -565,9 +320,13 @@ def _solve_single_stage_deterministic_model(
             for b in range(daily_block_counts.get(d, 0))
         ],
         vtype=var_type,
-        name=GUROBI_VAR_X_PREFIX,
+        name=GurobiConstants.VAR_X_PREFIX,
     )
-    r_vars = model_det.addVars(num_surgeries, vtype=var_type, name=GUROBI_VAR_R_PREFIX)
+    r_vars = model_det.addVars(
+        num_surgeries, vtype=var_type, name=GurobiConstants.VAR_R_PREFIX
+    )
+
+    # overtime variables
     ot_vars = model_det.addVars(
         [
             (d, b)
@@ -575,8 +334,10 @@ def _solve_single_stage_deterministic_model(
             for b in range(daily_block_counts.get(d, 0))
         ],
         lb=0.0,
-        name=GUROBI_VAR_OT_PREFIX,
+        ub=config.costs.max_overtime_minutes,  # Capped overtime
+        name="ot",
     )
+
     it_vars = model_det.addVars(
         [
             (d, b)
@@ -584,7 +345,8 @@ def _solve_single_stage_deterministic_model(
             for b in range(daily_block_counts.get(d, 0))
         ],
         lb=0.0,
-        name=GUROBI_VAR_IT_PREFIX,
+        ub=block_size_min,
+        name=GurobiConstants.VAR_IT_PREFIX,
     )
 
     # --- Constraints ---
@@ -601,46 +363,33 @@ def _solve_single_stage_deterministic_model(
             name=f"assign_or_reject_{i}",
         )
 
-    # 2. Block capacity, overtime, and idle time calculation
+    # 2. Block capacity using two-inequality slack style
     for d_day in range(planning_horizon_days):
         for b_block in range(daily_block_counts.get(d_day, 0)):
             sum_durations_in_block = quicksum(
                 surgeries_info[i][duration_key_for_model] * x_vars[i, d_day, b_block]
                 for i in range(num_surgeries)
             )
+
+            total_overtime = ot_vars[d_day, b_block]
+
+            # Two-inequality style for better performance
             model_det.addConstr(
-                sum_durations_in_block - block_size_min <= ot_vars[d_day, b_block],
+                sum_durations_in_block - block_size_min <= total_overtime,
                 name=f"ot_calc_{d_day}_{b_block}",
             )
+
             model_det.addConstr(
                 block_size_min - sum_durations_in_block <= it_vars[d_day, b_block],
                 name=f"it_calc_{d_day}_{b_block}",
             )
-            # Optional: Cap on overtime per block
-            model_det.addConstr(
-                ot_vars[d_day, b_block] <= MAX_OVERTIME_MINUTES_PER_BLOCK,
-                name=f"ot_cap_{d_day}_{b_block}",
-            )
-
-    # 3. Spillover constraints
-    model_durations: Dict[int, float] = {
-        i: surg[duration_key_for_model] for i, surg in enumerate(surgeries_info)
-    }
-    all_block_tuples = [
-        (d, b)
-        for d in range(planning_horizon_days)
-        for b in range(daily_block_counts.get(d, 0))
-    ]
-    if all_block_tuples:
-        _add_single_case_spillover_constraints(
-            model_det, x_vars, model_durations, all_block_tuples, block_size_min
-        )
 
     # --- Objective Function ---
     rejection_cost_total = cost_rejection * quicksum(
-        surgeries_info[i][COL_BOOKED_MIN] * r_vars[i] for i in range(num_surgeries)
+        surgeries_info[i][DataColumns.BOOKED_MIN] * r_vars[i]
+        for i in range(num_surgeries)
     )
-    operational_cost = cost_overtime * ot_vars.sum() + cost_idle * it_vars.sum()
+    operational_cost = cost_overtime_normal * ot_vars.sum() + cost_idle * it_vars.sum()
     model_det.setObjective(rejection_cost_total + operational_cost, GRB.MINIMIZE)
 
     relax_msg = " (LP relaxation)" if is_lp_relaxation else ""
@@ -665,15 +414,15 @@ def _solve_single_stage_deterministic_model(
 def solve_deterministic_model(
     surgeries_info: List[Dict[str, Any]],
     daily_block_counts: Dict[int, int],
-    params_config: Dict[str, Any],
-    **kwargs,  # Catches lp_relax, return_model implicitly if passed from old signature
+    config: AppConfig,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Solves the deterministic model using booked surgery durations."""
     return _solve_single_stage_deterministic_model(
         surgeries_info,
         daily_block_counts,
-        params_config,
-        duration_key_for_model=COL_BOOKED_MIN,
+        config,
+        duration_key_for_model=DataColumns.BOOKED_MIN,
         model_name_suffix="BookedTime",
         is_lp_relaxation=kwargs.get("lp_relax", False),
     )
@@ -682,7 +431,7 @@ def solve_deterministic_model(
 def solve_predictive_model(
     surgeries_info: List[Dict[str, Any]],
     daily_block_counts: Dict[int, int],
-    params_config: Dict[str, Any],
+    config: AppConfig,
     **kwargs,
 ) -> Dict[str, Any]:
     """Solves the predictive model using ML-predicted surgery durations."""
@@ -691,14 +440,14 @@ def solve_predictive_model(
         if "predicted_dur_min" not in surg:
             logger.warning(
                 f"Surgery id {surg.get('id','N/A')} missing 'predicted_dur_min'. "
-                f"Falling back to '{COL_BOOKED_MIN}' for this surgery in predictive model."
+                f"Falling back to '{DataColumns.BOOKED_MIN}' for this surgery in predictive model."
             )
-            surg["predicted_dur_min"] = surg[COL_BOOKED_MIN]
+            surg["predicted_dur_min"] = round(surg[DataColumns.BOOKED_MIN])
 
     return _solve_single_stage_deterministic_model(
         surgeries_info,
         daily_block_counts,
-        params_config,
+        config,
         duration_key_for_model="predicted_dur_min",
         model_name_suffix="PredictedTime",
         is_lp_relaxation=kwargs.get("lp_relax", False),
@@ -708,12 +457,13 @@ def solve_predictive_model(
 def solve_clairvoyant_model(
     surgeries_info: List[Dict[str, Any]],
     daily_block_counts: Dict[int, int],
-    params_config: Dict[str, Any],
+    config: AppConfig,
     **kwargs,
 ) -> Dict[str, Any]:
-    if not (surgeries_info and COL_ACTUAL_DUR_MIN in surgeries_info[0]):
+    """Solves the clairvoyant model using actual surgery durations."""
+    if not (surgeries_info and ScheduleColumns.ACTUAL_DUR_MIN in surgeries_info[0]):
         logger.error(
-            f"Clairvoyant model: Cannot find duration key '{COL_ACTUAL_DUR_MIN}' "
+            f"Clairvoyant model: Cannot find duration key '{ScheduleColumns.ACTUAL_DUR_MIN}' "
             "in surgery data. Ensure `select_surgeries` provides this key."
         )
         return {
@@ -722,13 +472,543 @@ def solve_clairvoyant_model(
             "model": None,
         }
 
-    clairvoyant_duration_key_to_use = COL_ACTUAL_DUR_MIN
-
     return _solve_single_stage_deterministic_model(
         surgeries_info,
         daily_block_counts,
-        params_config,
-        duration_key_for_model=clairvoyant_duration_key_to_use,  # Use the constant
+        config,
+        duration_key_for_model=ScheduleColumns.ACTUAL_DUR_MIN,
         model_name_suffix="ClairvoyantActualTime",
         is_lp_relaxation=kwargs.get("lp_relax", False),
     )
+
+
+def validate_model_consistency(config: AppConfig) -> None:
+    """
+    Validate that all model parameters are consistent.
+    Call this function before running any models to catch configuration issues.
+    """
+    logger.info("Validating model consistency...")
+
+    # Check cost parameters exist
+    required_cost_attrs = [
+        "rejection_per_case",
+        "overtime_per_min",
+        "idle_per_min",
+    ]
+    for attr in required_cost_attrs:
+        assert hasattr(config.costs, attr), f"Missing cost parameter: {attr}"
+        value = getattr(config.costs, attr)
+        assert value >= 0, f"Cost parameter {attr} must be non-negative, got {value}"
+
+    # Check duration bounds
+    min_dur = config.operating_room.min_procedure_duration
+    block_size = config.operating_room.block_size_minutes
+    max_overtime = DomainConstants.MAX_OVERTIME_MINUTES_PER_BLOCK
+    max_dur = block_size + max_overtime
+
+    assert min_dur > 0, f"Min duration must be positive, got {min_dur}"
+    assert block_size > 0, f"Block size must be positive, got {block_size}"
+    assert max_overtime >= 0, f"Max overtime must be non-negative, got {max_overtime}"
+    assert (
+        max_dur > min_dur
+    ), f"Max duration ({max_dur}) must exceed min duration ({min_dur})"
+
+    # Check overtime threshold
+    ot_threshold = config.costs.overtime_threshold_minutes
+    assert (
+        0 < ot_threshold <= max_overtime
+    ), f"Overtime threshold ({ot_threshold}) must be between 0 and {max_overtime}"
+
+    # Check cost hierarchy makes sense
+    normal_cost = config.costs.overtime_per_min
+
+    logger.info("✓ Model consistency validated")
+    logger.info(f"  Duration bounds: [{min_dur}, {max_dur}] minutes")
+    logger.info(f"  Overtime threshold: {ot_threshold} minutes")
+    logger.info(f"  Overtime costs: ${normal_cost}/min (normal)")
+    logger.info(f"  Block size: {block_size} minutes")
+
+
+def solve_knn_model(
+    surgeries_info: List[Dict[str, Any]],
+    daily_block_counts: Dict[int, int],
+    config: AppConfig,
+    historical_data: pd.DataFrame = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Solves the KNN model by finding k nearest neighbors and using their actual durations.
+
+    For each surgery, finds K most similar historical surgeries and uses their
+    actual durations as scenarios for SAA optimization.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+    if historical_data is None or historical_data.empty:
+        logger.warning(
+            "No historical data for KNN. Falling back to deterministic model."
+        )
+        return solve_deterministic_model(
+            surgeries_info, daily_block_counts, config, **kwargs
+        )
+
+    k = config.ml.knn_neighbors
+    num_surgeries = len(surgeries_info)
+
+    logger.info(
+        f"KNN solver: k={k}, historical_data_size={len(historical_data)}, current_surgeries={num_surgeries}"
+    )
+
+    # Prepare historical data with time features
+    hist_data = historical_data.copy()
+    hist_data = add_time_features(hist_data)
+
+    # Validate required columns
+    required_features = FeatureColumns.ALL
+    missing_features = [
+        col for col in required_features if col not in hist_data.columns
+    ]
+    if missing_features:
+        logger.error(f"KNN: Missing features in historical data: {missing_features}")
+        return solve_deterministic_model(
+            surgeries_info, daily_block_counts, config, **kwargs
+        )
+
+    try:
+        # Prepare historical features and targets
+        X_hist = hist_data[required_features].copy()
+        for cat_col in FeatureColumns.CATEGORICAL:
+            X_hist[cat_col] = (
+                X_hist[cat_col].astype(str).fillna(DomainConstants.UNKNOWN_CATEGORY)
+            )
+
+        hist_durations = hist_data[DataColumns.PROCEDURE_DURATION_MIN].values
+
+        # Create preprocessor
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ("num", StandardScaler(), FeatureColumns.NUMERIC),
+                (
+                    "cat",
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                    FeatureColumns.CATEGORICAL,
+                ),
+            ],
+            remainder="drop",
+        )
+
+        # Fit and transform historical data
+        X_hist_processed = preprocessor.fit_transform(X_hist)
+        logger.info(f"KNN: Historical features shape: {X_hist_processed.shape}")
+
+        if len(X_hist_processed) < k:
+            logger.warning(
+                f"KNN: Not enough historical data ({len(X_hist_processed)}) for k={k}"
+            )
+            return solve_deterministic_model(
+                surgeries_info, daily_block_counts, config, **kwargs
+            )
+
+        # Fit KNN on historical data
+        knn = NearestNeighbors(n_neighbors=k, metric="euclidean")
+        knn.fit(X_hist_processed)
+
+        # Prepare current surgery features
+        current_surgery_features = []
+        for surgery in surgeries_info:
+            surgery_features = {
+                DataColumns.BOOKED_MIN: surgery[DataColumns.BOOKED_MIN],
+                DataColumns.MAIN_PROCEDURE_ID: surgery["proc_id"],
+                DataColumns.WEEK_OF_YEAR: 26,  # Mid-year default
+                DataColumns.MONTH: 6,  # Mid-year default
+                DataColumns.YEAR: 2024,  # Current year default
+                DataColumns.PATIENT_TYPE: DomainConstants.OTHER_CATEGORY,
+                DataColumns.SURGEON_CODE: DomainConstants.OTHER_CATEGORY,
+                DataColumns.CASE_SERVICE: DomainConstants.OTHER_CATEGORY,
+            }
+            current_surgery_features.append(surgery_features)
+
+        # Convert to DataFrame and preprocess
+        current_df = pd.DataFrame(current_surgery_features)
+        for cat_col in FeatureColumns.CATEGORICAL:
+            current_df[cat_col] = current_df[cat_col].astype(str)
+
+        # Transform current surgery features
+        X_current_processed = preprocessor.transform(current_df[required_features])
+        logger.info(f"KNN: Current surgery features shape: {X_current_processed.shape}")
+
+        # Create scenario matrix: (num_surgeries, k_scenarios)
+        scenario_matrix = np.zeros((num_surgeries, k))
+        all_neighbor_indices = []
+
+        # For each surgery, find its k nearest neighbors
+        for i in range(num_surgeries):
+            try:
+                # Find k nearest neighbors for this surgery
+                distances, indices = knn.kneighbors(X_current_processed[i : i + 1])
+                neighbor_indices = indices[0]
+                all_neighbor_indices.extend(neighbor_indices)
+
+                # Get actual durations from neighbors
+                neighbor_durations = hist_durations[neighbor_indices]
+
+                # Clip durations to reasonable bounds
+                neighbor_durations = np.clip(
+                    neighbor_durations,
+                    DomainConstants.MIN_PROCEDURE_DURATION,
+                    config.operating_room.block_size_minutes * 2,
+                )
+
+                # Store scenarios for this surgery
+                scenario_matrix[i, :] = neighbor_durations
+
+                # Debug info for first few surgeries
+                if i < 3:
+                    logger.debug(
+                        f"KNN: Surgery {i}, neighbors: {neighbor_indices}, durations: {neighbor_durations}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"KNN: Error processing surgery {i}: {e}")
+                # Fallback to booked duration for all scenarios
+                scenario_matrix[i, :] = surgeries_info[i][DataColumns.BOOKED_MIN]
+
+        # Validate scenario matrix
+        if np.any(scenario_matrix <= 0):
+            logger.warning("KNN: Found non-positive durations in scenario matrix")
+
+        # Check diversity of neighbors
+        unique_neighbors = len(set(all_neighbor_indices))
+        neighbor_coverage = (
+            unique_neighbors / len(hist_data) if len(hist_data) > 0 else 0
+        )
+
+        logger.info(
+            f"KNN: Using {unique_neighbors} unique historical observations "
+            f"out of {len(hist_data)} available (coverage: {neighbor_coverage:.1%})"
+        )
+        logger.info(f"KNN: Scenario matrix shape: {scenario_matrix.shape}")
+        logger.info(
+            f"KNN: Scenario matrix stats - min: {scenario_matrix.min():.1f}, "
+            f"max: {scenario_matrix.max():.1f}, mean: {scenario_matrix.mean():.1f}"
+        )
+
+        # Use SAA solver with KNN scenarios
+        result = solve_saa_model(
+            surgeries_info, daily_block_counts, config, scenario_matrix
+        )
+
+        # Add debug info to result
+        if result:
+            result["knn_debug"] = {
+                "k_used": k,
+                "unique_neighbors": unique_neighbors,
+                "neighbor_coverage": neighbor_coverage,
+                "scenario_shape": scenario_matrix.shape,
+                "scenario_mean": float(scenario_matrix.mean()),
+                "scenario_std": float(scenario_matrix.std()),
+                "scenario_min": float(scenario_matrix.min()),
+                "scenario_max": float(scenario_matrix.max()),
+            }
+
+        logger.info("KNN: Successfully created scenario matrix and solved")
+        return result
+
+    except Exception as e:
+        logger.error(f"KNN: Error in processing: {e}", exc_info=True)
+        return solve_deterministic_model(
+            surgeries_info, daily_block_counts, config, **kwargs
+        )
+
+
+def solve_utilization_maximization_model(
+    surgeries_info: List[Dict[str, Any]],
+    daily_block_counts: Dict[int, int],
+    config: AppConfig,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Solves the utilization maximization model using predicted surgery durations.
+
+    Maximizes the total duration of scheduled surgeries rather than minimizing costs.
+    Uses predicted durations in the objective function from XGBoost model.
+
+    Args:
+        surgeries_info: List of surgery data with predictions attached.
+        daily_block_counts: Maps day index to number of blocks.
+        config: Application configuration.
+        **kwargs: Additional arguments (e.g., lp_relax).
+
+    Returns:
+        Dictionary with "obj", "status", and "model".
+    """
+
+    # Ensure 'predicted_dur_min' key exists or fall back to booked time
+    for surg in surgeries_info:
+        if "predicted_dur_min" not in surg:
+            logger.warning(
+                f"Surgery id {surg.get('id','N/A')} missing 'predicted_dur_min'. "
+                f"Falling back to '{DataColumns.BOOKED_MIN}' for this surgery in utilization maximization model."
+            )
+            surg["predicted_dur_min"] = round(surg[DataColumns.BOOKED_MIN])
+
+    num_surgeries = len(surgeries_info)
+    planning_horizon_days = config.data.planning_horizon_days
+    block_size_min = config.operating_room.block_size_minutes
+
+    model_util = gp.Model("UtilizationMaximization")
+    set_gurobi_model_parameters(model_util, config)
+
+    var_type = GRB.CONTINUOUS if kwargs.get("lp_relax", False) else GRB.BINARY
+
+    # --- Decision Variables ---
+    # x_idb: 1 if surgery i is assigned to day d, block b
+    x_vars = model_util.addVars(
+        [
+            (i, d, b)
+            for i in range(num_surgeries)
+            for d in range(planning_horizon_days)
+            for b in range(daily_block_counts.get(d, 0))
+        ],
+        vtype=var_type,
+        name=GurobiConstants.VAR_X_PREFIX,
+    )
+
+    # R_i: 1 if surgery i is rejected
+    r_vars = model_util.addVars(
+        num_surgeries, vtype=var_type, name=GurobiConstants.VAR_R_PREFIX
+    )
+
+    # --- Constraints ---
+    # 1. Each surgery is either assigned to exactly one block or rejected
+    for i in range(num_surgeries):
+        model_util.addConstr(
+            quicksum(
+                x_vars[i, d, b]
+                for d in range(planning_horizon_days)
+                for b in range(daily_block_counts.get(d, 0))
+            )
+            + r_vars[i]
+            == 1,
+            name=f"assign_or_reject_{i}",
+        )
+
+    # 2. Block capacity constraints
+    for d_day in range(planning_horizon_days):
+        for b_block in range(daily_block_counts.get(d_day, 0)):
+            # Sum of predicted durations in block cannot exceed block capacity
+            model_util.addConstr(
+                quicksum(
+                    surgeries_info[i]["predicted_dur_min"] * x_vars[i, d_day, b_block]
+                    for i in range(num_surgeries)
+                )
+                <= block_size_min,
+                name=f"capacity_{d_day}_{b_block}",
+            )
+
+    # --- Objective Function: Maximize total predicted duration of scheduled surgeries ---
+    total_utilization = quicksum(
+        surgeries_info[i]["predicted_dur_min"] * x_vars[i, d, b]
+        for i in range(num_surgeries)
+        for d in range(planning_horizon_days)
+        for b in range(daily_block_counts.get(d, 0))
+    )
+
+    model_util.setObjective(total_utilization, GRB.MAXIMIZE)
+
+    relax_msg = " (LP relaxation)" if kwargs.get("lp_relax", False) else ""
+    logger.info(
+        f"Optimizing {model_util.ModelName}{relax_msg} for {num_surgeries} surgeries "
+        f"(maximizing predicted utilization)..."
+    )
+    model_util.optimize()
+
+    obj_val = model_util.ObjVal if model_util.SolCount > 0 else None
+    if obj_val is None:
+        logger.warning(
+            f"{model_util.ModelName}{relax_msg} optimization did not find a feasible solution."
+        )
+    else:
+        logger.info(
+            f"{model_util.ModelName}{relax_msg} optimized. Predicted Utilization: {obj_val:.2f} minutes, "
+            f"Status: {model_util.Status}"
+        )
+
+    return {"obj": obj_val, "status": model_util.Status, "model": model_util}
+
+
+def solve_balanced_utilization_model(
+    surgeries_info: List[Dict[str, Any]],
+    daily_block_counts: Dict[int, int],
+    config: AppConfig,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Solves the balanced utilization-throughput model using predicted surgery durations.
+
+    Maximizes (total_duration) × (number_of_surgeries) to balance both utilization and throughput.
+    Uses linearization techniques to handle the nonlinear objective.
+
+    Args:
+        surgeries_info: List of surgery data with predictions attached.
+        daily_block_counts: Maps day index to number of blocks.
+        config: Application configuration.
+        **kwargs: Additional arguments (e.g., lp_relax).
+
+    Returns:
+        Dictionary with "obj", "status", and "model".
+    """
+
+    # Ensure 'predicted_dur_min' key exists or fall back to booked time
+    for surg in surgeries_info:
+        if "predicted_dur_min" not in surg:
+            logger.warning(
+                f"Surgery id {surg.get('id','N/A')} missing 'predicted_dur_min'. "
+                f"Falling back to '{DataColumns.BOOKED_MIN}' for this surgery in balanced utilization model."
+            )
+            surg["predicted_dur_min"] = round(surg[DataColumns.BOOKED_MIN])
+
+    num_surgeries = len(surgeries_info)
+    planning_horizon_days = config.data.planning_horizon_days
+    block_size_min = config.operating_room.block_size_minutes
+
+    model_balanced = gp.Model("BalancedUtilizationThroughput")
+    set_gurobi_model_parameters(model_balanced, config)
+
+    var_type = GRB.CONTINUOUS if kwargs.get("lp_relax", False) else GRB.BINARY
+
+    # --- Decision Variables ---
+    # x_idb: 1 if surgery i is assigned to day d, block b
+    x_vars = model_balanced.addVars(
+        [
+            (i, d, b)
+            for i in range(num_surgeries)
+            for d in range(planning_horizon_days)
+            for b in range(daily_block_counts.get(d, 0))
+        ],
+        vtype=var_type,
+        name=GurobiConstants.VAR_X_PREFIX,
+    )
+
+    # R_i: 1 if surgery i is rejected
+    r_vars = model_balanced.addVars(
+        num_surgeries, vtype=var_type, name=GurobiConstants.VAR_R_PREFIX
+    )
+
+    # s_i: 1 if surgery i is scheduled (auxiliary variable)
+    s_vars = model_balanced.addVars(num_surgeries, vtype=var_type, name="s")
+
+    # Link s_i to assignment variables
+    for i in range(num_surgeries):
+        model_balanced.addConstr(
+            s_vars[i]
+            == quicksum(
+                x_vars[i, d, b]
+                for d in range(planning_horizon_days)
+                for b in range(daily_block_counts.get(d, 0))
+            ),
+            name=f"schedule_indicator_{i}",
+        )
+
+    # Total number of scheduled surgeries
+    total_surgeries = quicksum(s_vars[i] for i in range(num_surgeries))
+
+    # Linearization variables: w_i represents the contribution of surgery i to the product
+    # w_i = predicted_duration_i × total_surgeries × s_i
+    w_vars = model_balanced.addVars(num_surgeries, lb=0.0, name="w")
+
+    # Big-M for linearization (conservative upper bound)
+    max_predicted_duration = max(surg["predicted_dur_min"] for surg in surgeries_info)
+    big_M = max_predicted_duration * num_surgeries
+
+    # Linearization constraints for w_i = predicted_duration_i × total_surgeries × s_i
+    for i in range(num_surgeries):
+        predicted_dur = surgeries_info[i]["predicted_dur_min"]
+
+        # If surgery i is not scheduled (s_i = 0), then w_i = 0
+        model_balanced.addConstr(
+            w_vars[i] <= big_M * s_vars[i],
+            name=f"w_upper_scheduled_{i}",
+        )
+
+        # If surgery i is scheduled (s_i = 1), then w_i = predicted_duration_i × total_surgeries
+        model_balanced.addConstr(
+            w_vars[i] <= predicted_dur * total_surgeries,
+            name=f"w_upper_duration_{i}",
+        )
+
+        # If surgery i is scheduled, w_i >= predicted_duration_i × total_surgeries
+        model_balanced.addConstr(
+            w_vars[i] >= predicted_dur * total_surgeries - big_M * (1 - s_vars[i]),
+            name=f"w_lower_{i}",
+        )
+
+    # --- Standard Constraints ---
+    # 1. Each surgery is either assigned to exactly one block or rejected
+    for i in range(num_surgeries):
+        model_balanced.addConstr(
+            quicksum(
+                x_vars[i, d, b]
+                for d in range(planning_horizon_days)
+                for b in range(daily_block_counts.get(d, 0))
+            )
+            + r_vars[i]
+            == 1,
+            name=f"assign_or_reject_{i}",
+        )
+
+    # 2. Block capacity constraints
+    for d_day in range(planning_horizon_days):
+        for b_block in range(daily_block_counts.get(d_day, 0)):
+            model_balanced.addConstr(
+                quicksum(
+                    surgeries_info[i]["predicted_dur_min"] * x_vars[i, d_day, b_block]
+                    for i in range(num_surgeries)
+                )
+                <= block_size_min,
+                name=f"capacity_{d_day}_{b_block}",
+            )
+
+    # --- Objective Function: Maximize sum of w_i (which represents total_duration × total_surgeries) ---
+    model_balanced.setObjective(
+        quicksum(w_vars[i] for i in range(num_surgeries)), GRB.MAXIMIZE
+    )
+
+    relax_msg = " (LP relaxation)" if kwargs.get("lp_relax", False) else ""
+    logger.info(
+        f"Optimizing {model_balanced.ModelName}{relax_msg} for {num_surgeries} surgeries "
+        f"(maximizing utilization × throughput)..."
+    )
+    model_balanced.optimize()
+
+    obj_val = model_balanced.ObjVal if model_balanced.SolCount > 0 else None
+    if obj_val is None:
+        logger.warning(
+            f"{model_balanced.ModelName}{relax_msg} optimization did not find a feasible solution."
+        )
+    else:
+        # Calculate the actual utilization and throughput for logging
+        if model_balanced.SolCount > 0:
+            total_util = sum(
+                surgeries_info[i]["predicted_dur_min"] * x_vars[i, d, b].X
+                for i in range(num_surgeries)
+                for d in range(planning_horizon_days)
+                for b in range(daily_block_counts.get(d, 0))
+                if x_vars[i, d, b].X > 0.5
+            )
+            total_count = sum(
+                s_vars[i].X for i in range(num_surgeries) if s_vars[i].X > 0.5
+            )
+            logger.info(
+                f"{model_balanced.ModelName}{relax_msg} optimized. "
+                f"Objective: {obj_val:.2f}, Utilization: {total_util:.1f} min, "
+                f"Throughput: {total_count:.0f} surgeries, Product: {total_util * total_count:.1f}, "
+                f"Status: {model_balanced.Status}"
+            )
+        else:
+            logger.info(
+                f"{model_balanced.ModelName}{relax_msg} optimized. Objective: {obj_val:.2f}, "
+                f"Status: {model_balanced.Status}"
+            )
+
+    return {"obj": obj_val, "status": model_balanced.Status, "model": model_balanced}

@@ -12,6 +12,7 @@ venv/
 data/
 presentations/
 figures/
+docs/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -22,6 +23,8 @@ figures/
 debug_*.lp
 debug_*.sol
 outputs/
+adhoc_*
+old_*
 
 # IDE / editor folders
 .vscode/
