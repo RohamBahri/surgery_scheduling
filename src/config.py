@@ -89,8 +89,8 @@ class IntegratedConfig:
     # Multi-parameter experiment settings
     param_values_to_test: List[Dict[str, float]] = field(default_factory=lambda: [
         {"rho_pred": 0.5, "rho_book": 0.5},
-        #{"rho_pred": 1.0, "rho_book": 1.0},
-        #{"rho_pred": 2.0, "rho_book": 1.0}
+        {"rho_pred": 1.0, "rho_book": 1.0},
+        {"rho_pred": 2.0, "rho_book": 1.0}
     ])
     multi_param_output_dir: str = "outputs/integrated_multi_param"
 
