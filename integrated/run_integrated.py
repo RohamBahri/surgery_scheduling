@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import json
+import logging
 import math
 import time
 from pathlib import Path
@@ -36,25 +37,25 @@ from src.json_helper_util import to_json_safe
 from src.feature_names_util import canonical_name
 
 
-def enhanced_greedy_schedule_cost(
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+
+def calculate_schedule_cost(
     predicted_durations: np.ndarray,
     booked_minutes: np.ndarray,
     num_blocks: int,
     capacity_per_block: float,
-    c_r: float,
-    c_o: float,
-    c_i: float,
-    enable_local_search: bool = True,
-    max_search_time: float = 1.0,
+    rejection_cost: float,
+    overtime_cost: float,
+    idle_cost: float,
+    enable_optimization: bool = True,
+    max_optimization_time: float = 1.0,
 ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Enhanced greedy scheduler using Best Fit Decreasing + optional local search.
-
-    Returns:
-        Tuple of (total_cost, block_loads, reject_mask, z_assignment, r_warm_start)
-    """
-    N = len(predicted_durations)
-    if N == 0:
+    """Estimate scheduling cost using a greedy heuristic with optional refinement."""
+    num_cases = len(predicted_durations)
+    if num_cases == 0:
         return (
             0.0,
             np.zeros(num_blocks),
@@ -63,39 +64,35 @@ def enhanced_greedy_schedule_cost(
             np.zeros(0),
         )
 
-    C = capacity_per_block
+    capacity = capacity_per_block
     block_loads = np.zeros(num_blocks)
-    reject_mask = np.zeros(N, dtype=bool)
-    z_assignment = np.zeros((N, num_blocks), dtype=int)
+    reject_mask = np.zeros(num_cases, dtype=bool)
+    z_assignment = np.zeros((num_cases, num_blocks), dtype=int)
 
-    # Best Fit Decreasing: Sort by decreasing duration
     sorted_indices = np.argsort(predicted_durations)[::-1]
 
     for idx in sorted_indices:
-        d_i = predicted_durations[idx]
-        b_i = booked_minutes[idx]
+        duration = predicted_durations[idx]
+        booked = booked_minutes[idx]
 
-        # Best Fit: Find block with minimum positive leftover capacity
         best_block = -1
         min_delta_cost = float("inf")
         best_leftover = float("inf")
 
         for block in range(num_blocks):
             current_load = block_loads[block]
-            new_load = current_load + d_i
+            new_load = current_load + duration
 
-            # Calculate incremental cost
-            old_overtime = max(0.0, current_load - C)
-            new_overtime = max(0.0, new_load - C)
-            old_idle = max(0.0, C - current_load)
-            new_idle = max(0.0, C - new_load)
+            old_overtime = max(0.0, current_load - capacity)
+            new_overtime = max(0.0, new_load - capacity)
+            old_idle = max(0.0, capacity - current_load)
+            new_idle = max(0.0, capacity - new_load)
 
-            delta_cost = c_o * (new_overtime - old_overtime) + c_i * (
+            delta_cost = overtime_cost * (new_overtime - old_overtime) + idle_cost * (
                 new_idle - old_idle
             )
 
-            # For best fit, prefer minimum positive leftover among feasible blocks
-            leftover = C - new_load if new_load <= C else -1.0
+            leftover = capacity - new_load if new_load <= capacity else -1.0
 
             if delta_cost < min_delta_cost or (
                 delta_cost == min_delta_cost and 0 <= leftover < best_leftover
@@ -104,29 +101,25 @@ def enhanced_greedy_schedule_cost(
                 best_block = block
                 best_leftover = leftover
 
-        # Compare assignment cost to rejection cost
-        reject_cost = c_r * b_i
+        reject_penalty = rejection_cost * booked
 
-        if min_delta_cost <= reject_cost:
-            block_loads[best_block] += d_i
+        if min_delta_cost <= reject_penalty:
+            block_loads[best_block] += duration
             z_assignment[idx, best_block] = 1
         else:
             reject_mask[idx] = True
 
-    # Optional local search improvement
-    if enable_local_search and max_search_time > 0:
+    if enable_optimization and max_optimization_time > 0:
         start_time = time.time()
         improved = True
 
-        while improved and (time.time() - start_time) < max_search_time:
+        while improved and (time.time() - start_time) < max_optimization_time:
             improved = False
-
-            # Try to insert each rejected case
             rejected_indices = np.where(reject_mask)[0]
             for idx in rejected_indices:
-                d_i = predicted_durations[idx]
-                b_i = booked_minutes[idx]
-                reject_cost = c_r * b_i
+                duration = predicted_durations[idx]
+                booked = booked_minutes[idx]
+                reject_penalty = rejection_cost * booked
 
                 best_improvement = 0.0
                 best_target_block = -1
@@ -134,43 +127,38 @@ def enhanced_greedy_schedule_cost(
 
                 for block in range(num_blocks):
                     current_load = block_loads[block]
-                    new_load_with_insertion = current_load + d_i
+                    new_load_with_insertion = current_load + duration
 
-                    # Cost of inserting this case
-                    old_overtime = max(0.0, current_load - C)
-                    new_overtime = max(0.0, new_load_with_insertion - C)
-                    old_idle = max(0.0, C - current_load)
-                    new_idle = max(0.0, C - new_load_with_insertion)
+                    old_overtime = max(0.0, current_load - capacity)
+                    new_overtime = max(0.0, new_load_with_insertion - capacity)
+                    old_idle = max(0.0, capacity - current_load)
+                    new_idle = max(0.0, capacity - new_load_with_insertion)
 
-                    insertion_cost = c_o * (new_overtime - old_overtime) + c_i * (
+                    insertion_cost = overtime_cost * (new_overtime - old_overtime) + idle_cost * (
                         new_idle - old_idle
                     )
 
-                    # Direct insertion improvement
-                    direct_improvement = reject_cost - insertion_cost
+                    direct_improvement = reject_penalty - insertion_cost
                     if direct_improvement > best_improvement:
                         best_improvement = direct_improvement
                         best_target_block = block
                         best_eject_idx = -1
 
-                    # Try ejecting one case and inserting this one
                     assigned_in_block = np.where(z_assignment[:, block] == 1)[0]
                     for eject_idx in assigned_in_block:
-                        d_eject = predicted_durations[eject_idx]
-                        b_eject = booked_minutes[eject_idx]
+                        duration_eject = predicted_durations[eject_idx]
+                        booked_eject = booked_minutes[eject_idx]
 
-                        # New load after ejection + insertion
-                        new_load_after_swap = current_load - d_eject + d_i
-                        swap_overtime = max(0.0, new_load_after_swap - C)
-                        swap_idle = max(0.0, C - new_load_after_swap)
+                        new_load_after_swap = current_load - duration_eject + duration
+                        swap_overtime = max(0.0, new_load_after_swap - capacity)
+                        swap_idle = max(0.0, capacity - new_load_after_swap)
 
-                        swap_cost = c_o * swap_overtime + c_i * swap_idle
-                        original_block_cost = c_o * old_overtime + c_i * old_idle
-                        eject_cost = c_r * b_eject
+                        swap_cost = overtime_cost * swap_overtime + idle_cost * swap_idle
+                        original_block_cost = overtime_cost * old_overtime + idle_cost * old_idle
+                        eject_penalty = rejection_cost * booked_eject
 
-                        # Total improvement from swap
-                        swap_improvement = (reject_cost + original_block_cost) - (
-                            eject_cost + swap_cost
+                        swap_improvement = (reject_penalty + original_block_cost) - (
+                            eject_penalty + swap_cost
                         )
 
                         if swap_improvement > best_improvement:
@@ -178,18 +166,15 @@ def enhanced_greedy_schedule_cost(
                             best_target_block = block
                             best_eject_idx = eject_idx
 
-                # Apply best improvement if profitable
-                if best_improvement > 1e-6:  # Small threshold to avoid numerical issues
+                if best_improvement > 1e-6:
                     if best_eject_idx == -1:
-                        # Direct insertion
-                        block_loads[best_target_block] += d_i
+                        block_loads[best_target_block] += duration
                         z_assignment[idx, best_target_block] = 1
                         reject_mask[idx] = False
                     else:
-                        # Swap operation
-                        d_eject = predicted_durations[best_eject_idx]
+                        duration_eject = predicted_durations[best_eject_idx]
                         block_loads[best_target_block] = (
-                            block_loads[best_target_block] - d_eject + d_i
+                            block_loads[best_target_block] - duration_eject + duration
                         )
                         z_assignment[best_eject_idx, best_target_block] = 0
                         z_assignment[idx, best_target_block] = 1
@@ -197,20 +182,19 @@ def enhanced_greedy_schedule_cost(
                         reject_mask[best_eject_idx] = True
 
                     improved = True
-                    break  # Try again with updated solution
+                    break
 
-    # Calculate total cost components
-    overtime_cost = c_o * np.sum(np.maximum(0.0, block_loads - C))
-    idle_cost = c_i * np.sum(np.maximum(0.0, C - block_loads))
-    rejection_cost = c_r * np.sum(booked_minutes[reject_mask])
-    total_cost = overtime_cost + idle_cost + rejection_cost
+    overtime_total = overtime_cost * np.sum(np.maximum(0.0, block_loads - capacity))
+    idle_total = idle_cost * np.sum(np.maximum(0.0, capacity - block_loads))
+    rejection_total = rejection_cost * np.sum(booked_minutes[reject_mask])
+    total_cost = overtime_total + idle_total + rejection_total
 
-    r_warm_start = reject_mask.astype(int)
+    warm_start_rejects = reject_mask.astype(int)
 
-    return total_cost, block_loads, reject_mask, z_assignment, r_warm_start
+    return total_cost, block_loads, reject_mask, z_assignment, warm_start_rejects
 
 
-def build_stabilized_master_problem(
+def build_optimization_model(
     Xw: np.ndarray,
     yw: np.ndarray,
     p: int,
@@ -230,10 +214,8 @@ def build_stabilized_master_problem(
     gp.Constr,
     gp.LinExpr,
 ]:
-    """
-    Build stabilized Benders master problem using level method + L1 trust region.
-    """
-    master = gp.Model("StabilizedBendersMaster")
+    """Build master problem for integrated optimization with trust-region stabilization."""
+    master = gp.Model("IntegratedOptimizationMaster")
 
     # Original variables
     theta = master.addMVar(p, lb=-GRB.INFINITY, name="theta")
@@ -241,7 +223,7 @@ def build_stabilized_master_problem(
     u = master.addMVar(p, lb=0.0, name="u")
     beta = master.addVars(num_weeks, lb=0.0, name="beta")
 
-    # Trust region variables for L1 proximity ||theta - theta_center||_1
+    # Trust region variables for L1 proximity to the current center
     trp = master.addMVar(p, lb=0.0, name="trp")  # positive part
     trn = master.addMVar(p, lb=0.0, name="trn")  # negative part
 
@@ -262,8 +244,7 @@ def build_stabilized_master_problem(
     master.addConstr(u >= theta, name="l1_pos")
     master.addConstr(u >= -theta, name="l1_neg")
 
-    # Trust region constraints: trp[j], trn[j] >= |theta[j] - theta_center[j]|
-    # Model as: theta[j] - trp[j] <= theta_center[j] and -theta[j] - trn[j] <= -theta_center[j]
+    # Trust region constraints keep theta close to the provided center point
     tr_pos_constrs = []
     tr_neg_constrs = []
     for j in range(p):
@@ -284,7 +265,7 @@ def build_stabilized_master_problem(
     # Level constraint (RHS will be updated each iteration)
     level_constr = master.addConstr(orig_obj <= GRB.INFINITY, name="level")
 
-    # New objective: minimize L1 trust region ||theta - theta_center||_1
+    # New objective: minimize L1 distance from the center point
     master.setObjective(quicksum(trp) + quicksum(trn), GRB.MINIMIZE)
 
     master.Params.OutputFlag = 0
@@ -382,7 +363,7 @@ def build_subproblem(
     return sub
 
 
-def extract_scheduling_cut(
+def generate_scheduling_cut(
     week_data: pd.DataFrame,
     week_blocks: List[Tuple[int, int]],
     X_processed: np.ndarray,
@@ -397,18 +378,7 @@ def extract_scheduling_cut(
     max_dur: float,
     use_affine_cuts: bool = False,
 ) -> Tuple[np.ndarray, float]:
-    """
-    Extract valid supporting hyperplane for scheduling costs at theta_ref.
-
-    CANONICAL IMPLEMENTATION - standardized cut contract.
-
-    Args:
-        use_affine_cuts: If False, returns constant cut (slope=0) for safety
-
-    Returns:
-        Tuple of (slope_vector, standard_intercept)
-        Standard intercept b where cut is: β ≥ b + h^T θ
-    """
+    """Generate a supporting hyperplane for scheduling costs at the reference point."""
     if week_data.empty:
         p = X_processed.shape[1] if len(X_processed) > 0 else 1
         return np.zeros(p), 0.0
@@ -605,8 +575,14 @@ def solve_subproblem_mip_with_warmstart(
         # Fallback to greedy cost
         bp = week_data[DataColumns.BOOKED_MIN].to_numpy()
         num_blocks = len(week_blocks)
-        greedy_cost, _, _, _, _ = enhanced_greedy_schedule_cost(
-            predicted_durations, bp, num_blocks, C, c_r, c_o, c_i
+        greedy_cost, _, _, _, _ = calculate_schedule_cost(
+            predicted_durations,
+            bp,
+            num_blocks,
+            C,
+            c_r,
+            c_o,
+            c_i,
         )
         return greedy_cost
 
@@ -668,7 +644,7 @@ def manage_cut_pool(
             cut_pool[week_idx] = set(cut_list[-max_cuts_per_week // 2 :])
 
 
-def solve_integrated_benders(
+def solve_integrated_optimization(
     df_plan_data: List[pd.DataFrame],
     week_blocks_list: List[List[Tuple[int, int]]],
     Xw: np.ndarray,
@@ -680,19 +656,8 @@ def solve_integrated_benders(
     num_horizons_for_mip: int = 8,
     use_affine_sched_cuts: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Solve integrated learning-scheduling using stabilized Benders decomposition.
-
-    Implements level method stabilization, proper MW cut strengthening via multiple
-    reference points, cut filtering, and age-aware certification with time budgets.
-
-    Args:
-        use_affine_sched_cuts: If False (default), uses safe constant scheduling cuts.
-                               If True, uses affine cuts with LP duals (use with caution).
-    """
-    print(
-        "Starting stabilized Benders decomposition for integrated learning-scheduling"
-    )
+    """Run the integrated prediction and scheduling optimization loop."""
+    logger.info("Starting integrated optimization run")
     start_time = time.time()
 
     try:
@@ -712,8 +677,8 @@ def solve_integrated_benders(
         )  # week_idx -> set of cut signatures
 
         # Stabilization parameters
-        phi = 0.7  # Level parameter (between LB and UB)
-        gamma = 0.3  # Trust region center update rate
+        level_factor = 0.7
+        update_rate = 0.3
 
         # Extract and scale problem parameters (no CONFIG mutation)
         LAMBDA_ORIG = CONFIG.integrated.lambda_reg
@@ -734,10 +699,7 @@ def solve_integrated_benders(
             + DomainConstants.MAX_OVERTIME_MINUTES_PER_BLOCK
         )
 
-        print(
-            f"Parameters: λ={LAMBDA_ORIG}, τ_pred={TAU_PRED_ORIG}, ρ_pred={RHO_PRED_ORIG}, "
-            f"η_book={ETA_BOOK_ORIG}, ρ_book={RHO_BOOK_ORIG}"
-        )
+        logger.info("Starting optimization with %d planning periods", num_weeks)
 
         # Apply cost scaling to local variables only (no CONFIG mutation)
         bp_mean = np.mean(
@@ -756,7 +718,7 @@ def solve_integrated_benders(
 
         if max_cost > 1000:
             cost_scale = 1000.0 / max_cost
-            print(f"Applying cost scaling factor: {cost_scale:.4f}")
+            logger.info("Applying cost scaling factor %.4f", cost_scale)
 
         # Scale all parameters consistently in local variables
         c_r = c_r_base * cost_scale
@@ -768,14 +730,14 @@ def solve_integrated_benders(
         tau_pred = TAU_PRED_ORIG  # No scaling needed for tolerance
         eta_book = ETA_BOOK_ORIG  # No scaling needed for tolerance
 
-        print("Initializing with Lasso solution...")
+        logger.info("Initializing model coefficients with Lasso solution")
         theta_init = (
             Lasso(alpha=lambda_reg, fit_intercept=False, max_iter=10_000)
             .fit(Xw, yw)
             .coef_
         )
 
-        print("Building stabilized master problem...")
+        logger.info("Building optimization model")
         (
             master,
             theta_var,
@@ -786,13 +748,12 @@ def solve_integrated_benders(
             trn_var,
             level_constr,
             orig_obj,
-        ) = build_stabilized_master_problem(
+        ) = build_optimization_model(
             Xw, yw, p, lambda_reg, num_weeks, tau_pred, rho_pred, theta_init
         )
 
-        # Initialize stabilization variables
-        theta_center = theta_init.copy()  # Trust region center
-        theta_core = theta_init.copy()  # MW core point
+        model_center = theta_init.copy()
+        reference_point = theta_init.copy()
 
         # Initialize tracking variables
         best_upper_bound = float("inf")
@@ -811,32 +772,34 @@ def solve_integrated_benders(
         cert_budget = 180.0  # seconds
         full_sweep_triggered = False
 
-        print(f"Starting {max_iterations} iterations with stabilization...")
+        logger.info(
+            "Running optimization loop for %d iterations", max_iterations
+        )
 
         for iteration in range(max_iterations):
-            print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
+            logger.info("Iteration %d/%d", iteration + 1, max_iterations)
 
             # Update level constraint RHS (between LB and UB)
             if iteration > 0:  # Skip first iteration (no meaningful bounds yet)
                 if best_upper_bound < float("inf") and lower_bound is not None:
                     level_value = float(
-                        lower_bound + phi * (best_upper_bound - lower_bound)
+                        lower_bound + level_factor * (best_upper_bound - lower_bound)
                     )
                     level_constr.RHS = level_value
-                    print(f"Level target: {level_value:.2f}")
+                    logger.info("Updated target level to %.2f", level_value)
 
             # Update trust region center and constraints
             if iteration > 0:
-                theta_center = (1 - gamma) * theta_center + gamma * theta_current
+                model_center = (1 - update_rate) * model_center + update_rate * theta_current
 
                 # Update trust region constraint RHS
                 for j in range(p):
-                    master._tr_pos_constrs[j].RHS = theta_center[j]
-                    master._tr_neg_constrs[j].RHS = -theta_center[j]
+                    master._tr_pos_constrs[j].RHS = model_center[j]
+                    master._tr_neg_constrs[j].RHS = -model_center[j]
 
-            # Update MW core point
+            # Update reference point
             if iteration > 0:
-                theta_core = 0.7 * theta_core + 0.3 * theta_current
+                reference_point = 0.7 * reference_point + 0.3 * theta_current
 
             # Solve master problem with level infeasibility guard
             master_start = time.time()
@@ -844,14 +807,14 @@ def solve_integrated_benders(
 
             # Handle level constraint infeasibility
             if master.Status == GRB.INFEASIBLE:
-                print("Level constraint too restrictive, relaxing...")
+                logger.info("Relaxing level constraint due to infeasibility")
                 level_constr.RHS = GRB.INFINITY  # Disable level constraint this round
                 master.optimize()
 
             master_time = time.time() - master_start
 
             if master.Status != GRB.OPTIMAL:
-                print(f"Master problem failed with status: {master.Status}")
+                logger.error("Master problem failed with status %s", master.Status)
                 break
 
             theta_current = np.array([theta_var[j].X for j in range(p)])
@@ -860,10 +823,10 @@ def solve_integrated_benders(
             if iteration == 0:
                 lower_bound = None
 
-            print(f"Master: theta found, time={master_time:.2f}s")
+            logger.info("Master problem solved in %.2fs", master_time)
 
-            # Compute enhanced greedy upper bound
-            print("Computing enhanced greedy upper bound...")
+            # Compute scheduling upper bound
+            logger.info("Estimating scheduling upper bound")
             greedy_start = time.time()
 
             total_greedy_scheduling_cost = 0.0
@@ -883,8 +846,8 @@ def solve_integrated_benders(
                 bp = week_data[DataColumns.BOOKED_MIN].to_numpy()
                 num_blocks = len(week_blocks)
 
-                # Use enhanced greedy scheduler with local parameters
-                cost, _, _, z_warm, r_warm = enhanced_greedy_schedule_cost(
+                # Estimate scheduling cost using local parameters
+                cost, _, _, z_warm, r_warm = calculate_schedule_cost(
                     predicted_durations,
                     bp,
                     num_blocks,
@@ -892,7 +855,7 @@ def solve_integrated_benders(
                     c_r,
                     c_o,
                     c_i,
-                    enable_local_search=True,
+                    enable_optimization=True,
                 )
 
                 # Floor by LP lower bound for consistency
@@ -921,30 +884,34 @@ def solve_integrated_benders(
             )
 
             greedy_time = time.time() - greedy_start
-            print(f"Greedy UB: {greedy_upper_bound:.2f}, time: {greedy_time:.3f}s")
+            logger.info(
+                "Scheduling upper bound %.2f calculated in %.3fs",
+                greedy_upper_bound,
+                greedy_time,
+            )
 
             # Emergency consistency check
             if lower_bound is not None and lower_bound > best_upper_bound + 1e-6:
-                print("! LB exceeded stored best UB -- resetting")
+                logger.warning("Lower bound exceeded stored best upper bound; resetting")
                 best_upper_bound = greedy_upper_bound
                 best_theta = theta_current.copy()
-                print(f"*** Reset best UB: {best_upper_bound:.2f} ***")
+                logger.info("Reset best upper bound to %.2f", best_upper_bound)
 
             # Update best solution
             if greedy_upper_bound < best_upper_bound:
                 best_upper_bound = greedy_upper_bound
                 best_theta = theta_current.copy()
                 no_progress_iters = 0
-                print(f"*** New best UB: {best_upper_bound:.2f} ***")
+                logger.info("New best upper bound: %.2f", best_upper_bound)
             else:
                 no_progress_iters += 1
 
-            # Generate cuts with proper MW approach: multiple reference points, standard intercepts
-            print("Adding filtered cuts with multiple reference points...")
+            # Generate cuts using multiple reference points
+            logger.info("Adding scheduling cuts")
             cuts_start = time.time()
             cuts_added = 0
 
-            # Multiple reference points for stronger cuts (proper MW approach)
+            # Multiple reference points for stronger cuts
             theta_refs = [theta_current]
             if theta_prev is not None and not np.allclose(
                 theta_prev, theta_current, atol=1e-6
@@ -952,8 +919,8 @@ def solve_integrated_benders(
                 theta_refs.append(theta_prev)
             if not np.allclose(best_theta, theta_current, atol=1e-6):
                 theta_refs.append(best_theta)
-            if not np.allclose(theta_core, theta_current, atol=1e-6):
-                theta_refs.append(theta_core)
+            if not np.allclose(reference_point, theta_current, atol=1e-6):
+                theta_refs.append(reference_point)
 
             for week_idx, (week_data, week_blocks) in enumerate(
                 zip(df_plan_data, week_blocks_list)
@@ -965,7 +932,7 @@ def solve_integrated_benders(
                 X_processed = preproc.transform(X_week)
 
                 # Extract scheduling cut at current point for LB tracking
-                h_sched_current, b_sched_current = extract_scheduling_cut(
+                h_sched_current, b_sched_current = generate_scheduling_cut(
                     week_data,
                     week_blocks,
                     X_processed,
@@ -999,7 +966,7 @@ def solve_integrated_benders(
                         h_sched, b_sched = h_sched_current, b_sched_current
                     else:
                         # Compute cut at different reference point
-                        h_sched, b_sched = extract_scheduling_cut(
+                        h_sched, b_sched = generate_scheduling_cut(
                             week_data,
                             week_blocks,
                             X_processed,
@@ -1057,7 +1024,7 @@ def solve_integrated_benders(
 
             master.update()
             cuts_time = time.time() - cuts_start
-            print(f"Cuts: added={cuts_added}, time={cuts_time:.3f}s")
+            logger.info("Cuts added: %d (%.3fs)", cuts_added, cuts_time)
 
             # Compute rigorous master lower bound
             if iteration >= 1 and cuts_added > 0:  # Only if we have meaningful cuts
@@ -1125,7 +1092,7 @@ def solve_integrated_benders(
                     + current_scheduling_lb
                 )
 
-            print(f"Rigorous LB: {lower_bound:.2f}")
+            logger.info("Updated lower bound: %.2f", lower_bound)
 
             # Age-aware MIP certification with time budget
             exact_ub = greedy_upper_bound
@@ -1137,7 +1104,7 @@ def solve_integrated_benders(
                 else 0.0
             )
             if current_gap < 0.05 and not full_sweep_triggered:
-                print("Gap < 5%: Triggering full certification sweep")
+                logger.info("Gap below 5%%; running full validation sweep")
                 full_sweep_triggered = True
 
                 # Certify ALL non-empty weeks
@@ -1176,7 +1143,11 @@ def solve_integrated_benders(
                     pred_penalty + l1_penalty + exact_scheduling_cost + book_penalty
                 )
                 mip_time = time.time() - mip_start
-                print(f"Full sweep UB={exact_ub:.2f}, time={mip_time:.2f}s")
+                logger.info(
+                    "Full validation upper bound %.2f computed in %.2fs",
+                    exact_ub,
+                    mip_time,
+                )
 
                 if exact_ub < best_upper_bound:
                     best_upper_bound = exact_ub
@@ -1200,8 +1171,10 @@ def solve_integrated_benders(
                     budget_remaining -= 60  # Rough estimate per week
 
                 if selected_weeks:
-                    print(
-                        f"Age-aware certification: {len(selected_weeks)} weeks, budget={cert_budget}s"
+                    logger.info(
+                        "Running targeted validation on %d weeks (budget %.0fs)",
+                        len(selected_weeks),
+                        cert_budget,
                     )
 
                     mip_start = time.time()
@@ -1261,7 +1234,11 @@ def solve_integrated_benders(
                     )
 
                     mip_time = time.time() - mip_start
-                    print(f"Age-aware UB={exact_ub:.2f}, time={mip_time:.2f}s")
+                    logger.info(
+                        "Targeted validation upper bound %.2f computed in %.2fs",
+                        exact_ub,
+                        mip_time,
+                    )
 
                     if exact_ub < best_upper_bound:
                         best_upper_bound = exact_ub
@@ -1292,12 +1269,16 @@ def solve_integrated_benders(
                 display_book = book_penalty
                 display_l1 = l1_penalty
 
-            print(f"Rigorous Bounds: LB={display_lb:.2f}, UB={display_ub:.2f}")
-            print(
-                f"Components at θ_current: Pred={display_pred:.1f}, L1={display_l1:.1f}, "
-                f"Sched={display_sched:.1f}, Book={display_book:.1f}"
+            logger.info(
+                "Bounds: LB=%.2f, UB=%.2f | Components: Pred=%.1f, L1=%.1f, Sched=%.1f, Book=%.1f",
+                display_lb,
+                display_ub,
+                display_pred,
+                display_l1,
+                display_sched,
+                display_book,
             )
-            print(f"Gap: {gap:.4f} ({gap*100:.2f}%)")
+            logger.info("Gap: %.4f (%.2f%%)", gap, gap * 100)
 
             # Progress tracking
             if gap < prev_gap - 0.01:
@@ -1338,13 +1319,16 @@ def solve_integrated_benders(
             )  # Allow some staleness
 
             if gap < 0.01 and max_age <= coverage_window:
-                print("✓ Converged: Gap < 1% with recent certification coverage")
+                logger.info("Converged: gap below 1%% with recent validation coverage")
                 break
             elif gap < 0.01:
-                print(f"Gap < 1% but incomplete coverage (max_age={max_age})")
+                logger.info(
+                    "Gap below 1%% but waiting for validation coverage (max age %d)",
+                    max_age,
+                )
 
             if cuts_added == 0 and iteration >= 5:
-                print("✓ Converged: No improving cuts")
+                logger.info("Converged: no new cuts added")
                 break
 
             # Update theta tracking
@@ -1358,19 +1342,17 @@ def solve_integrated_benders(
             best_upper_bound / cost_scale if cost_scale != 1.0 else best_upper_bound
         )
 
-        print(f"\n{'='*60}")
-        print("Stabilized Benders decomposition completed!")
-        print(f"Total time: {total_time:.2f}s")
-        print(f"Best objective: {final_objective_original:.2f}")
-        print(f"Final gap: {gap:.4f} ({gap*100:.2f}%)")
-        print(f"Iterations: {len(iteration_info)}")
+        logger.info("Optimization completed in %.2fs", total_time)
+        logger.info("Best objective value: %.2f", final_objective_original)
+        logger.info("Final gap: %.4f (%.2f%%)", gap, gap * 100)
+        logger.info("Iterations run: %d", len(iteration_info))
         if iteration_info:
             avg_iter_time = total_time / len(iteration_info)
-            print(f"Average time per iteration: {avg_iter_time:.2f}s")
-        print(
-            f"Scheduling cuts: {'Affine (with LP duals)' if use_affine_sched_cuts else 'Constant (safe)'}"
+            logger.info("Average iteration time: %.2fs", avg_iter_time)
+        logger.info(
+            "Scheduling cuts used: %s",
+            "Affine" if use_affine_sched_cuts else "Constant",
         )
-        print(f"{'='*60}")
 
         return {
             "theta": best_theta,
@@ -1382,10 +1364,7 @@ def solve_integrated_benders(
         }
 
     except Exception as e:
-        print(f"Error in solve_integrated_benders: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception("Error in solve_integrated_optimization")
         return {
             "theta": None,
             "objective": None,
@@ -1414,8 +1393,10 @@ def build_planning_weeks_data(
     days_from_monday = start_ts.weekday()
     first_monday = start_ts - pd.Timedelta(days=days_from_monday)
 
-    print(f"Data period: {start_ts.date()} to {end_ts.date()}")
-    print(f"First Monday: {first_monday.date()}")
+    logger.info(
+        "Planning window: %s to %s", start_ts.date(), end_ts.date()
+    )
+    logger.info("First planning Monday: %s", first_monday.date())
 
     week_data_list = []
     week_blocks_list = []
@@ -1445,21 +1426,26 @@ def build_planning_weeks_data(
 
         week_blocks_list.append(week_blocks)
 
-        print(
-            f"Week {week_idx}: {current_monday.date()} - {week_end.date()}: "
-            f"{len(df_week)} surgeries, {len(week_blocks)} blocks"
+        logger.info(
+            "Week %d: %s-%s | Surgeries: %d | Blocks: %d",
+            week_idx,
+            current_monday.date(),
+            week_end.date(),
+            len(df_week),
+            len(week_blocks),
         )
 
         current_monday += pd.Timedelta(days=7)
         week_idx += 1
 
-    print(f"Built {len(week_data_list)} weeks from data")
+    logger.info("Prepared %d planning weeks", len(week_data_list))
     return week_data_list, week_blocks_list
 
 
 def main() -> None:
-    """Main execution function for enhanced integrated learning-scheduling optimization."""
-    print("=== Enhanced Integrated Learning-Scheduling Optimization ===\n")
+    """Run the integrated optimization experiment."""
+    print("Surgery Scheduling Optimization")
+    print("Starting optimization...\n")
 
     # Load and preprocess data
     df = load_data(CONFIG)
@@ -1479,21 +1465,17 @@ def main() -> None:
     total_blocks = sum(len(week_blocks) for week_blocks in week_blocks_list)
 
     print(
-        f"\nTotal across all weeks: {total_surgeries} surgeries, {total_blocks} blocks"
+        f"Planning summary: {total_surgeries} surgeries across {total_blocks} blocks"
     )
 
     # Test multiple parameter combinations
     param_sets = CONFIG.integrated.param_values_to_test
     all_results = {}
 
-    print(
-        f"\nRunning enhanced Benders decomposition for {len(param_sets)} parameter sets"
-    )
+    print(f"Evaluating {len(param_sets)} parameter sets\n")
 
     for i, params in enumerate(param_sets):
-        print(f"\n{'='*60}")
-        print(f"Parameter set {i+1}/{len(param_sets)}: {params}")
-        print(f"{'='*60}")
+        print(f"Parameter set {i + 1}/{len(param_sets)}: {params}")
 
         # Temporarily update configuration
         original_params = {}
@@ -1501,8 +1483,8 @@ def main() -> None:
             original_params[key] = getattr(CONFIG.integrated, key)
             setattr(CONFIG.integrated, key, value)
 
-        # Solve integrated problem with enhancements
-        results = solve_integrated_benders(
+        # Solve integrated problem
+        results = solve_integrated_optimization(
             week_data_list,
             week_blocks_list,
             Xw,
@@ -1536,7 +1518,7 @@ def main() -> None:
             param_theta_path.parent.mkdir(parents=True, exist_ok=True)
             with param_theta_path.open("w") as f:
                 json.dump(theta_out, f, indent=2)
-            print(f"θ for {param_key} saved to {param_theta_path}")
+            logger.info("Saved parameter coefficients for %s to %s", param_key, param_theta_path)
 
     # Save performance comparison
     out_path = Path(CONFIG.data.theta_path)
@@ -1563,17 +1545,20 @@ def main() -> None:
                 "total_time": float(results.get("total_time", 0)),
             }
 
-            print(f"\n{param_key} Performance:")
-            print(f"  Prediction: {last_iter.get('prediction_penalty', 0):.2f}")
-            print(f"  L1: {last_iter.get('l1_penalty', 0):.2f}")
-            print(f"  Booked: {last_iter.get('booked_penalty', 0):.2f}")
-            print(f"  Scheduling: {last_iter.get('greedy_scheduling_cost', 0):.2f}")
-            print(f"  Total: {results.get('objective', 0):.2f}")
+            logger.info(
+                "%s performance | Prediction: %.2f | L1: %.2f | Booked: %.2f | Scheduling: %.2f | Total: %.2f",
+                param_key,
+                last_iter.get("prediction_penalty", 0),
+                last_iter.get("l1_penalty", 0),
+                last_iter.get("booked_penalty", 0),
+                last_iter.get("greedy_scheduling_cost", 0),
+                results.get("objective", 0),
+            )
 
     performance_path = out_path.parent / "performance_comparison_enhanced.json"
     with performance_path.open("w") as f:
         json.dump(to_json_safe(performance_results), f, indent=2)
-    print(f"\nPerformance comparison saved to {performance_path}")
+    logger.info("Performance comparison saved to %s", performance_path)
 
     # Save detailed results
     detailed_results_path = (
@@ -1592,30 +1577,16 @@ def main() -> None:
 
     with detailed_results_path.open("w") as f:
         json.dump(to_json_safe(detailed_results), f, indent=2)
-    print(f"Detailed results saved to {detailed_results_path}")
+    logger.info("Detailed results saved to %s", detailed_results_path)
 
     # Print final summary
-    print(f"\n{'='*60}")
-    print("Summary of all parameter sets:")
-    print(f"{'='*60}")
+    print("\nOptimization summary by parameter set:")
     for param_key in sorted(performance_results.keys()):
         perf = performance_results[param_key]
         print(
             f"{param_key}: Total={perf['total_objective']:.2f}, "
-            f"Iters={perf['iterations']}, "
-            f"Time={perf['total_time']:.1f}s"
+            f"Iterations={perf['iterations']}, Time={perf['total_time']:.1f}s"
         )
-
-    print(
-        f"\nEnhanced implementation features:\n"
-        f"• Stabilized level method with L1 trust region\n"
-        f"• Proper MW strengthening via multiple reference points\n"
-        f"• Cut filtering and deduplication\n"
-        f"• Enhanced Best-Fit Decreasing scheduler with local search\n"
-        f"• Age-aware MIP certification with time budgets\n"
-        f"• Safe constant scheduling cuts (no CONFIG mutation)\n"
-        f"• Full sweep certification trigger at 5% gap"
-    )
 
 
 if __name__ == "__main__":

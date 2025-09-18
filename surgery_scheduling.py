@@ -1,10 +1,4 @@
-"""
-Main script for running elective surgery scheduling experiments.
-
-This script loads and processes surgery data, trains predictive models,
-simulates scheduling over multiple horizons using various methods (deterministic,
-predictive, SAA, clairvoyant), evaluates the schedules, and outputs results.
-"""
+"""Main script for the elective surgery scheduling workflow."""
 
 import logging
 from copy import deepcopy
@@ -106,12 +100,7 @@ def _generate_brief_console_output(
 def main() -> None:
     """Main function to run the elective surgery scheduling experiment."""
 
-    logger.info(
-        "\n"
-        + "=" * 30
-        + " Elective Surgery Scheduling – 8h Blocks with Graduated Overtime"
-        + "=" * 30
-    )
+    logger.info("Starting elective surgery scheduling run")
 
     # --- 1. Load & Split Data ---
     logger.info("Loading and splitting data...")
@@ -334,11 +323,12 @@ def main() -> None:
                 ),
             )
         else:
-            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping.")
-            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping UtilMax too.")
-            logger.warning(f"Horizon {h_idx+1}: XGBoost model not available, skipping BalancedUtil too.")
+            logger.warning(
+                "Horizon %d: XGBoost model unavailable; skipping XGBoost, UtilMax, and BalancedUtil solvers.",
+                h_idx + 1,
+            )
 
-       # Add all integrated models to surgeries_map_for_solvers
+        # Add all integrated models to surgeries_map_for_solvers
         for integrated_method_name, theta_predictor in theta_predictors.items():
             surgeries_map_for_solvers[integrated_method_name] = (
                 solve_predictive_model,
@@ -408,10 +398,13 @@ def main() -> None:
                 # Log KNN debug info if available
                 if "knn_debug" in knn_solver_result:
                     debug_info = knn_solver_result["knn_debug"]
-                    logger.info(f"KNN Debug - K: {debug_info['k_used']}, "
-                               f"Unique neighbors: {debug_info['unique_neighbors']}, "
-                               f"Coverage: {debug_info['neighbor_coverage']:.1%}, "
-                               f"Scenario mean: {debug_info['scenario_mean']:.1f}")
+                    logger.debug(
+                        "KNN details | K=%s | Unique neighbors=%s | Coverage=%.1f%% | Scenario mean=%.1f",
+                        debug_info["k_used"],
+                        debug_info["unique_neighbors"],
+                        debug_info["neighbor_coverage"] * 100,
+                        debug_info["scenario_mean"],
+                    )
                 
                 horizon_method_results["KNN"] = {
                     "res": knn_solver_result,
@@ -514,12 +507,12 @@ def main() -> None:
             "Summary and saving skipped as per configuration (debug_mode or save_results=False)."
         )
 
-    # Log graduated overtime configuration
-    logger.info(f"\n--- Configuration Summary ---")
-    logger.info(f"  Overtime cost: ${CONFIG.costs.overtime_per_min:.2f}/min")
-    logger.info(f"  Idle time cost: ${CONFIG.costs.idle_per_min:.2f}/min")
-
-    logger.info("\n" + "=" * 30 + " Experiment Finished " + "=" * 30)
+    logger.info(
+        "Cost configuration | Overtime: $%.2f/min | Idle: $%.2f/min",
+        CONFIG.costs.overtime_per_min,
+        CONFIG.costs.idle_per_min,
+    )
+    logger.info("Experiment finished")
 
 
 if __name__ == "__main__":
