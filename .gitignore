@@ -9,10 +9,11 @@ __pycache__/
 venv/
 
 # Data and presentation files
-data/
+dataset/
 presentations/
 figures/
 docs/
+tables/
 
 # Jupyter
 .ipynb_checkpoints/
