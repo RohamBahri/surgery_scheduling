@@ -14,6 +14,8 @@ presentations/
 figures/
 docs/
 tables/
+*.xlsx
+*.csv
 
 # Jupyter
 .ipynb_checkpoints/
