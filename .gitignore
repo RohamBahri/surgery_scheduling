@@ -9,7 +9,7 @@ __pycache__/
 venv/
 
 # Data and presentation files
-dataset/
+/data/
 presentations/
 figures/
 docs/
