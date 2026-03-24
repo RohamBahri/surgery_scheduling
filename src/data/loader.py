@@ -1,15 +1,9 @@
-"""Data loading and cleaning for the UHN surgical dataset.
-
-Reads the raw Excel file, normalises column names, filters to elective
-completed OR cases, computes durations, recodes rare categories, and returns
-a tidy DataFrame sorted by ``actual_start``.
-"""
+"""Data loading and cleaning for the UHN surgical dataset."""
 
 from __future__ import annotations
 
 import logging
 import sys
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -19,7 +13,6 @@ from src.core.types import Col, Domain
 
 logger = logging.getLogger(__name__)
 
-# Columns we ask the Excel reader to load (original header names).
 _EXCEL_COLUMNS = [
     "Patient_Type", "Case_Service", "Main_Procedure", "Main_Procedure_Id",
     "Operating_Room", "Site", "Booked Time (Minutes)",
@@ -32,19 +25,8 @@ _EXCEL_COLUMNS = [
 
 
 def load_data(config: Config) -> pd.DataFrame:
-    """Read the raw Excel file and return a cleaned elective-surgery DataFrame.
-
-    The returned DataFrame uses canonical snake_case column names defined in
-    :class:`Col` and is sorted by ``actual_start``.
-
-    Raises
-    ------
-    SystemExit
-        If the Excel file cannot be found or read.
-    """
     path = config.data.excel_file_path
     logger.info("Loading data from %s", path)
-
     try:
         df = pd.read_excel(path, usecols=_EXCEL_COLUMNS)
     except FileNotFoundError:
@@ -52,7 +34,6 @@ def load_data(config: Config) -> pd.DataFrame:
     except Exception as exc:
         sys.exit(f"Error reading data file: {exc}")
 
-    # ── Normalise column names to snake_case ─────────────────────────────
     df.columns = (
         df.columns.str.strip()
         .str.lower()
@@ -60,70 +41,106 @@ def load_data(config: Config) -> pd.DataFrame:
         .str.replace(r"^_|_$", "", regex=True)
     )
 
-    # ── Row-level filters ────────────────────────────────────────────────
     df = df[df[Col.ACTUAL_START_DATE].notna()]
 
-    # Keep only actual OR rooms (prefix "OR"), exclude emergency-designated rooms
     room_upper = df[Col.OPERATING_ROOM].fillna("").astype(str).str.upper()
     is_or = room_upper.str.startswith(Domain.OR_ROOM_PREFIX)
-    is_emergency_room = room_upper.isin(
-        [r.upper() for r in Domain.EMERGENCY_ROOMS])
+    is_emergency_room = room_upper.isin([r.upper() for r in Domain.EMERGENCY_ROOMS])
     df = df[is_or & ~is_emergency_room]
-
-    # Exclude emergency patients
     df = df[df[Col.PATIENT_TYPE] != Domain.EMERGENCY_PATIENT]
 
-    # ── Parse timestamps ─────────────────────────────────────────────────
-    df[Col.ACTUAL_START] = _combine_date_time(df, Col.ACTUAL_START_DATE,
-                                               Col.ACTUAL_START_TIME)
-    df[Col.ACTUAL_STOP] = _combine_date_time(df, Col.ACTUAL_STOP_DATE,
-                                              Col.ACTUAL_STOP_TIME)
-    df[Col.ENTER_ROOM] = _combine_date_time(df, Col.ENTER_ROOM_DATE,
-                                             Col.ENTER_ROOM_TIME)
-    df[Col.LEAVE_ROOM] = _combine_date_time(df, Col.LEAVE_ROOM_DATE,
-                                             Col.LEAVE_ROOM_TIME)
+    df[Col.ACTUAL_START] = _combine_date_time(df, Col.ACTUAL_START_DATE, Col.ACTUAL_START_TIME)
+    df[Col.ACTUAL_STOP] = _combine_date_time(df, Col.ACTUAL_STOP_DATE, Col.ACTUAL_STOP_TIME)
+    df[Col.ENTER_ROOM] = _combine_date_time(df, Col.ENTER_ROOM_DATE, Col.ENTER_ROOM_TIME)
+    df[Col.LEAVE_ROOM] = _combine_date_time(df, Col.LEAVE_ROOM_DATE, Col.LEAVE_ROOM_TIME)
 
-    # Drop the raw date / time string columns
-    _date_time_cols = [
+    df = df.drop(columns=[
         Col.ACTUAL_START_DATE, Col.ACTUAL_START_TIME,
         Col.ACTUAL_STOP_DATE, Col.ACTUAL_STOP_TIME,
         Col.ENTER_ROOM_DATE, Col.ENTER_ROOM_TIME,
         Col.LEAVE_ROOM_DATE, Col.LEAVE_ROOM_TIME,
-    ]
-    df = df.drop(columns=[c for c in _date_time_cols if c in df.columns])
+    ], errors="ignore")
 
-    # ── Compute durations ────────────────────────────────────────────────
-    df[Col.PROCEDURE_DURATION] = (
-        (df[Col.ACTUAL_STOP] - df[Col.ACTUAL_START])
-        .dt.total_seconds() / 60.0
+    df[Col.SURGICAL_DURATION] = ((df[Col.ACTUAL_STOP] - df[Col.ACTUAL_START]).dt.total_seconds() / 60.0)
+    df[Col.ROOM_DURATION] = ((df[Col.LEAVE_ROOM] - df[Col.ENTER_ROOM]).dt.total_seconds() / 60.0)
+
+    has_all_four = (
+        df[Col.ENTER_ROOM].notna()
+        & df[Col.ACTUAL_START].notna()
+        & df[Col.ACTUAL_STOP].notna()
+        & df[Col.LEAVE_ROOM].notna()
     )
+    order_ok = (
+        (df[Col.ENTER_ROOM] <= df[Col.ACTUAL_START])
+        & (df[Col.ACTUAL_START] <= df[Col.ACTUAL_STOP])
+        & (df[Col.ACTUAL_STOP] <= df[Col.LEAVE_ROOM])
+    )
+    severe = has_all_four & (df[Col.LEAVE_ROOM] < df[Col.ENTER_ROOM])
+    df = df[~severe].copy()
+    has_all_four = has_all_four.loc[df.index]
+    order_ok = order_ok.loc[df.index]
+
+    mild_violation = has_all_four & ~order_ok
+
+    room_time_valid = df[Col.ROOM_DURATION].notna() & (df[Col.ROOM_DURATION] > 0)
+    overhead_capped = room_time_valid & ((df[Col.ROOM_DURATION] - df[Col.SURGICAL_DURATION]) > 300)
+
+    df[Col.TIMESTAMP_VIOLATION] = mild_violation
+    df[Col.OVERHEAD_CAPPED] = overhead_capped
+    df[Col.USED_ROOM_TIME] = room_time_valid & ~mild_violation & ~overhead_capped
+    df[Col.FELL_BACK_SURGICAL] = ~df[Col.USED_ROOM_TIME]
+
+    df[Col.PROCEDURE_DURATION] = np.where(
+        df[Col.USED_ROOM_TIME],
+        df[Col.ROOM_DURATION],
+        df[Col.SURGICAL_DURATION],
+    )
+
     df[Col.PREPARATION_DURATION] = (
-        (df[Col.ACTUAL_START] - df[Col.ENTER_ROOM])
-        .dt.total_seconds().clip(lower=0) / 60.0
+        (df[Col.ACTUAL_START] - df[Col.ENTER_ROOM]).dt.total_seconds().clip(lower=0) / 60.0
     )
 
-    # Drop cases with missing or non-positive procedure durations
-    df = df[df[Col.PROCEDURE_DURATION] >= Domain.MIN_PROCEDURE_DURATION]
+    df = df[df[Col.PROCEDURE_DURATION] >= Domain.MIN_PROCEDURE_DURATION].copy()
 
-    # ── Recode rare categories ───────────────────────────────────────────
-    df[Col.PROCEDURE_ID] = _recode_rare(
-        df[Col.PROCEDURE_ID], config.data.min_samples_procedure)
-    df[Col.SURGEON_CODE] = _recode_rare(
-        df[Col.SURGEON_CODE], config.data.min_samples_surgeon)
-    df[Col.CASE_SERVICE] = _recode_rare(
-        df[Col.CASE_SERVICE], config.data.min_samples_service)
+    df[Col.SITE] = df.get(Col.SITE, "").fillna("").astype(str).str.strip().str.upper()
+    room_site_nuniq = (
+        df[df[Col.SITE] != ""]
+        .groupby(Col.OPERATING_ROOM)[Col.SITE]
+        .nunique()
+    )
+    unambiguous_rooms = set(room_site_nuniq[room_site_nuniq == 1].index)
+    room_site_lookup = (
+        df[(df[Col.OPERATING_ROOM].isin(unambiguous_rooms)) & (df[Col.SITE] != "")]
+        .groupby(Col.OPERATING_ROOM)[Col.SITE]
+        .first()
+        .to_dict()
+    )
+    missing_site = df[Col.SITE] == ""
+    df.loc[missing_site, Col.SITE] = df.loc[missing_site, Col.OPERATING_ROOM].map(room_site_lookup).fillna("")
 
-    # ── Calendar features ────────────────────────────────────────────────
+    df[Col.PROCEDURE_ID] = _recode_rare(df[Col.PROCEDURE_ID], config.data.min_samples_procedure)
+    df[Col.SURGEON_CODE] = _recode_rare(df[Col.SURGEON_CODE], config.data.min_samples_surgeon)
+    df[Col.CASE_SERVICE] = _recode_rare(df[Col.CASE_SERVICE], config.data.min_samples_service)
+
     df = add_time_features(df)
-
-    # ── Final sort and reset ─────────────────────────────────────────────
     df = df.sort_values(Col.ACTUAL_START).reset_index(drop=True)
+    df[Col.CASE_UID] = range(len(df))
+
+    logger.info(
+        "Quality: used_room_time=%d fallback=%d mild_timestamp_violations=%d overhead_capped=%d missing_site=%d",
+        int(df[Col.USED_ROOM_TIME].sum()),
+        int(df[Col.FELL_BACK_SURGICAL].sum()),
+        int(df[Col.TIMESTAMP_VIOLATION].sum()),
+        int(df[Col.OVERHEAD_CAPPED].sum()),
+        int((df[Col.SITE] == "").sum()),
+    )
+    site_counts = df[Col.SITE].value_counts(dropna=False).to_dict()
+    logger.info("Cases by site: %s", site_counts)
     logger.info("Loaded %d elective cases after cleaning.", len(df))
     return df
 
 
 def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add ``week_of_year``, ``month``, ``year`` columns from ``actual_start``."""
     dt = pd.to_datetime(df[Col.ACTUAL_START], errors="coerce")
     df[Col.WEEK_OF_YEAR] = dt.dt.isocalendar().week.astype(int)
     df[Col.MONTH] = dt.dt.month.astype(int)
@@ -131,18 +148,11 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── Private helpers ──────────────────────────────────────────────────────────
-
-def _combine_date_time(df: pd.DataFrame, date_col: str,
-                       time_col: str) -> pd.Series:
-    """Merge a date column and a time-string column into a datetime Series."""
+def _combine_date_time(df: pd.DataFrame, date_col: str, time_col: str) -> pd.Series:
     if date_col not in df.columns or time_col not in df.columns:
         return pd.Series(pd.NaT, index=df.index)
-
     dates = pd.to_datetime(df[date_col], errors="coerce")
-    times = df[time_col].fillna("00:00:00").astype(str).str.strip()
-    times = times.str.split(".").str[0]           # drop fractional seconds
-
+    times = df[time_col].fillna("00:00:00").astype(str).str.strip().str.split(".").str[0]
     valid = dates.notna()
     result = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
     if valid.any():
@@ -154,7 +164,6 @@ def _combine_date_time(df: pd.DataFrame, date_col: str,
 
 
 def _recode_rare(series: pd.Series, threshold: int) -> pd.Series:
-    """Replace values that appear fewer than *threshold* times with 'Other'."""
     series = series.astype(object)
     counts = series.value_counts()
     rare = counts[counts < threshold].index
