@@ -122,9 +122,8 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
                 schedule = method.plan(instance)
                 solve_time = time.perf_counter() - t0
                 kpi = evaluate(instance, schedule, config.costs, turnover=config.capacity.turnover_minutes)
-                audit = audit_surgeon_feasibility(instance, schedule)
                 n_forced = sum(1 for i in range(instance.num_cases) if len(instance.case_eligible_blocks.get(i, [])) == 0)
-                n_adaptive_k2 = int(schedule.diagnostics.get("adaptive_k2_count", audit.adaptive_k2_count))
+                n_adaptive_k2 = int(schedule.diagnostics.get("adaptive_k2_count", 0))
                 row = _kpi_to_row(
                     method.name,
                     h,
