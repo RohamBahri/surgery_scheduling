@@ -26,6 +26,7 @@ tables/
 debug_*.lp
 debug_*.sol
 outputs/
+reports/
 adhoc_*
 old_*
 EDA/

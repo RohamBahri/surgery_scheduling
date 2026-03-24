@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Columns we ask the Excel reader to load (original header names).
 _EXCEL_COLUMNS = [
     "Patient_Type", "Case_Service", "Main_Procedure", "Main_Procedure_Id",
-    "Operating_Room", "Booked Time (Minutes)",
+    "Operating_Room", "Site", "Booked Time (Minutes)",
     "Enter Room Date", "Enter Room Time",
     "Actual Start Date", "Actual Start Time",
     "Actual Stop Date", "Actual Stop Time",
