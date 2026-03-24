@@ -93,6 +93,8 @@ def solve_deterministic(
     for bid in all_block_ids:
         eligible_i = block_cases[bid]
         if not eligible_i:
+            cap_val = cap[bid] * v_expr(bid)
+            model.addConstr(cap_val <= idle[bid])
             continue
         case_load = quicksum(durations[i] * x[i, bid] for i in eligible_i)
         n_bid = quicksum(x[i, bid] for i in eligible_i)
@@ -105,14 +107,16 @@ def solve_deterministic(
     u = {}
     adaptive_k2 = 0
     for (surg, day, site_key), case_idxs in surgeon_day_site_cases.items():
-        services_today = {cases[i].service for i in case_idxs}
-        eligible_site_rooms = set()
-        for svc in services_today:
-            eligible_site_rooms |= eligibility.get(svc, set())
-        for bid in all_block_ids:
-            block = blocks_by_id[bid]
-            if bid.day_index == day and block.site == site_key and (block.site, block.room) in eligible_site_rooms:
-                u[surg, day, site_key, bid] = model.addVar(vtype=GRB.BINARY, name=f"u[{surg},{day},{site_key},{bid.room}]")
+        admissible_bids = set()
+        for i in case_idxs:
+            for bid in case_eligible_blocks.get(i, []):
+                if bid in blocks_by_id and bid.day_index == day and bid.site == site_key:
+                    admissible_bids.add(bid)
+        for bid in sorted(admissible_bids):
+            u[surg, day, site_key, bid] = model.addVar(
+                vtype=GRB.BINARY,
+                name=f"u[{surg},{day},{site_key},{bid.room}]",
+            )
 
     for i, case in enumerate(cases):
         for bid in case_eligible_blocks.get(i, []):
