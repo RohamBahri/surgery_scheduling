@@ -178,6 +178,12 @@ def solve_deterministic(
         solver_status=str(model.Status),
         objective_value=model.ObjVal,
         solve_time_seconds=model.Runtime,
+        diagnostics={
+            "forced_defer_count": forced_defer,
+            "adaptive_k2_count": adaptive_k2,
+            "turnover_used": turnover,
+            "eligibility_services": len(eligibility),
+        },
     )
 
 

@@ -184,6 +184,7 @@ class ScheduleResult:
     solver_status: str = "Unknown"
     objective_value: Optional[float] = None
     solve_time_seconds: float = 0.0
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def scheduled(self) -> List[ScheduleAssignment]:
         return [a for a in self.assignments if not a.is_deferred]
