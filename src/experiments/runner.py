@@ -78,12 +78,7 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
     df = load_data(config)
     df_warmup, df_pool, pool_start = split_warmup_pool(df, config)
 
-    if config.scope.use_all_sites_for_warmup:
-        df_warmup_for_elig = df_warmup
-    else:
-        df_warmup_for_elig, _ = apply_experiment_scope(df_warmup, config)
-
-    elig_maps = build_eligibility_maps(df_warmup_for_elig, config)
+    elig_maps = build_eligibility_maps(df_warmup, config)
     eligibility = elig_maps.service_rooms
 
     df_warmup_scoped, warmup_scope_summary = apply_experiment_scope(df_warmup, config)
@@ -115,7 +110,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
                 kpi = evaluate(instance, schedule, config.costs, turnover=config.capacity.turnover_minutes)
                 audit = audit_surgeon_feasibility(instance, schedule)
                 n_forced = sum(1 for i in range(instance.num_cases) if len(instance.case_eligible_blocks.get(i, [])) == 0)
-                n_adaptive_k2 = int(schedule.diagnostics.get("adaptive_k2_count", audit.adaptive_k2_count))
                 row = _kpi_to_row(
                     method.name,
                     h,
@@ -125,7 +119,7 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
                     len(instance.calendar.fixed_blocks),
                     len(instance.calendar.flex_blocks),
                     n_forced,
-                    n_adaptive_k2,
+                    audit.adaptive_k2_count,
                 )
                 rows.append(row)
                 method_rows[method.name].append(row)

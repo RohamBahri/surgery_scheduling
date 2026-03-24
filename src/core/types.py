@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 
 class Col:
