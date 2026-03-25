@@ -22,6 +22,7 @@ def fit_estimation_pipeline(
     skip_profiles: bool = False,
     quiet: bool = False,
     skip_bootstrap: bool = True,
+    run_bootstrap: bool = False,
 ) -> EstimationResult:
     if not quiet:
         logger.info("Fitting conditional quantile model...")
@@ -52,8 +53,14 @@ def fit_estimation_pipeline(
         response_profiler = ResponseProfiler(config.estimation.profile).fit(params_df, surgeon_services)
 
     bootstrap = None
-    if not skip_bootstrap and not quiet:
-        logger.info("Bootstrap requested but disabled in this phase.")
+    if run_bootstrap and not skip_bootstrap:
+        if not quiet:
+            logger.info("Running surgeon-cluster bootstrap...")
+        from src.estimation.bootstrap import SurgeonClusterBootstrap
+
+        bootstrap = SurgeonClusterBootstrap(config.estimation.bootstrap).run(df_train, config)
+    elif not skip_bootstrap and not quiet:
+        logger.info("Bootstrap requested but not enabled (run_bootstrap=False).")
 
     return EstimationResult(
         quantile_model=quantile_model,

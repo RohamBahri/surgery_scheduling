@@ -50,6 +50,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reduce logging output.",
     )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Run surgeon-cluster bootstrap uncertainty estimation.",
+    )
+    parser.add_argument(
+        "--bootstrap-iters",
+        type=int,
+        default=None,
+        help="Override number of bootstrap iterations.",
+    )
+    parser.add_argument(
+        "--bootstrap-jobs",
+        type=int,
+        default=None,
+        help="Override number of parallel bootstrap jobs.",
+    )
     return parser
 
 
@@ -65,6 +82,10 @@ def main() -> int:
     config = Config()
     if args.data is not None:
         config.data.excel_file_path = str(args.data)
+    if args.bootstrap_iters is not None:
+        config.estimation.bootstrap.n_bootstrap = int(args.bootstrap_iters)
+    if args.bootstrap_jobs is not None:
+        config.estimation.bootstrap.n_jobs = int(args.bootstrap_jobs)
 
     logging.info("Loading and splitting data...")
     df = load_data(config)
@@ -76,7 +97,8 @@ def main() -> int:
         config,
         skip_profiles=args.skip_profiles,
         quiet=args.quiet,
-        skip_bootstrap=True,
+        skip_bootstrap=not args.bootstrap,
+        run_bootstrap=args.bootstrap,
     )
 
     if not args.no_save:

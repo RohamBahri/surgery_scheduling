@@ -101,3 +101,32 @@ def plot_quantile_model_quality(
     path = out / "quantile_model_quality.csv"
     quality.to_csv(path, index=False)
     return path
+
+
+def plot_bootstrap_confidence_intervals(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path | None:
+    if result.bootstrap is None:
+        return None
+    out = _ensure_dir(output_dir)
+
+    surgeons = sorted(set(result.bootstrap.q_hat_samples) | set(result.bootstrap.a_samples) | set(result.bootstrap.h_plus_samples) | set(result.bootstrap.h_minus_samples))
+    rows = []
+    for s in surgeons:
+        q_lo, q_hi = result.bootstrap.ci(s, "q_hat")
+        a_lo, a_hi = result.bootstrap.ci(s, "a")
+        hp_lo, hp_hi = result.bootstrap.ci(s, "h_plus")
+        hm_lo, hm_hi = result.bootstrap.ci(s, "h_minus")
+        rows.append({
+            "surgeon_code": s,
+            "q_hat_lo": q_lo,
+            "q_hat_hi": q_hi,
+            "a_lo": a_lo,
+            "a_hi": a_hi,
+            "h_plus_lo": hp_lo,
+            "h_plus_hi": hp_hi,
+            "h_minus_lo": hm_lo,
+            "h_minus_hi": hm_hi,
+        })
+
+    path = out / "bootstrap_confidence_intervals.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
