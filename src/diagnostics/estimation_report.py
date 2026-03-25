@@ -19,7 +19,7 @@ def _ensure_dir(output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path:
     return out
 
 
-def plot_critical_ratio_distribution(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path:
+def export_critical_ratio_distribution(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path:
     out = _ensure_dir(output_dir)
     ratios = result.critical_ratios.get_all_ratios()
     vals = np.array(list(ratios.values()), dtype=float)
@@ -44,7 +44,7 @@ def plot_critical_ratio_distribution(result, output_dir: Path | str = DEFAULT_DI
     return path
 
 
-def plot_response_parameters(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path:
+def export_response_parameters(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path:
     out = _ensure_dir(output_dir)
     params = result.response_estimator.get_all_params()
     path = out / "response_parameters.csv"
@@ -71,7 +71,7 @@ def run_specification_checks(result, output_dir: Path | str = DEFAULT_DIAG_DIR) 
     return path
 
 
-def plot_profile_summary(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path | None:
+def export_profile_summary(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path | None:
     if result.response_profiler is None:
         return None
     out = _ensure_dir(output_dir)
@@ -82,7 +82,7 @@ def plot_profile_summary(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> P
     return path
 
 
-def plot_quantile_model_quality(
+def export_quantile_model_quality(
     result,
     df_train: pd.DataFrame,
     output_dir: Path | str = DEFAULT_DIAG_DIR,
@@ -103,7 +103,7 @@ def plot_quantile_model_quality(
     return path
 
 
-def plot_bootstrap_confidence_intervals(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path | None:
+def export_bootstrap_confidence_intervals(result, output_dir: Path | str = DEFAULT_DIAG_DIR) -> Path | None:
     if result.bootstrap is None:
         return None
     out = _ensure_dir(output_dir)
@@ -130,3 +130,11 @@ def plot_bootstrap_confidence_intervals(result, output_dir: Path | str = DEFAULT
     path = out / "bootstrap_confidence_intervals.csv"
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
+
+
+# Backward-compatible aliases.
+plot_critical_ratio_distribution = export_critical_ratio_distribution
+plot_response_parameters = export_response_parameters
+plot_profile_summary = export_profile_summary
+plot_quantile_model_quality = export_quantile_model_quality
+plot_bootstrap_confidence_intervals = export_bootstrap_confidence_intervals

@@ -53,6 +53,15 @@ def test_duplicate_surgeon_copies_relabelled(synthetic_df_train):
     assert any("S1__boot_0002__copy_02" == s for s in labels.unique())
 
 
+def test_duplicate_surgeon_copies_aggregated_not_overwritten(synthetic_df_train):
+    cfg = _tiny_config()
+    bs = SurgeonClusterBootstrap(cfg.estimation.bootstrap)
+    out = bs._run_single_iteration(synthetic_df_train, cfg, iter_idx=1, seed=7)
+
+    assert all("__boot_" not in k for k in out["q_hat"].keys())
+    assert all("__boot_" not in k for k in out["a"].keys())
+
+
 def test_profiles_not_bootstrapped(synthetic_df_train):
     cfg = _tiny_config()
     bs = SurgeonClusterBootstrap(cfg.estimation.bootstrap)

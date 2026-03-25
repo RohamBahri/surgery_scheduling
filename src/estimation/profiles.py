@@ -50,24 +50,29 @@ class ResponseProfiler:
         self._surgeon_to_profile = {}
         next_pid = 0
 
-        for service in sorted(df["service"].unique().tolist()):
+        services = sorted(df["service"].unique().tolist())
+        n_ind = {s: int((individual["service"] == s).sum()) for s in services}
+        k_map = self._allocate_service_profile_counts(services, n_ind)
+
+        for service in services:
             svc_all = df[df["service"] == service]
             svc_ind = individual[individual["service"] == service]
+            k = k_map[service]
 
-            if len(svc_ind) == 0:
-                center = svc_all[["a", "h_plus", "h_minus"]].mean().to_numpy(dtype=float)
+            service_profile_ids: list[int] = []
+            if k <= 1:
+                if len(svc_ind) > 0:
+                    center = svc_ind[["a", "h_plus", "h_minus"]].mean().to_numpy(dtype=float)
+                else:
+                    center = svc_all[["a", "h_plus", "h_minus"]].mean().to_numpy(dtype=float)
                 pid = next_pid
                 next_pid += 1
                 self._profiles[pid] = ResponseProfile(pid, float(center[0]), float(center[1]), float(center[2]), 0, service)
                 service_profile_ids = [pid]
-            elif len(svc_ind) < self.config.n_profiles_per_service:
-                center = svc_ind[["a", "h_plus", "h_minus"]].mean().to_numpy(dtype=float)
-                pid = next_pid
-                next_pid += 1
-                self._profiles[pid] = ResponseProfile(pid, float(center[0]), float(center[1]), float(center[2]), 0, service)
-                service_profile_ids = [pid]
+
+                for surgeon in svc_ind["surgeon_code"].astype(str).tolist():
+                    self._surgeon_to_profile[surgeon] = pid
             else:
-                k = min(self.config.n_profiles_per_service, len(svc_ind))
                 X = svc_ind[["a", "h_plus", "h_minus"]].to_numpy(dtype=float)
                 km = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = km.fit_predict(X)
@@ -77,7 +82,6 @@ class ResponseProfiler:
                 labels = np.array([remap[l] for l in labels], dtype=int)
                 centers = centers[order]
 
-                service_profile_ids = []
                 for c in range(k):
                     pid = next_pid
                     next_pid += 1
@@ -92,15 +96,10 @@ class ResponseProfiler:
                     )
                     service_profile_ids.append(pid)
 
-                for surgeon, label in zip(svc_ind["surgeon_code"].tolist(), labels):
-                    pid = service_profile_ids[int(label)]
-                    self._surgeon_to_profile[surgeon] = pid
+                for surgeon, label in zip(svc_ind["surgeon_code"].astype(str).tolist(), labels):
+                    self._surgeon_to_profile[surgeon] = service_profile_ids[int(label)]
 
             svc_profiles = [self._profiles[pid] for pid in service_profile_ids]
-
-            for surgeon in svc_ind[~svc_ind["surgeon_code"].isin(self._surgeon_to_profile)]["surgeon_code"]:
-                self._surgeon_to_profile[str(surgeon)] = service_profile_ids[0]
-
             svc_pooled = pooled[pooled["service"] == service]
             for _, row in svc_pooled.iterrows():
                 vec = np.array([row["a"], row["h_plus"], row["h_minus"]], dtype=float)
@@ -133,6 +132,44 @@ class ResponseProfiler:
             self._surgeon_to_profile.setdefault(s, other_pid)
 
         return self
+
+    def _allocate_service_profile_counts(self, services: list[str], n_individual: dict[str, int]) -> dict[str, int]:
+        k = {}
+        max_allowed = {}
+        for s in services:
+            n = n_individual[s]
+            if n == 0:
+                k[s] = 1
+                max_allowed[s] = 1
+            elif n < self.config.n_profiles_per_service:
+                k[s] = 1
+                max_allowed[s] = n
+            else:
+                k[s] = min(self.config.n_profiles_per_service, n)
+                max_allowed[s] = n
+
+        min_total = max(1, self.config.min_profiles_total)
+        max_total = max(min_total, self.config.max_profiles_total)
+
+        total = sum(k.values())
+        while total > max_total:
+            candidates = [s for s in services if k[s] > 1]
+            if not candidates:
+                break
+            s = sorted(candidates, key=lambda x: (n_individual[x], -k[x], x))[0]
+            k[s] -= 1
+            total -= 1
+
+        total = sum(k.values())
+        while total < min_total:
+            candidates = [s for s in services if k[s] < max_allowed[s]]
+            if not candidates:
+                break
+            s = sorted(candidates, key=lambda x: (-n_individual[x], k[x], x))[0]
+            k[s] += 1
+            total += 1
+
+        return k
 
     def get_profile(self, surgeon_code: str) -> ResponseProfile:
         pid = self.get_profile_id(surgeon_code)

@@ -36,6 +36,13 @@ def test_profiles_created():
     assert len(profiler.get_all_profiles()) == profiler.n_profiles
 
 
+def test_profile_total_bounds_enforced():
+    cfg = ProfileConfig(n_profiles_per_service=3, min_profiles_total=2, max_profiles_total=2)
+    profiler = ResponseProfiler(cfg).fit(_params_df(), _services())
+    non_other = [p for p in profiler.get_all_profiles() if p.service != Domain.OTHER]
+    assert len(non_other) == 2
+
+
 def test_pooled_surgeons_mapped_after_clustering():
     profiler = ResponseProfiler(ProfileConfig(n_profiles_per_service=1)).fit(_params_df(), _services())
 

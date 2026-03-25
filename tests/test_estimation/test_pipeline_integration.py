@@ -3,10 +3,11 @@ import sys
 
 from src.core.config import Config
 from src.diagnostics.estimation_report import (
-    plot_critical_ratio_distribution,
-    plot_profile_summary,
-    plot_quantile_model_quality,
-    plot_response_parameters,
+    export_critical_ratio_distribution,
+    export_profile_summary,
+    export_quantile_model_quality,
+    export_response_parameters,
+    export_bootstrap_confidence_intervals,
     run_specification_checks,
 )
 from src.estimation.orchestrator import fit_estimation_pipeline
@@ -51,17 +52,19 @@ def test_diagnostics_run(synthetic_df_train, tmp_path):
     cfg = _small_config()
     result = fit_estimation_pipeline(synthetic_df_train, cfg, skip_profiles=False, quiet=True, skip_bootstrap=True)
 
-    p1 = plot_critical_ratio_distribution(result, tmp_path)
-    p2 = plot_response_parameters(result, tmp_path)
+    p1 = export_critical_ratio_distribution(result, tmp_path)
+    p2 = export_response_parameters(result, tmp_path)
     p3 = run_specification_checks(result, tmp_path)
-    p4 = plot_profile_summary(result, tmp_path)
-    p5 = plot_quantile_model_quality(result, synthetic_df_train, tmp_path)
+    p4 = export_profile_summary(result, tmp_path)
+    p5 = export_quantile_model_quality(result, synthetic_df_train, tmp_path)
+    p6 = export_bootstrap_confidence_intervals(result, tmp_path)
 
     assert p1.exists()
     assert p2.exists()
     assert p3.exists()
     assert p4 is not None and p4.exists()
     assert p5.exists()
+    assert p6 is None
 
 
 def test_cli_help_smoke():

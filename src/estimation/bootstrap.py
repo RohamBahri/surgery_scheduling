@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
@@ -103,20 +104,25 @@ class SurgeonClusterBootstrap:
             run_bootstrap=False,
         )
 
-        q_hat = {}
+        q_hat_lists: dict[str, list[float]] = defaultdict(list)
         for surgeon_code, q in est.critical_ratios.get_all_ratios().items():
             base = self._base_surgeon_code(surgeon_code)
-            q_hat[base] = float(q)
+            q_hat_lists[base].append(float(q))
 
         params_df = est.response_estimator.get_all_params()
-        a = {}
-        h_plus = {}
-        h_minus = {}
+        a_lists: dict[str, list[float]] = defaultdict(list)
+        h_plus_lists: dict[str, list[float]] = defaultdict(list)
+        h_minus_lists: dict[str, list[float]] = defaultdict(list)
         for _, row in params_df.iterrows():
             base = self._base_surgeon_code(str(row["surgeon_code"]))
-            a[base] = float(row["a"])
-            h_plus[base] = float(row["h_plus"])
-            h_minus[base] = float(row["h_minus"])
+            a_lists[base].append(float(row["a"]))
+            h_plus_lists[base].append(float(row["h_plus"]))
+            h_minus_lists[base].append(float(row["h_minus"]))
+
+        q_hat = {s: float(np.mean(v)) for s, v in q_hat_lists.items()}
+        a = {s: float(np.mean(v)) for s, v in a_lists.items()}
+        h_plus = {s: float(np.mean(v)) for s, v in h_plus_lists.items()}
+        h_minus = {s: float(np.mean(v)) for s, v in h_minus_lists.items()}
 
         return {
             "q_hat": q_hat,

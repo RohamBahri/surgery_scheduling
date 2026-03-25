@@ -1,21 +1,20 @@
-"""Shared estimation package types."""
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .bootstrap import BootstrapEstimator
+    from .bootstrap import BootstrapResult
     from .inverse import CriticalRatioEstimator
-    from .quantile import QuantileModel
-    from .response import ResponseEstimator, ResponseProfiler
+    from .profiles import ResponseProfiler
+    from .quantile_model import ConditionalQuantileModel
+    from .response import ResponseEstimator
 
 
 @dataclass
 class EstimationResult:
-    """Container for estimation artifacts shared across phases."""
-
-    quantile_model: "QuantileModel | Any"
-    critical_ratios: "CriticalRatioEstimator | Any"
-    response_estimator: "ResponseEstimator | Any"
-    response_profiler: "ResponseProfiler | Any"
-    bootstrap: "BootstrapEstimator | Any | None" = None
+    quantile_model: "ConditionalQuantileModel"
+    critical_ratios: "CriticalRatioEstimator"
+    response_estimator: "ResponseEstimator"
+    response_profiler: "ResponseProfiler | None"
+    bootstrap: "BootstrapResult | None" = None
