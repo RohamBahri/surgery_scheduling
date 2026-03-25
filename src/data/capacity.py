@@ -48,6 +48,7 @@ def build_block_calendar(
     pools: Dict[int, List[Tuple[str, str]]],
     horizon_start: pd.Timestamp,
     config: Config,
+    fixed_templates: Set[Tuple[int, str, str]] | None = None,
 ) -> BlockCalendar:
     horizon_days = config.data.horizon_days
     start = horizon_start.normalize()

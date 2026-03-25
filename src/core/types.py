@@ -88,6 +88,7 @@ class CandidateBlock:
     room: str
     capacity_minutes: float
     activation_cost: float
+    is_fixed: bool = False
 
     @property
     def id(self) -> BlockId:
@@ -105,6 +106,14 @@ class BlockCalendar:
     @property
     def total_candidates(self) -> int:
         return len(self.candidates)
+
+    @property
+    def fixed_blocks(self) -> List[CandidateBlock]:
+        return [c for c in self.candidates if c.is_fixed]
+
+    @property
+    def flex_blocks(self) -> List[CandidateBlock]:
+        return [c for c in self.candidates if not c.is_fixed]
 
     def capacity(self, block_id: BlockId) -> float:
         for c in self.candidates:
