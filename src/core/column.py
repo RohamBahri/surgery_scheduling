@@ -74,6 +74,24 @@ class ScheduleColumn:
 
         return activation + deferral + costs.overtime_per_minute * overtime + costs.idle_per_minute * idle
 
+    def get_block_case_assignments(self) -> Dict[BlockId, List[int]]:
+        """Return mapping from opened block id to assigned case indices."""
+        return {bid: self.cases_in_block(bid) for bid in self.v_open}
+
+    def get_block_case_count(self, block_id: BlockId) -> int:
+        """Return number of cases assigned to a block."""
+        return len(self.cases_in_block(block_id))
+
+    def get_deferred_count(self) -> int:
+        """Return number of deferred cases."""
+        return len(self.z_defer)
+
+    def get_fixed_cost_component(self, costs: CostConfig) -> float:
+        """Activation + deferral cost component independent of durations."""
+        activation = sum(self.block_activation_costs.get(bid, 0.0) for bid in self.v_open)
+        deferral = costs.deferral_per_case * len(self.z_defer)
+        return activation + deferral
+
     def to_schedule_result(self, cases: List[CaseRecord]) -> ScheduleResult:
         assignments: List[ScheduleAssignment] = []
         for i, case in enumerate(cases):

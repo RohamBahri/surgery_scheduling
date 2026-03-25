@@ -5,9 +5,10 @@ import pandas as pd
 
 from src.bilevel.ccg import CCGResult, solve_bilevel_ccg
 from src.core.config import Config
-from src.core.types import ScheduleResult, WeeklyInstance
+from src.core.types import Col, ScheduleResult, WeeklyInstance
 from src.data.capacity import build_candidate_pools
 from src.data.eligibility import build_eligibility_maps
+from src.data.scope import apply_experiment_scope
 from src.estimation import EstimationResult
 from src.estimation.orchestrator import fit_estimation_pipeline
 from src.estimation.recommendation import RecommendationModel
@@ -43,21 +44,33 @@ class BehavioralCCGMethod(Method):
         )
         self._recommendation_model.prepare(df_train)
 
-        start = pd.to_datetime(df_train["actual_start"]).min().normalize()
-        candidate_pools = build_candidate_pools(df_train, self.config)
+        df_scoped, _ = apply_experiment_scope(df_train, self.config)
+        candidate_pools = build_candidate_pools(df_scoped, self.config)
         eligibility_maps = build_eligibility_maps(df_train, self.config)
-        train_instance = build_weekly_instance(
-            df_pool=df_train,
-            horizon_start=start,
-            week_index=0,
-            config=self.config,
-            candidate_pools=candidate_pools,
-            eligibility_maps=eligibility_maps,
-        )
 
-        week_data = self._recommendation_model.prepare_instance(train_instance)
+        dt = pd.to_datetime(df_scoped[Col.ACTUAL_START], errors="coerce")
+        week_starts = sorted((dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.normalize().dropna().unique())
+
+        week_data_list = []
+        for w_idx, ws in enumerate(week_starts):
+            instance = build_weekly_instance(
+                df_pool=df_scoped,
+                horizon_start=pd.Timestamp(ws),
+                week_index=w_idx,
+                config=self.config,
+                candidate_pools=candidate_pools,
+                eligibility_maps=eligibility_maps,
+            )
+            if instance.num_cases == 0:
+                continue
+            week_data_list.append(self._recommendation_model.prepare_instance(instance))
+
+        if not week_data_list:
+            self._ccg_result = type("R", (), {"w_optimal": np.zeros(self._recommendation_model.feature_dim)})()
+            return
+
         self._ccg_result = solve_bilevel_ccg(
-            week_data_list=[week_data],
+            week_data_list=week_data_list,
             recommendation_model=self._recommendation_model,
             config=self.config.bilevel,
             costs=self.config.costs,
