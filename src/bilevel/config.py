@@ -4,6 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class BilevelConfig:
     w_max: float = 10.0
+    # Credibility threshold is e_pred_max = credibility_eta * MAE_base.
     credibility_eta: float = 1.05
     plausibility_tau_L: float = 0.01
     plausibility_tau_U: float = 0.99

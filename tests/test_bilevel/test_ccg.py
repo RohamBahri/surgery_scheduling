@@ -7,7 +7,7 @@ from src.bilevel.config import BilevelConfig
 from src.core.column import ScheduleColumn
 from src.core.config import CostConfig, SolverConfig
 from src.core.types import BlockCalendar, BlockId, CandidateBlock
-from src.estimation.recommendation import WeekRecommendationData
+from src.estimation.recommendation import SOS2CaseData, WeekRecommendationData
 
 
 class DummyRecommendation:
@@ -18,16 +18,31 @@ class DummyRecommendation:
 
 def _wd() -> WeekRecommendationData:
     bid = BlockId(0, "TGH", "OR1")
+    booking = 100.0
+    lower = 80.0
+    upper = 130.0
+    knot_x = np.array([lower - booking, -7.0, 0.0, 5.0, upper - booking], dtype=float)
+    knot_y = np.array([0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
     return WeekRecommendationData(
         week_index=0,
         n_cases=1,
         features=np.zeros((1, 1)),
-        bookings=np.array([100.0]),
+        bookings=np.array([booking]),
         realized=np.array([105.0]),
-        L_bounds=np.array([80.0]),
-        U_bounds=np.array([130.0]),
+        L_bounds=np.array([lower]),
+        U_bounds=np.array([upper]),
         surgeon_codes=["S1"],
-        sos2_data=[],
+        sos2_data=[
+            SOS2CaseData(
+                case_index=0,
+                profile_id=0,
+                knot_x=knot_x,
+                knot_y=knot_y,
+                booking=booking,
+                L_bound=lower,
+                U_bound=upper,
+            )
+        ],
         case_eligible_blocks={0: [bid]},
         calendar=BlockCalendar([CandidateBlock(0, "TGH", "OR1", 480.0, 10.0)]),
     )
