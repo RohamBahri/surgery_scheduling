@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -200,6 +200,11 @@ class RecommendationModel:
             )
         return out
 
+
+    def predict_at_quantile(self, week_data: WeekRecommendationData, q: float) -> np.ndarray:
+        case_df = self._cases_to_quantile_df(self._week_cases_from_data(week_data))
+        return np.asarray(self._estimation.quantile_model.predict(case_df, q=q), dtype=float)
+
     def compute_credibility(self, w: np.ndarray, week_data: WeekRecommendationData, realized: np.ndarray) -> float:
         d_post = self.compute_post_review(w=w, week_data=week_data)
         return float(np.mean(np.abs(np.asarray(realized, dtype=float) - d_post)))
@@ -223,6 +228,28 @@ class RecommendationModel:
                 }
             )
         return pd.DataFrame(rows)
+
+
+    def _week_cases_from_data(self, week_data: WeekRecommendationData) -> List[CaseRecord]:
+        cases: List[CaseRecord] = []
+        for i in range(week_data.n_cases):
+            cases.append(
+                CaseRecord(
+                    case_id=i,
+                    procedure_id="UNK",
+                    surgeon_code=week_data.surgeon_codes[i],
+                    service="Other",
+                    patient_type="Elective",
+                    operating_room="",
+                    booked_duration_min=float(week_data.bookings[i]),
+                    actual_duration_min=float(week_data.realized[i]),
+                    actual_start=pd.Timestamp(date(2020, 1, 1)).to_pydatetime(),
+                    week_of_year=1,
+                    month=1,
+                    year=2020,
+                )
+            )
+        return cases
 
     def _df_to_cases(self, df: pd.DataFrame) -> List[CaseRecord]:
         defaults = {Col.MONTH: 1, Col.YEAR: 2020, Col.WEEK_OF_YEAR: 1}

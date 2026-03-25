@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Tuple
 
+from src.bilevel.config import BilevelConfig
+
 
 @dataclass
 class DataConfig:
@@ -124,6 +126,7 @@ class Config:
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
     estimation: EstimationConfig = field(default_factory=EstimationConfig)
     recommendation: RecommendationConfig = field(default_factory=RecommendationConfig)
+    bilevel: BilevelConfig = field(default_factory=BilevelConfig)
 
 
 CONFIG = Config()
