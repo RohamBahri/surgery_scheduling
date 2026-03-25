@@ -24,6 +24,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from src.core.config import CONFIG
 from src.methods.booked import BookedTimeMethod
 from src.methods.oracle import OracleMethod
+from src.methods.behavioral_ccg import BehavioralCCGMethod
 from src.methods.registry import MethodRegistry
 from src.experiments.runner import run_experiment
 
@@ -77,9 +78,9 @@ def main() -> None:
     registry = MethodRegistry()
     registry.register(BookedTimeMethod(CONFIG))
     registry.register(OracleMethod(CONFIG))
+    registry.register(BehavioralCCGMethod(CONFIG))
     # Future methods are added here:
     # registry.register(LassoMethod(CONFIG))
-    # registry.register(BehavioralCCGMethod(CONFIG))
 
     # ── Run ──────────────────────────────────────────────────────────────
     run_experiment(registry, CONFIG, output_dir=args.output)

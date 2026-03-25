@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Tuple
 
+from src.bilevel.config import BilevelConfig
+
 
 @dataclass
 class DataConfig:
@@ -100,6 +102,12 @@ class BootstrapConfig:
 
 
 @dataclass
+class RecommendationConfig:
+    plausibility_lower_tail: float = 0.01
+    plausibility_upper_tail: float = 0.99
+    w_max: float = 10.0
+
+@dataclass
 class EstimationConfig:
     quantile_model: QuantileModelConfig = field(default_factory=QuantileModelConfig)
     inverse: InverseConfig = field(default_factory=InverseConfig)
@@ -117,6 +125,8 @@ class Config:
     solver: SolverConfig = field(default_factory=SolverConfig)
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
     estimation: EstimationConfig = field(default_factory=EstimationConfig)
+    recommendation: RecommendationConfig = field(default_factory=RecommendationConfig)
+    bilevel: BilevelConfig = field(default_factory=BilevelConfig)
 
 
 CONFIG = Config()

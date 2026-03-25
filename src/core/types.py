@@ -62,7 +62,6 @@ class BlockId(NamedTuple):
     room: str
 
 
-EligibilityMap = Dict[str, Set[Tuple[str, str]]]
 @dataclass
 class CaseRecord:
     case_id: int
@@ -141,7 +140,6 @@ class WeeklyInstance:
     end_date: date
     cases: List[CaseRecord]
     calendar: BlockCalendar
-    eligibility: EligibilityMap = field(default_factory=dict)
     case_eligible_blocks: Dict[int, List[BlockId]] = field(default_factory=dict)
 
     @property
