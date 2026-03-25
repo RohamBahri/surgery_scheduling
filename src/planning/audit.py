@@ -32,13 +32,14 @@ def audit_surgeon_feasibility(instance: WeeklyInstance, schedule: ScheduleResult
         room_load[key] = room_load.get(key, 0.0) + c.actual_duration_min
         surg_load[key] = surg_load.get(key, 0.0) + c.surgical_duration_min
 
-    total = len(instance.surgeon_day_site_cases)
+    historical_groups = _historical_surgeon_day_site_cases(instance)
+    total = len(historical_groups)
     multi = sum(1 for s in groups.values() if len(s) > 1)
     mean_room = (sum(room_load.values()) / max(len(room_load), 1)) if room_load else 0.0
     mean_surg = (sum(surg_load.values()) / max(len(surg_load), 1)) if surg_load else 0.0
 
     adaptive_k2 = 0
-    for key, idxs in instance.surgeon_day_site_cases.items():
+    for key, idxs in historical_groups.items():
         pred = sum(instance.cases[i].booked_duration_min for i in idxs)
         _, day, site = key
         max_cap = max((b.capacity_minutes for b in instance.calendar.candidates if b.day_index == day and b.site == site), default=0)
@@ -52,3 +53,14 @@ def audit_surgeon_feasibility(instance: WeeklyInstance, schedule: ScheduleResult
         mean_daily_surgical_load=mean_surg,
         adaptive_k2_count=adaptive_k2,
     )
+
+
+def _historical_surgeon_day_site_cases(instance: WeeklyInstance) -> Dict[Tuple[str, int, str], list[int]]:
+    groups: Dict[Tuple[str, int, str], list[int]] = {}
+    for i, c in enumerate(instance.cases):
+        day_index = (c.actual_start.date() - instance.start_date).days
+        if day_index < 0:
+            continue
+        key = (c.surgeon_code, day_index, c.site)
+        groups.setdefault(key, []).append(i)
+    return groups
