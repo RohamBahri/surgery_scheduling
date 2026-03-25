@@ -12,6 +12,16 @@ from src.core.types import BlockCalendar, BlockId, CaseRecord, EligibilityMap, S
 
 logger = logging.getLogger(__name__)
 
+def _status_name(status: int) -> str:
+    mapping = {
+        GRB.OPTIMAL: "OPTIMAL",
+        GRB.TIME_LIMIT: "TIME_LIMIT",
+        GRB.INFEASIBLE: "INFEASIBLE",
+        GRB.INTERRUPTED: "INTERRUPTED",
+        GRB.SUBOPTIMAL: "SUBOPTIMAL",
+    }
+    return mapping.get(status, str(status))
+
 
 def solve_deterministic(
     cases: List[CaseRecord],
@@ -94,8 +104,27 @@ def solve_deterministic(
 
     model.optimize()
 
+    status_code = int(model.Status)
+    status_name = _status_name(status_code)
+    obj_bound = float(model.ObjBound) if hasattr(model, "ObjBound") else None
+
     if model.SolCount == 0:
-        return ScheduleResult(assignments=[ScheduleAssignment(case_id=c.case_id) for c in cases], solver_status=str(model.Status), solve_time_seconds=getattr(model, "Runtime", 0.0))
+        return ScheduleResult(
+            assignments=[ScheduleAssignment(case_id=c.case_id) for c in cases],
+            solver_status=str(model.Status),
+            solve_time_seconds=getattr(model, "Runtime", 0.0),
+            diagnostics={
+                "forced_defer_count": forced_defer,
+                "turnover_used": turnover,
+                "eligibility_services": len(eligibility),
+                "status_code": status_code,
+                "status_name": status_name,
+                "mip_gap": None,
+                "obj_bound": obj_bound,
+                "opened_blocks_count": 0,
+                "candidate_blocks_count": len(all_block_ids),
+            },
+        )
 
     opened: Set[BlockId] = {bid for bid in all_block_ids if v[bid].X > 0.5}
 
@@ -126,6 +155,12 @@ def solve_deterministic(
             "forced_defer_count": forced_defer,
             "turnover_used": turnover,
             "eligibility_services": len(eligibility),
+            "status_code": status_code,
+            "status_name": status_name,
+            "mip_gap": float(model.MIPGap),
+            "obj_bound": obj_bound,
+            "opened_blocks_count": len(opened),
+            "candidate_blocks_count": len(all_block_ids),
         },
     )
 
@@ -136,3 +171,5 @@ def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
     model.Params.Threads = cfg.threads
     model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.MIPFocus = 1
+    # Let Gurobi detect and exploit symmetry internally.
+    model.Params.Symmetry = 2
