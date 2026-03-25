@@ -27,7 +27,6 @@ class OracleMethod(Method):
             costs=self.config.costs,
             solver_cfg=self.config.solver,
             case_eligible_blocks=instance.case_eligible_blocks,
-            eligibility=instance.eligibility,
             turnover=self.config.capacity.turnover_minutes,
             model_name=self.name,
         )
