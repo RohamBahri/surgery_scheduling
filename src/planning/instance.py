@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 from src.core.config import Config
-from src.core.types import CaseRecord, Col, Domain, EligibilityMap, WeeklyInstance
+from src.core.types import CaseRecord, Col, Domain, WeeklyInstance
 from src.data.capacity import build_block_calendar
 from src.data.eligibility import EligibilityMaps
 
@@ -19,8 +19,7 @@ def build_weekly_instance(
     week_index: int,
     config: Config,
     candidate_pools: Dict[int, List[Tuple[str, str]]],
-    eligibility: EligibilityMap,
-    eligibility_maps: EligibilityMaps | None = None,
+    eligibility_maps: EligibilityMaps,
 ) -> WeeklyInstance:
     horizon_days = config.data.horizon_days
     start = horizon_start.normalize()
@@ -35,20 +34,14 @@ def build_weekly_instance(
 
     case_eligible_blocks: Dict[int, List] = {}
     for i, case in enumerate(cases):
-        if eligibility_maps is not None:
-            allowed = eligibility_maps.eligible_rooms_for_case(
-                service=case.service,
-                surgeon_code=case.surgeon_code,
-                operating_room=case.operating_room,
-                config=config,
-                case_site=case.site,
-            )
-            matched = [b.id for b in calendar.candidates if allowed is None or (b.site, b.room) in allowed]
-        else:
-            allowed = eligibility.get(case.service, set())
-            if case.service not in eligibility:
-                allowed = {(b.site, b.room) for b in calendar.candidates if b.site == case.site}
-            matched = [b.id for b in calendar.candidates if (b.site, b.room) in allowed]
+        allowed = eligibility_maps.eligible_rooms_for_case(
+            service=case.service,
+            surgeon_code=case.surgeon_code,
+            operating_room=case.operating_room,
+            config=config,
+            case_site=case.site,
+        )
+        matched = [b.id for b in calendar.candidates if allowed is None or (b.site, b.room) in allowed]
         case_eligible_blocks[i] = matched
 
     logger.info(
@@ -66,7 +59,6 @@ def build_weekly_instance(
         end_date=end.date(),
         cases=cases,
         calendar=calendar,
-        eligibility=eligibility,
         case_eligible_blocks=case_eligible_blocks,
     )
 

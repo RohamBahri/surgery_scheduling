@@ -84,7 +84,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
         df_warmup_for_elig, _ = apply_experiment_scope(df_warmup, config)
 
     elig_maps = build_eligibility_maps(df_warmup_for_elig, config)
-    eligibility = elig_maps.service_rooms
 
     df_warmup_scoped, warmup_scope_summary = apply_experiment_scope(df_warmup, config)
     candidate_pools = build_candidate_pools(df_warmup_scoped, config)
@@ -108,7 +107,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
             h,
             config,
             candidate_pools,
-            eligibility,
             eligibility_maps=elig_maps,
         )
         if instance.num_cases == 0:
@@ -153,8 +151,8 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
         (out / "config_snapshot.json").write_text(json.dumps(asdict(config), indent=2, default=str))
         (out / "scope_summary.json").write_text(json.dumps({"warmup": asdict(warmup_scope_summary), "pool": asdict(scope_summary)}, indent=2))
         (out / "eligibility_summary.json").write_text(json.dumps({
-            "n_services": len(eligibility),
-            "mean_site_room_pairs_per_service": (sum(len(v) for v in eligibility.values()) / max(len(eligibility), 1)),
+            "n_services": len(elig_maps.service_rooms),
+            "mean_site_room_pairs_per_service": (sum(len(v) for v in elig_maps.service_rooms.values()) / max(len(elig_maps.service_rooms), 1)),
         }, indent=2))
         results_df.to_csv(out / "horizon_results.csv", index=False)
 
