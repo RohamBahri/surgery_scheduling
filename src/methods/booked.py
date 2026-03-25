@@ -25,9 +25,7 @@ class BookedTimeMethod(Method):
             costs=self.config.costs,
             solver_cfg=self.config.solver,
             case_eligible_blocks=instance.case_eligible_blocks,
-            surgeon_day_site_cases=instance.surgeon_day_site_cases,
             eligibility=instance.eligibility,
             turnover=self.config.capacity.turnover_minutes,
-            surgeon_grouping=self.config.surgeon_grouping,
             model_name=self.name,
         )

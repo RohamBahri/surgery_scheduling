@@ -18,12 +18,10 @@ class DataConfig:
 @dataclass
 class CapacityConfig:
     block_capacity_minutes: float = 480.0
-    friday_capacity_minutes: float = 450.0
     activation_cost_per_block: float = 2000.0
     min_activation_rate: float = 0.25
-    turnover_minutes: float = 32.0
+    turnover_minutes: float = 30.0
     eligibility_min_weeks: int = 3
-    fixed_block_threshold: float = 0.75
 
 
 @dataclass
@@ -52,12 +50,6 @@ class SolverConfig:
 
 
 @dataclass
-class SurgeonGroupingConfig:
-    default_max_blocks_per_day: int = 1
-    adaptive_relaxation: bool = True
-
-
-@dataclass
 class ExperimentScopeConfig:
     planning_sites: Tuple[str, ...] = ("TGH", "TWH")
     planning_weekdays: Tuple[int, ...] = (0, 1, 2, 3, 4)
@@ -72,7 +64,6 @@ class Config:
     eligibility: EligibilityConfig = field(default_factory=EligibilityConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
-    surgeon_grouping: SurgeonGroupingConfig = field(default_factory=SurgeonGroupingConfig)
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
 
 

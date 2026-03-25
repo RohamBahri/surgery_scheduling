@@ -26,10 +26,5 @@ def validate_week(instance: WeeklyInstance, schedule: ScheduleResult, config: Co
         if a.block_id not in eligible_map.get(i, set()):
             logger.warning("%s week %d: ineligible assignment case_id=%s bid=%s", method_name, instance.week_index, a.case_id, a.block_id)
 
-    fixed_ids = {b.id for b in instance.calendar.fixed_blocks}
-    missing_fixed = fixed_ids - set(schedule.opened_blocks)
-    if missing_fixed:
-        logger.warning("%s week %d: missing fixed opened blocks count=%d", method_name, instance.week_index, len(missing_fixed))
-
     if config.capacity.turnover_minutes < 0:
         logger.warning("Negative turnover parameter configured")

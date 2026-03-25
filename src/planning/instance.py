@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
 from src.core.config import Config
-from src.core.types import (
-    CaseRecord,
-    Col,
-    Domain,
-    EligibilityMap,
-    WeeklyInstance,
-)
+from src.core.types import CaseRecord, Col, Domain, EligibilityMap, WeeklyInstance
 from src.data.capacity import build_block_calendar
 from src.data.eligibility import EligibilityMaps
 
@@ -26,7 +20,6 @@ def build_weekly_instance(
     config: Config,
     candidate_pools: Dict[int, List[Tuple[str, str]]],
     eligibility: EligibilityMap,
-    fixed_templates: Set[Tuple[int, str, str]],
     eligibility_maps: EligibilityMaps | None = None,
 ) -> WeeklyInstance:
     horizon_days = config.data.horizon_days
@@ -37,7 +30,7 @@ def build_weekly_instance(
     mask = (actual.dt.normalize() >= start) & (actual.dt.normalize() <= end)
     df_week = df_pool[mask].copy()
 
-    calendar = build_block_calendar(candidate_pools, start, config, fixed_templates=fixed_templates)
+    calendar = build_block_calendar(candidate_pools, start, config)
     cases = _dataframe_to_cases(df_week)
 
     case_eligible_blocks: Dict[int, List] = {}
@@ -50,22 +43,13 @@ def build_weekly_instance(
                 config=config,
                 case_site=case.site,
             )
-            matched = [
-                b.id for b in calendar.candidates
-                if allowed is None or (b.site, b.room) in allowed
-            ]
+            matched = [b.id for b in calendar.candidates if allowed is None or (b.site, b.room) in allowed]
         else:
             allowed = eligibility.get(case.service, set())
             if case.service not in eligibility:
                 allowed = {(b.site, b.room) for b in calendar.candidates if b.site == case.site}
             matched = [b.id for b in calendar.candidates if (b.site, b.room) in allowed]
         case_eligible_blocks[i] = matched
-
-    surgeon_day_site_cases: Dict[Tuple[str, int, str], List[int]] = {}
-    for i, case in enumerate(cases):
-        day_idx = (pd.Timestamp(case.actual_start).normalize() - start).days
-        key = (case.surgeon_code, int(day_idx), case.site)
-        surgeon_day_site_cases.setdefault(key, []).append(i)
 
     logger.info(
         "Week %d (%s-%s): %d cases, %d candidate blocks",
@@ -84,7 +68,6 @@ def build_weekly_instance(
         calendar=calendar,
         eligibility=eligibility,
         case_eligible_blocks=case_eligible_blocks,
-        surgeon_day_site_cases=surgeon_day_site_cases,
     )
 
 

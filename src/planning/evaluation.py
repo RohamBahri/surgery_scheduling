@@ -42,11 +42,9 @@ def evaluate(instance: WeeklyInstance, schedule: ScheduleResult, costs: CostConf
         block_load[bid] += t
         total_turnover += t
 
-    blocks_by_id = {b.id: b for b in instance.calendar.candidates}
     total_activation_cost = sum(
         instance.calendar.activation_cost(bid)
         for bid in schedule.opened_blocks
-        if not blocks_by_id[bid].is_fixed
     )
 
     total_overtime = 0.0

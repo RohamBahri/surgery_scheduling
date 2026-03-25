@@ -63,9 +63,6 @@ class BlockId(NamedTuple):
 
 
 EligibilityMap = Dict[str, Set[Tuple[str, str]]]
-SurgeonDaySiteCases = Dict[Tuple[str, int, str], List[int]]
-
-
 @dataclass
 class CaseRecord:
     case_id: int
@@ -146,7 +143,6 @@ class WeeklyInstance:
     calendar: BlockCalendar
     eligibility: EligibilityMap = field(default_factory=dict)
     case_eligible_blocks: Dict[int, List[BlockId]] = field(default_factory=dict)
-    surgeon_day_site_cases: SurgeonDaySiteCases = field(default_factory=dict)
 
     @property
     def num_cases(self) -> int:

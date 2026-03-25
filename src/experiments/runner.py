@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.core.config import Config
 from src.core.types import KPIResult
-from src.data.capacity import build_candidate_pools, classify_fixed_flex
+from src.data.capacity import build_candidate_pools
 from src.data.eligibility import build_eligibility_maps
 from src.data.loader import load_data
 from src.data.scope import apply_experiment_scope
@@ -41,16 +41,13 @@ def _empty_kpi_row(method_name: str, week: int) -> Dict[str, Any]:
         "deferred": None,
         "blocks_opened": None,
         "turnover_minutes": None,
-        "n_fixed_blocks": None,
-        "n_flex_blocks": None,
         "n_forced_defer": None,
-        "n_adaptive_k2": None,
         "planned_obj": None,
         "solve_time": None,
     }
 
 
-def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float | None, solve_time: float, n_fixed: int, n_flex: int, n_forced_defer: int, n_adaptive_k2: int) -> Dict[str, Any]:
+def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float | None, solve_time: float, n_forced_defer: int) -> Dict[str, Any]:
     return {
         "method": method_name,
         "week": week,
@@ -65,10 +62,7 @@ def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float 
         "deferred": kpi.deferred_count,
         "blocks_opened": kpi.blocks_opened,
         "turnover_minutes": kpi.turnover_minutes,
-        "n_fixed_blocks": n_fixed,
-        "n_flex_blocks": n_flex,
         "n_forced_defer": n_forced_defer,
-        "n_adaptive_k2": n_adaptive_k2,
         "planned_obj": planned_obj,
         "solve_time": solve_time,
     }
@@ -88,7 +82,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
 
     df_warmup_scoped, warmup_scope_summary = apply_experiment_scope(df_warmup, config)
     candidate_pools = build_candidate_pools(df_warmup_scoped, config)
-    fixed_templates = classify_fixed_flex(df_warmup_scoped, candidate_pools, config.capacity.fixed_block_threshold)
 
     df_pool_scoped, scope_summary = apply_experiment_scope(df_pool, config)
 
@@ -110,7 +103,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
             config,
             candidate_pools,
             eligibility,
-            fixed_templates,
             eligibility_maps=elig_maps,
         )
         if instance.num_cases == 0:
@@ -123,18 +115,7 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
                 solve_time = time.perf_counter() - t0
                 kpi = evaluate(instance, schedule, config.costs, turnover=config.capacity.turnover_minutes)
                 n_forced = sum(1 for i in range(instance.num_cases) if len(instance.case_eligible_blocks.get(i, [])) == 0)
-                n_adaptive_k2 = int(schedule.diagnostics.get("adaptive_k2_count", 0))
-                row = _kpi_to_row(
-                    method.name,
-                    h,
-                    kpi,
-                    schedule.objective_value,
-                    solve_time,
-                    len(instance.calendar.fixed_blocks),
-                    len(instance.calendar.flex_blocks),
-                    n_forced,
-                    n_adaptive_k2,
-                )
+                row = _kpi_to_row(method.name, h, kpi, schedule.objective_value, solve_time, n_forced)
                 rows.append(row)
                 method_rows[method.name].append(row)
                 validate_week(instance, schedule, config, method.name)
@@ -154,10 +135,6 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
         (out / "eligibility_summary.json").write_text(json.dumps({
             "n_services": len(eligibility),
             "mean_site_room_pairs_per_service": (sum(len(v) for v in eligibility.values()) / max(len(eligibility), 1)),
-        }, indent=2))
-        (out / "fixed_flex_summary.json").write_text(json.dumps({
-            "fixed_templates": len(fixed_templates),
-            "candidate_pool_sizes": {str(k): len(v) for k, v in candidate_pools.items()},
         }, indent=2))
         results_df.to_csv(out / "horizon_results.csv", index=False)
 
