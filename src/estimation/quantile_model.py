@@ -56,20 +56,25 @@ class ConditionalQuantileModel:
                 ("num", StandardScaler(), self.numeric_features),
                 (
                     "cat",
-                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=True),
                     self.categorical_features,
                 ),
-            ]
+            ],
+            sparse_threshold=1.0,
         )
         X = self._preprocessor.fit_transform(X_df)
 
         self._models = {}
         for q in self._quantile_grid:
+            solver_options = None
+            if self.config.max_iter is not None:
+                solver_options = {"maxiter": self.config.max_iter}
+                
             model = QuantileRegressor(
                 quantile=float(q),
                 alpha=self.config.alpha,
                 solver=self.config.solver,
-                solver_options={"maxiter": self.config.max_iter},
+                solver_options=solver_options,
             )
             model.fit(X, y)
             self._models[float(q)] = model

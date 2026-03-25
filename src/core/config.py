@@ -61,8 +61,8 @@ class ExperimentScopeConfig:
 class QuantileModelConfig:
     q_grid_size: int = 99
     alpha: float = 0.01
-    solver: str = "highs"
-    max_iter: int = 10000
+    solver: str = "highs-ipm"
+    max_iter: int | None = None
 
 
 @dataclass
