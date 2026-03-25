@@ -25,10 +25,120 @@ class SurgeonResponseParams:
 class ResponseEstimator:
     """Prepare residualized pair data for surgeon response estimation."""
 
-    def __init__(self, quantile_model, critical_ratio_estimator, config: ResponseConfig | None = None) -> None:
+    def __init__(self, quantile_model, critical_ratios, config: ResponseConfig | None = None) -> None:
         self._qmodel = quantile_model
-        self._critical = critical_ratio_estimator
+        self._critical = critical_ratios
         self.config = config or ResponseConfig()
+        self._params: dict[str, SurgeonResponseParams] = {}
+        self._residualized_pairs: pd.DataFrame | None = None
+        self._r_hat: np.ndarray | None = None
+        self._u_hat: np.ndarray | None = None
+
+    @property
+    def is_fitted(self) -> bool:
+        return len(self._params) > 0
+
+    def fit(self, df_train: pd.DataFrame) -> "ResponseEstimator":
+        self._validate_columns(df_train)
+        pairs = self._build_consecutive_pairs(df_train)
+        r_hat, u_hat = self._cross_fitted_residuals(df_train)
+        residualized_pairs = self._build_residualized_pairs(pairs, r_hat, u_hat)
+
+        self._r_hat = r_hat
+        self._u_hat = u_hat
+        self._residualized_pairs = residualized_pairs
+
+        surgeon_service = (
+            df_train.groupby(Col.SURGEON_CODE)[Col.CASE_SERVICE]
+            .agg(lambda x: x.mode().iat[0])
+            .to_dict()
+        )
+
+        individual_params: dict[str, SurgeonResponseParams] = {}
+        for surgeon, g in residualized_pairs.groupby("surgeon_code", sort=False):
+            if surgeon == Domain.OTHER or len(g) < self.config.min_pairs:
+                continue
+            a, hp, hm, _ = self._profile_least_squares(
+                g["X"].to_numpy(dtype=float),
+                g["Y"].to_numpy(dtype=float),
+            )
+            individual_params[surgeon] = SurgeonResponseParams(
+                surgeon_code=surgeon,
+                a=a,
+                h_plus=hp,
+                h_minus=hm,
+                n_pairs=int(len(g)),
+                is_individual=True,
+            )
+
+        service_params: dict[str, tuple[float, float, float]] = {}
+        for service, g in residualized_pairs.groupby("service", sort=False):
+            if len(g) < self.config.min_pairs:
+                continue
+            a, hp, hm, _ = self._profile_least_squares(
+                g["X"].to_numpy(dtype=float),
+                g["Y"].to_numpy(dtype=float),
+            )
+            service_params[service] = (a, hp, hm)
+
+        if len(residualized_pairs) > 0:
+            g_all = residualized_pairs
+            a_g, hp_g, hm_g, _ = self._profile_least_squares(
+                g_all["X"].to_numpy(dtype=float),
+                g_all["Y"].to_numpy(dtype=float),
+            )
+        else:
+            a_g, hp_g, hm_g = self.config.a_min, 0.0, 0.0
+
+        global_default = SurgeonResponseParams(
+            surgeon_code=Domain.OTHER,
+            a=float(a_g),
+            h_plus=float(hp_g),
+            h_minus=float(hm_g),
+            n_pairs=int(len(residualized_pairs)),
+            is_individual=False,
+        )
+
+        params: dict[str, SurgeonResponseParams] = {}
+        for surgeon in df_train[Col.SURGEON_CODE].astype(str).unique():
+            if surgeon in individual_params:
+                params[surgeon] = individual_params[surgeon]
+                continue
+
+            service = surgeon_service.get(surgeon, "")
+            pooled = service_params.get(service, (global_default.a, global_default.h_plus, global_default.h_minus))
+            n_pairs = int((residualized_pairs["surgeon_code"] == surgeon).sum()) if len(residualized_pairs) else 0
+            params[surgeon] = SurgeonResponseParams(
+                surgeon_code=surgeon,
+                a=float(pooled[0]),
+                h_plus=float(pooled[1]),
+                h_minus=float(pooled[2]),
+                n_pairs=n_pairs,
+                is_individual=False,
+            )
+
+        params[Domain.OTHER] = global_default
+        self._params = params
+        return self
+
+    def get_params(self, surgeon_code: str) -> SurgeonResponseParams:
+        self._require_fitted()
+        return self._params.get(surgeon_code, self._params[Domain.OTHER])
+
+    def get_all_params(self) -> pd.DataFrame:
+        self._require_fitted()
+        rows = [
+            {
+                "surgeon_code": p.surgeon_code,
+                "a": p.a,
+                "h_plus": p.h_plus,
+                "h_minus": p.h_minus,
+                "n_pairs": p.n_pairs,
+                "is_individual": p.is_individual,
+            }
+            for p in self._params.values()
+        ]
+        return pd.DataFrame(rows).sort_values("surgeon_code").reset_index(drop=True)
 
     def _build_consecutive_pairs(self, df_train: pd.DataFrame) -> pd.DataFrame:
         self._validate_columns(df_train)
@@ -99,7 +209,7 @@ class ResponseEstimator:
             test_positions = np.flatnonzero(test_mask)
 
             surgeon_codes = test_df[Col.SURGEON_CODE].astype(str).to_numpy()
-            q_vals = np.array([self._critical.get_ratio(s) for s in surgeon_codes], dtype=float)
+            q_vals = np.array([self._get_ratio(s) for s in surgeon_codes], dtype=float)
 
             preds = np.full(len(test_df), np.nan, dtype=float)
             for q in np.unique(q_vals):
@@ -114,6 +224,48 @@ class ResponseEstimator:
             warnings.warn("NaNs remain in cross-fitted residuals.", RuntimeWarning)
 
         return r_hat, u_hat
+
+    def _build_residualized_pairs(
+        self, pairs: pd.DataFrame, r_hat: np.ndarray, u_hat: np.ndarray
+    ) -> pd.DataFrame:
+        if len(pairs) == 0:
+            return pd.DataFrame(columns=["surgeon_code", "service", "X", "Y"])
+
+        curr_idx = pairs["curr_idx"].to_numpy(dtype=int)
+        prev_idx = pairs["prev_idx"].to_numpy(dtype=int)
+
+        out = pd.DataFrame(
+            {
+                "surgeon_code": pairs["surgeon_code"].to_numpy(),
+                "service": pairs["service"].to_numpy(),
+                "X": u_hat[prev_idx],
+                "Y": r_hat[curr_idx] - r_hat[prev_idx],
+            }
+        )
+        return out.dropna().reset_index(drop=True)
+
+    def _profile_least_squares(self, X: np.ndarray, Y: np.ndarray) -> tuple[float, float, float, float]:
+        X = np.asarray(X, dtype=float)
+        Y = np.asarray(Y, dtype=float)
+
+        h_grid = np.arange(0.0, self.config.h_grid_max + self.config.h_grid_step, self.config.h_grid_step)
+        best = (self.config.a_min, 0.0, 0.0, np.inf)
+
+        for hp in h_grid:
+            for hm in h_grid:
+                Z = np.where(X < -hm, X + hm, np.where(X > hp, X - hp, 0.0))
+                denom = float(np.dot(Z, Z))
+                if denom <= 1e-12:
+                    a = self.config.a_min
+                else:
+                    a = float(np.dot(Y, Z) / denom)
+                a = float(np.clip(a, self.config.a_min, self.config.a_max))
+                resid = Y - a * Z
+                ssr = float(np.dot(resid, resid))
+                if ssr < best[3]:
+                    best = (a, float(hp), float(hm), ssr)
+
+        return best
 
     def _completion_time(self, df: pd.DataFrame) -> pd.Series:
         stop = pd.to_datetime(df[Col.ACTUAL_STOP], errors="coerce")
@@ -133,3 +285,14 @@ class ResponseEstimator:
         missing = [c for c in required if c not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
+
+    def _get_ratio(self, surgeon_code: str) -> float:
+        if hasattr(self._critical, "get_ratio"):
+            return float(self._critical.get_ratio(surgeon_code))
+        if isinstance(self._critical, dict):
+            return float(self._critical.get(surgeon_code, self._critical.get(Domain.OTHER, 0.5)))
+        raise TypeError("critical_ratios must provide get_ratio or be a dict")
+
+    def _require_fitted(self) -> None:
+        if not self.is_fitted:
+            raise RuntimeError("ResponseEstimator must be fitted before access")
