@@ -58,6 +58,57 @@ class ExperimentScopeConfig:
 
 
 @dataclass
+class QuantileModelConfig:
+    q_grid_size: int = 99
+    alpha: float = 0.01
+    solver: str = "highs"
+    max_iter: int = 10000
+
+
+@dataclass
+class InverseConfig:
+    n_min: int = 50
+    q_grid_size: int = 99
+    pooling_lambda: float = 50.0
+
+
+@dataclass
+class ResponseConfig:
+    delta_max_days: int = 60
+    n_folds: int = 5
+    min_pairs: int = 30
+    h_grid_max: float = 60.0
+    h_grid_step: float = 2.0
+    a_min: float = 0.01
+    a_max: float = 1.0
+
+
+@dataclass
+class ProfileConfig:
+    n_profiles_per_service: int = 3
+    min_profiles_total: int = 5
+    max_profiles_total: int = 20
+
+
+@dataclass
+class BootstrapConfig:
+    n_bootstrap: int = 200
+    random_seed: int = 42
+    n_jobs: int = 1
+    q_grid_size_bootstrap: int = 25
+    n_folds_bootstrap: int = 3
+
+
+@dataclass
+class EstimationConfig:
+    quantile_model: QuantileModelConfig = field(default_factory=QuantileModelConfig)
+    inverse: InverseConfig = field(default_factory=InverseConfig)
+    response: ResponseConfig = field(default_factory=ResponseConfig)
+    profile: ProfileConfig = field(default_factory=ProfileConfig)
+    bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
+
+
+@dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
@@ -65,6 +116,7 @@ class Config:
     costs: CostConfig = field(default_factory=CostConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
+    estimation: EstimationConfig = field(default_factory=EstimationConfig)
 
 
 CONFIG = Config()
