@@ -122,6 +122,8 @@ def load_data(config: Config) -> pd.DataFrame:
     df[Col.SURGEON_CODE] = _recode_rare(df[Col.SURGEON_CODE], config.data.min_samples_surgeon)
     df[Col.CASE_SERVICE] = _recode_rare(df[Col.CASE_SERVICE], config.data.min_samples_service)
 
+    df = _canonicalize_identifier_columns(df)
+
     df = add_time_features(df)
     df = df.sort_values(Col.ACTUAL_START).reset_index(drop=True)
     df[Col.CASE_UID] = range(len(df))
@@ -170,3 +172,38 @@ def _recode_rare(series: pd.Series, threshold: int) -> pd.Series:
     series = series.copy()
     series[series.isin(rare)] = Domain.OTHER
     return series
+
+
+def _canonicalize_id_value(x, default: str) -> str:
+    if pd.isna(x):
+        return default
+
+    if isinstance(x, (int, np.integer)):
+        return str(int(x))
+
+    if isinstance(x, (float, np.floating)):
+        if np.isnan(x):
+            return default
+        if float(x).is_integer():
+            return str(int(x))
+        return str(x).strip()
+
+    s = str(x).strip()
+    if s == "" or s.lower() in {"nan", "none", "<na>"}:
+        return default
+    return s
+
+
+def _canonicalize_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if Col.SURGEON_CODE in out.columns:
+        out[Col.SURGEON_CODE] = out[Col.SURGEON_CODE].map(lambda x: _canonicalize_id_value(x, Domain.OTHER))
+
+    if Col.PROCEDURE_ID in out.columns:
+        out[Col.PROCEDURE_ID] = out[Col.PROCEDURE_ID].map(lambda x: _canonicalize_id_value(x, Domain.OTHER))
+
+    if Col.CASE_SERVICE in out.columns:
+        out[Col.CASE_SERVICE] = out[Col.CASE_SERVICE].map(lambda x: _canonicalize_id_value(x, Domain.UNKNOWN))
+
+    return out
