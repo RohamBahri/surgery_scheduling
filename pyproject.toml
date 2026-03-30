@@ -1,5 +1,9 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "or-scheduling"
+name = "surgery-scheduling"
 version = "0.1.0"
 description = "Incentive-aware operating room scheduling with behavioral response modeling"
 requires-python = ">=3.10"
@@ -10,7 +14,18 @@ dependencies = [
     "gurobipy>=10.0",
     "openpyxl>=3.1",
     "joblib>=1.3",
+    "matplotlib>=3.6",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "black", "ruff"]
+
+[project.scripts]
+or-run-experiment = "src.cli.run_experiment:main"
+or-run-estimation = "src.cli.run_estimation:main"
+or-run-estimation-report = "src.cli.run_estimation_report:main"
+or-run-data-analysis = "scripts.data_analysis:main"
+
+[tool.setuptools.packages.find]
+include = ["src*", "scripts*"]

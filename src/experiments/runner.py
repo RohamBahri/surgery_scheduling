@@ -74,7 +74,7 @@ def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float 
     }
 
 
-def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | Path | None = None) -> pd.DataFrame:
+def run_experiment(registry: MethodRegistry, config: Config, artifact_run=None) -> pd.DataFrame:
     df = load_data(config)
     df_warmup, df_pool, pool_start = split_warmup_pool(df, config)
 
@@ -145,16 +145,25 @@ def run_experiment(registry: MethodRegistry, config: Config, output_dir: str | P
 
     results_df = pd.DataFrame(rows)
 
-    if output_dir is not None:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "config_snapshot.json").write_text(json.dumps(asdict(config), indent=2, default=str))
-        (out / "scope_summary.json").write_text(json.dumps({"warmup": asdict(warmup_scope_summary), "pool": asdict(scope_summary)}, indent=2))
-        (out / "eligibility_summary.json").write_text(json.dumps({
+    if artifact_run is not None:
+        artifact_run.ensure_run_dir()
+        artifact_run.path("config_snapshot.json").write_text(json.dumps(asdict(config), indent=2, default=str))
+        artifact_run.path("scope_summary.json").write_text(json.dumps({"warmup": asdict(warmup_scope_summary), "pool": asdict(scope_summary)}, indent=2))
+        artifact_run.path("eligibility_summary.json").write_text(json.dumps({
             "n_services": len(elig_maps.service_rooms),
             "mean_site_room_pairs_per_service": (sum(len(v) for v in elig_maps.service_rooms.values()) / max(len(elig_maps.service_rooms), 1)),
         }, indent=2))
-        results_df.to_csv(out / "horizon_results.csv", index=False)
+        results_df.to_csv(artifact_run.path("horizon_results.csv"), index=False)
+
+        aggregate = {}
+        if not results_df.empty:
+            for method, sub in results_df.groupby("method"):
+                aggregate[method] = {
+                    "weeks": int(len(sub)),
+                    "mean_total_cost": float(sub["total_cost"].dropna().mean()) if sub["total_cost"].notna().any() else None,
+                    "mean_planned_obj": float(sub["planned_obj"].dropna().mean()) if sub["planned_obj"].notna().any() else None,
+                }
+        artifact_run.path("aggregate_summary.json").write_text(json.dumps(aggregate, indent=2))
 
     _validate_oracle_leq_booked(method_rows)
     _print_final_summary(results_df)

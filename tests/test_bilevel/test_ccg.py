@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.bilevel.ccg import solve_bilevel_ccg
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 from src.core.column import ScheduleColumn
 from src.core.config import CostConfig, SolverConfig
 from src.core.types import BlockCalendar, BlockId, CandidateBlock
@@ -64,7 +64,7 @@ def _col(defer: bool) -> ScheduleColumn:
 def test_ccg_terminates_on_tiny_instance(monkeypatch) -> None:
     monkeypatch.setattr("src.bilevel.ccg.generate_warmstart_columns", lambda *args, **kwargs: [_col(False)])
     monkeypatch.setattr("src.bilevel.ccg.run_pricing", lambda *args, **kwargs: None)
-    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), BilevelConfig(max_ccg_iterations=5), CostConfig(), SolverConfig(), turnover=0.0)
+    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), LegacyCCGConfig(max_iterations=5), CostConfig(), SolverConfig(), turnover=0.0)
     assert res.n_iterations <= 5
 
 
@@ -72,7 +72,7 @@ def test_ccg_non_degradation(monkeypatch) -> None:
     monkeypatch.setattr("src.bilevel.ccg.generate_warmstart_columns", lambda *args, **kwargs: [_col(False), _col(True)])
     monkeypatch.setattr("src.bilevel.ccg.run_pricing", lambda *args, **kwargs: None)
     costs = CostConfig(deferral_per_case=5000.0)
-    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), BilevelConfig(max_ccg_iterations=2), costs, SolverConfig(), turnover=0.0)
+    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), LegacyCCGConfig(max_iterations=2), costs, SolverConfig(), turnover=0.0)
     status_quo = _col(False).compute_cost(_wd().realized, costs, turnover=0.0)
     assert res.objective <= status_quo
 
@@ -81,6 +81,6 @@ def test_ccg_oracle_bound(monkeypatch) -> None:
     monkeypatch.setattr("src.bilevel.ccg.generate_warmstart_columns", lambda *args, **kwargs: [_col(False)])
     monkeypatch.setattr("src.bilevel.ccg.run_pricing", lambda *args, **kwargs: None)
     costs = CostConfig()
-    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), BilevelConfig(max_ccg_iterations=2), costs, SolverConfig(), turnover=0.0)
+    res = solve_bilevel_ccg([_wd()], DummyRecommendation(), LegacyCCGConfig(max_iterations=2), costs, SolverConfig(), turnover=0.0)
     oracle = _col(False).compute_cost(_wd().realized, costs, turnover=0.0)
     assert res.objective >= oracle

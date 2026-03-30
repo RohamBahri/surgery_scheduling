@@ -5,7 +5,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 from src.bilevel.master import RMPResult, solve_restricted_master
 from src.bilevel.pricing import run_pricing
 from src.bilevel.warmstart import generate_warmstart_columns
@@ -26,7 +26,7 @@ class CCGResult:
 def solve_bilevel_ccg(
     week_data_list: List[WeekRecommendationData],
     recommendation_model: RecommendationModel,
-    config: BilevelConfig,
+    config: LegacyCCGConfig,
     costs: CostConfig,
     solver_cfg: SolverConfig,
     turnover: float,
@@ -39,7 +39,7 @@ def solve_bilevel_ccg(
         column_pools[wd.week_index] = cols
 
     rmp_result: RMPResult | None = None
-    for iteration in range(config.max_ccg_iterations):
+    for iteration in range(config.max_iterations):
         rmp_result = solve_restricted_master(
             week_data_list=week_data_list,
             column_pools=column_pools,

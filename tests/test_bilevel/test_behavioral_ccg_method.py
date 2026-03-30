@@ -16,7 +16,7 @@ from src.core.types import (
     ScheduleResult,
     WeeklyInstance,
 )
-from src.methods.behavioral_ccg import BehavioralCCGMethod
+from src.methods.legacy_behavioral_ccg import LegacyBehavioralCCGHeuristic
 from src.methods.registry import MethodRegistry
 
 
@@ -59,7 +59,7 @@ def _instance() -> WeeklyInstance:
 
 def test_method_fit_plan_cycle(monkeypatch) -> None:
     cfg = Config()
-    method = BehavioralCCGMethod(cfg)
+    method = LegacyBehavioralCCGHeuristic(cfg)
 
     class DummyRec:
         def prepare(self, df):
@@ -76,7 +76,7 @@ def test_method_fit_plan_cycle(monkeypatch) -> None:
     method._ccg_result = type("R", (), {"w_optimal": np.zeros(1)})()
 
     monkeypatch.setattr(
-        "src.methods.behavioral_ccg.solve_deterministic",
+        "src.methods.legacy_behavioral_ccg.solve_deterministic",
         lambda **kwargs: ScheduleResult(assignments=[ScheduleAssignment(case_id=1)], solver_status="OPTIMAL"),
     )
 
@@ -86,5 +86,5 @@ def test_method_fit_plan_cycle(monkeypatch) -> None:
 
 def test_method_registered_in_runner() -> None:
     registry = MethodRegistry()
-    registry.register(BehavioralCCGMethod(Config()))
-    assert "BehavioralCCG" in registry.names
+    registry.register(LegacyBehavioralCCGHeuristic(Config()))
+    assert "LegacyBehavioralCCG" in registry.names

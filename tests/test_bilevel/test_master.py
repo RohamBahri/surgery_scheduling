@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 from src.bilevel.master import _compute_mae_base, solve_restricted_master
 from src.core.column import ScheduleColumn
 from src.core.config import CostConfig
@@ -97,14 +97,14 @@ class DummyRecommendation:
 
 def test_single_column_selection() -> None:
     wd = _wd()
-    res = solve_restricted_master([wd], {0: [_col_assign()]}, DummyRecommendation(), BilevelConfig(), CostConfig(), turnover=0.0)
+    res = solve_restricted_master([wd], {0: [_col_assign()]}, DummyRecommendation(), LegacyCCGConfig(), CostConfig(), turnover=0.0)
     assert res.selected_columns[0] == 0
     assert res.status in {"OPTIMAL", "TIME_LIMIT", "SUBOPTIMAL"}
 
 
 def test_zero_weights_feasible() -> None:
     wd = _wd()
-    res = solve_restricted_master([wd], {0: [_col_assign()]}, DummyRecommendation(), BilevelConfig(), CostConfig(), turnover=0.0)
+    res = solve_restricted_master([wd], {0: [_col_assign()]}, DummyRecommendation(), LegacyCCGConfig(), CostConfig(), turnover=0.0)
     assert res.status != "INFEASIBLE"
 
 
@@ -115,7 +115,7 @@ def test_selects_lower_realized_cost() -> None:
         [wd],
         {0: [_col_assign(), _col_defer()]},
         DummyRecommendation(),
-        BilevelConfig(),
+        LegacyCCGConfig(),
         costs,
         turnover=0.0,
     )
@@ -128,7 +128,7 @@ def test_non_degradation() -> None:
     col = _col_assign()
     status_quo_cost = col.compute_cost(wd.realized, costs, turnover=0.0)
 
-    res = solve_restricted_master([wd], {0: [col]}, DummyRecommendation(), BilevelConfig(), costs, turnover=0.0)
+    res = solve_restricted_master([wd], {0: [col]}, DummyRecommendation(), LegacyCCGConfig(), costs, turnover=0.0)
     assert res.objective <= status_quo_cost + 1e-6
 
 
@@ -140,6 +140,6 @@ def test_mae_base_computation() -> None:
 def test_credibility_constraint_limits_w() -> None:
     wd = _wd(booking=100.0, realized=100.0)
     res = solve_restricted_master(
-        [wd], {0: [_col_assign()]}, DummyRecommendation(), BilevelConfig(credibility_eta=1.0), CostConfig(), turnover=0.0
+        [wd], {0: [_col_assign()]}, DummyRecommendation(), LegacyCCGConfig(credibility_eta=1.0), CostConfig(), turnover=0.0
     )
     assert res.status != "INFEASIBLE"

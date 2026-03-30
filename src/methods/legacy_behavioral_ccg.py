@@ -1,3 +1,8 @@
+"""Legacy CCG-style behavioral heuristic method.
+
+This is not the document's exact VFCG method.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -17,9 +22,9 @@ from src.planning.instance import build_weekly_instance
 from src.solvers.deterministic import solve_deterministic
 
 
-class BehavioralCCGMethod(Method):
+class LegacyBehavioralCCGHeuristic(Method):
     def __init__(self, config: Config):
-        super().__init__(name="BehavioralCCG", config=config)
+        super().__init__(name="LegacyBehavioralCCG", config=config)
         self._estimation_result: EstimationResult | None = None
         self._recommendation_model: RecommendationModel | None = None
         self._ccg_result: CCGResult | None = None
@@ -37,10 +42,10 @@ class BehavioralCCGMethod(Method):
             estimation_result=self._estimation_result,
             costs=self.config.costs,
             plausibility_tails=(
-                self.config.bilevel.plausibility_tau_L,
-                self.config.bilevel.plausibility_tau_U,
+                self.config.legacy_ccg.plausibility_tau_L,
+                self.config.legacy_ccg.plausibility_tau_U,
             ),
-            w_max=self.config.bilevel.w_max,
+            w_max=self.config.legacy_ccg.w_max,
         )
         self._recommendation_model.prepare(df_train)
 
@@ -72,7 +77,7 @@ class BehavioralCCGMethod(Method):
         self._ccg_result = solve_bilevel_ccg(
             week_data_list=week_data_list,
             recommendation_model=self._recommendation_model,
-            config=self.config.bilevel,
+            config=self.config.legacy_ccg,
             costs=self.config.costs,
             solver_cfg=self.config.solver,
             turnover=self.config.capacity.turnover_minutes,
@@ -80,7 +85,7 @@ class BehavioralCCGMethod(Method):
 
     def plan(self, instance: WeeklyInstance) -> ScheduleResult:
         if self._recommendation_model is None or self._ccg_result is None:
-            raise RuntimeError("BehavioralCCGMethod must be fitted before planning.")
+            raise RuntimeError("LegacyBehavioralCCGHeuristic must be fitted before planning.")
 
         week_data = self._recommendation_model.prepare_instance(instance)
         d_post = self._recommendation_model.compute_post_review(self._ccg_result.w_optimal, week_data)

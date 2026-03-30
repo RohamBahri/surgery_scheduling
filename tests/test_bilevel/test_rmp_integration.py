@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.bilevel.ccg import solve_bilevel_ccg
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 from src.core.column import ScheduleColumn
 from src.core.config import CostConfig, SolverConfig
 from src.core.types import BlockCalendar, BlockId, CandidateBlock
@@ -87,7 +87,7 @@ def test_ccg_terminates_with_real_master(monkeypatch) -> None:
     res = solve_bilevel_ccg(
         wds,
         DummyRecModel(),
-        BilevelConfig(max_ccg_iterations=5),
+        LegacyCCGConfig(max_iterations=5),
         CostConfig(),
         SolverConfig(time_limit_seconds=30),
         turnover=0.0,

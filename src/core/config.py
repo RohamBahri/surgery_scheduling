@@ -1,9 +1,10 @@
 """Application configuration."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Tuple
 
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 
 
 @dataclass
@@ -15,6 +16,11 @@ class DataConfig:
     min_samples_procedure: int = 50
     min_samples_surgeon: int = 10
     min_samples_service: int = 20
+
+
+@dataclass
+class ArtifactConfig:
+    artifact_root: Path = Path("artifacts")
 
 
 @dataclass
@@ -102,12 +108,6 @@ class BootstrapConfig:
 
 
 @dataclass
-class RecommendationConfig:
-    plausibility_lower_tail: float = 0.01
-    plausibility_upper_tail: float = 0.99
-    w_max: float = 10.0
-
-@dataclass
 class EstimationConfig:
     quantile_model: QuantileModelConfig = field(default_factory=QuantileModelConfig)
     inverse: InverseConfig = field(default_factory=InverseConfig)
@@ -119,14 +119,11 @@ class EstimationConfig:
 @dataclass
 class Config:
     data: DataConfig = field(default_factory=DataConfig)
+    artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
     capacity: CapacityConfig = field(default_factory=CapacityConfig)
     eligibility: EligibilityConfig = field(default_factory=EligibilityConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
     estimation: EstimationConfig = field(default_factory=EstimationConfig)
-    recommendation: RecommendationConfig = field(default_factory=RecommendationConfig)
-    bilevel: BilevelConfig = field(default_factory=BilevelConfig)
-
-
-CONFIG = Config()
+    legacy_ccg: LegacyCCGConfig = field(default_factory=LegacyCCGConfig)
