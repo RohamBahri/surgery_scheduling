@@ -1,39 +1,22 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# generated artifacts
+/artifacts/
 
-# Virtual environments
-.env/
-.venv/
-venv/
+# local data only
+/data/raw/
+/data/interim/
+/data/private/
 
-# Data and presentation files
-/data/
-presentations/
-figures/
-docs/
-tables/
-*.xlsx
-*.csv
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# Logs and debug outputs
+# logs and debug
 *.log
 debug_*.lp
 debug_*.sol
-outputs/
-reports/
-adhoc_*
-old_*
-EDA/
 
-# IDE / editor folders
+# python / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env/
 .vscode/
 .idea/
-
-# tmp files
-tmp_*
+.ipynb_checkpoints/

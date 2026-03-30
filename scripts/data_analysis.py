@@ -32,6 +32,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
 
+from src.core.paths import ArtifactManager
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
 
@@ -39,12 +41,9 @@ warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
 # ─────────────────────────────────────────────────────────────────────────────
 #  Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-FIGDIR = Path("figures")
-TBLDIR = Path("tables")
-REPORTDIR = Path("reports")
-FIGDIR.mkdir(exist_ok=True)
-TBLDIR.mkdir(exist_ok=True)
-REPORTDIR.mkdir(exist_ok=True)
+FIGDIR = Path(".")
+TBLDIR = Path(".")
+REPORTDIR = Path(".")
 
 # Minimum counts for reliable estimation
 MIN_SURGEON_CASES  = 30
@@ -2950,7 +2949,7 @@ def analyze_service_room_assignment(df):
             print(row_str)
     else:
         print("  (matrix too large to print inline; "
-              "see tables/block_service_counts.csv)")
+              "see generated block_service_counts.csv table)")
 
     # ── D. Plot ─────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -4850,14 +4849,24 @@ def main():
         description="Dataset exploration for incentive-aware OR scheduling")
     parser.add_argument("--data", type=str, required=True,
                         help="Path to dataset (CSV, pickle, parquet, Excel)")
+    parser.add_argument("--artifact-root", type=str, default="artifacts",
+                        help="Artifact root directory")
+    parser.add_argument("--run-label", type=str, default=None,
+                        help="Optional run label for artifact folder")
     parser.add_argument("--report", type=str,
-                        default=str(REPORTDIR / "analysis_report.txt"),
-                        help="Path to the full text report file")
+                        default=None,
+                        help="Optional explicit path to the full text report file")
     parser.add_argument("--tee-console", action="store_true",
                         help="Also echo the detailed report to the console")
     args = parser.parse_args()
 
-    report_path = Path(args.report)
+    artifact_run = ArtifactManager(args.artifact_root).run("analysis", args.run_label)
+    global FIGDIR, TBLDIR, REPORTDIR
+    FIGDIR = artifact_run.directory("figures")
+    TBLDIR = artifact_run.directory("tables")
+    REPORTDIR = artifact_run.run_dir
+
+    report_path = Path(args.report) if args.report else artifact_run.path("analysis_report.txt")
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     def run_analysis():

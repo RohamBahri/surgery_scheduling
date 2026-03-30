@@ -15,7 +15,7 @@ import gurobipy as gp
 import numpy as np
 from gurobipy import GRB, quicksum
 
-from src.bilevel.config import BilevelConfig
+from src.bilevel.config import LegacyCCGConfig
 from src.core.column import ScheduleColumn
 from src.core.config import CostConfig
 from src.core.types import BlockId
@@ -70,7 +70,7 @@ def solve_restricted_master(
     week_data_list: List[WeekRecommendationData],
     column_pools: Dict[int, List[ScheduleColumn]],
     recommendation_model: RecommendationModel,
-    config: BilevelConfig,
+    config: LegacyCCGConfig,
     costs: CostConfig,
     turnover: float,
 ) -> RMPResult:
@@ -264,7 +264,7 @@ def _fallback_zero_weights(
     column_pools: Dict[int, List[ScheduleColumn]],
     costs: CostConfig,
     turnover: float,
-    config: BilevelConfig,
+    config: LegacyCCGConfig,
     solve_time: float,
     status_name: str,
 ) -> RMPResult:
