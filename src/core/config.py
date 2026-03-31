@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Tuple
 
 from src.bilevel.config import LegacyCCGConfig
+from src.vfcg.config import VFCGConfig
 
 
 @dataclass
@@ -127,3 +128,4 @@ class Config:
     scope: ExperimentScopeConfig = field(default_factory=ExperimentScopeConfig)
     estimation: EstimationConfig = field(default_factory=EstimationConfig)
     legacy_ccg: LegacyCCGConfig = field(default_factory=LegacyCCGConfig)
+    vfcg: VFCGConfig = field(default_factory=VFCGConfig)
