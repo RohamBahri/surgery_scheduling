@@ -13,8 +13,9 @@ from gurobipy import GRB, quicksum
 from src.core.column import ScheduleColumn, extract_column_from_model
 from src.core.config import CapacityConfig, Config, CostConfig, SolverConfig
 from src.estimation.recommendation import RecommendationModel, WeekRecommendationData
-from src.solvers.deterministic import solve_pricing
+from src.solvers.deterministic import solve_weekly_optimistic
 from src.vfcg.cuts import add_reference_predicted_cost_rhs
+from src.vfcg.oracle import build_case_records_from_week_data
 
 logger = logging.getLogger(__name__)
 
@@ -208,28 +209,38 @@ def solve_native_master(
         weights = np.zeros(feat_dim, dtype=float)
         schedules: dict[int, ScheduleColumn] = {}
         pred_costs: dict[int, float] = {}
+        fallback_realized_costs: list[float] = []
         for wd in week_data_list:
-            col, obj_val = solve_pricing(
-                n_cases=wd.n_cases,
-                durations=np.asarray(wd.bookings, dtype=float),
+            cases = build_case_records_from_week_data(wd)
+            planning_durations = np.asarray(wd.bookings, dtype=float)
+            realized_durations = np.asarray(wd.realized, dtype=float)
+            col, predicted_cost, _, fallback_status, _ = solve_weekly_optimistic(
+                cases=cases,
+                planning_durations=planning_durations,
+                realized_durations=realized_durations,
                 calendar=wd.calendar,
                 costs=costs,
                 solver_cfg=solver_cfg,
                 case_eligible_blocks=wd.case_eligible_blocks,
                 turnover=turnover,
                 model_name=f"fallback_week_{wd.week_index}",
+                tol=config.vfcg.convergence_tol or 1e-6,
             )
             if col is None:
-                raise RuntimeError(f"Fallback pricing failed for week {wd.week_index}")
-            schedules[int(wd.week_index)] = col
-            pred_costs[int(wd.week_index)] = float(obj_val)
+                raise RuntimeError(f"Fallback optimistic solve failed for week {wd.week_index} (status={fallback_status})")
+            week_key = int(wd.week_index)
+            schedules[week_key] = col
+            pred_costs[week_key] = float(predicted_cost)
+            fallback_realized_costs.append(float(col.compute_cost(realized_durations, costs, turnover)))
+
+        fallback_objective = float(np.mean(fallback_realized_costs)) if fallback_realized_costs else float("inf")
 
         return NativeMasterResult(
             weights=weights,
             schedules_by_week=schedules,
-            objective=float("inf"),
-            bound=float("inf"),
-            gap=float("inf"),
+            objective=fallback_objective,
+            bound=fallback_objective,
+            gap=float("nan"),
             solve_time=time.perf_counter() - t0,
             status=f"{status_name}_FALLBACK",
             predicted_costs_by_week=pred_costs,

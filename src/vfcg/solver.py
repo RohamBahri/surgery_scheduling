@@ -12,7 +12,7 @@ from src.vfcg.certify import certify
 from src.vfcg.diagnostics import log_iteration_summary
 from src.vfcg.master import solve_native_master
 from src.vfcg.oracle import ExactFollowerOracle
-from src.vfcg.types import VFCGIteration, VFCGResult
+from src.vfcg.types import CertificationResult, VFCGIteration, VFCGResult
 from src.vfcg.warmstart import generate_warmstart_references
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,19 @@ def vfcg_solve(
         master_bound=final_master.bound,
         weekly_schedules=final_master.schedules_by_week,
     )
+
+    if final_master.is_fallback:
+        tie_break_flags = list(certification.tie_break_flags or [])
+        if "master_fallback_used" not in tie_break_flags:
+            tie_break_flags.append("master_fallback_used")
+        certification = CertificationResult(
+            status="TERMINATED_UNVERIFIED",
+            max_violation=certification.max_violation,
+            reconstructed_objective=certification.reconstructed_objective,
+            master_objective=certification.master_objective,
+            master_bound=certification.master_bound,
+            tie_break_flags=tie_break_flags,
+        )
 
     return VFCGResult(
         w_optimal=np.asarray(final_master.weights, dtype=float),

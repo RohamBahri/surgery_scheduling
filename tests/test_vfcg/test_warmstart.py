@@ -90,3 +90,29 @@ def test_generate_warmstart_references_removes_duplicates(monkeypatch) -> None:
     )
 
     assert len(refs[0]) == 1
+
+
+def test_generate_warmstart_references_does_not_apply_week_truncation(monkeypatch) -> None:
+    week0 = _week(0)
+    week1 = _week(1)
+
+    def _fake_solve_pricing(**kwargs):
+        calendar = kwargs["calendar"]
+        return _column(calendar.candidates[0]), 1.0
+
+    monkeypatch.setattr("src.vfcg.warmstart.solve_pricing", _fake_solve_pricing)
+
+    capacity_cfg = CapacityConfig()
+    setattr(capacity_cfg, "max_training_weeks", 1)
+
+    refs = generate_warmstart_references(
+        week_data_list=[week0, week1],
+        recommendation_model=_DummyRecommendation(),
+        costs=CostConfig(),
+        capacity_cfg=capacity_cfg,
+        solver_cfg=SolverConfig(),
+        turnover=0.0,
+        n_vectors=3,
+    )
+
+    assert set(refs.keys()) == {0, 1}

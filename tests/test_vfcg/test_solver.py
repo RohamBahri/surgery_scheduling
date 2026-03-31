@@ -178,3 +178,34 @@ def test_fallback_path_goes_directly_to_certification(monkeypatch) -> None:
     res = vfcg_solve([wd], _Rec(), _cfg(), CostConfig(), CapacityConfig(), SolverConfig(), 0.0)
     assert marker["called"] == 1
     assert res.n_iterations == 1
+
+
+def test_vfcg_solver_downgrades_fallback_certification_status(monkeypatch) -> None:
+    wd = _week()
+    col = _col()
+
+    monkeypatch.setattr("src.vfcg.solver.generate_warmstart_references", lambda **kwargs: {0: [col]})
+    monkeypatch.setattr(
+        "src.vfcg.solver.solve_native_master",
+        lambda **kwargs: NativeMasterResult(
+            weights=np.array([0.0]),
+            schedules_by_week={0: col},
+            objective=10.0,
+            bound=10.0,
+            gap=float("nan"),
+            solve_time=0.1,
+            status="TIME_LIMIT_FALLBACK",
+            predicted_costs_by_week={0: 10.0},
+            is_fallback=True,
+        ),
+    )
+    monkeypatch.setattr("src.vfcg.solver.ExactFollowerOracle", lambda: object())
+    monkeypatch.setattr(
+        "src.vfcg.solver.certify",
+        lambda **kwargs: CertificationResult("OPTIMAL_VERIFIED", 0.0, 10.0, 10.0, 10.0, None),
+    )
+
+    res = vfcg_solve([wd], _Rec(), _cfg(), CostConfig(), CapacityConfig(), SolverConfig(), 0.0)
+
+    assert res.certification.status == "TERMINATED_UNVERIFIED"
+    assert "master_fallback_used" in (res.certification.tie_break_flags or [])
