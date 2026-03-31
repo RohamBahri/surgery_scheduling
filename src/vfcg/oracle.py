@@ -13,6 +13,27 @@ from src.solvers.deterministic import solve_weekly_optimistic
 from src.vfcg.types import OracleResult
 
 
+def build_case_records_from_week_data(week_data: WeekRecommendationData) -> list[CaseRecord]:
+    realized = np.asarray(week_data.realized, dtype=float)
+    return [
+        CaseRecord(
+            case_id=i,
+            procedure_id="UNK",
+            surgeon_code=week_data.surgeon_codes[i] if i < len(week_data.surgeon_codes) else "UNK",
+            service="Other",
+            patient_type="Elective",
+            operating_room="",
+            booked_duration_min=float(week_data.bookings[i]),
+            actual_duration_min=float(realized[i]),
+            actual_start=datetime(2020, 1, 1),
+            week_of_year=1,
+            month=1,
+            year=2020,
+        )
+        for i in range(week_data.n_cases)
+    ]
+
+
 class ExactFollowerOracle:
     """Single authoritative follower oracle using the compact weekly MIP."""
 
@@ -32,23 +53,7 @@ class ExactFollowerOracle:
         d_post = np.asarray(recommendation_model.compute_post_review(w, week_data), dtype=float)
         realized = np.asarray(week_data.realized, dtype=float)
 
-        cases = [
-            CaseRecord(
-                case_id=i,
-                procedure_id="UNK",
-                surgeon_code=week_data.surgeon_codes[i] if i < len(week_data.surgeon_codes) else "UNK",
-                service="Other",
-                patient_type="Elective",
-                operating_room="",
-                booked_duration_min=float(week_data.bookings[i]),
-                actual_duration_min=float(realized[i]),
-                actual_start=datetime(2020, 1, 1),
-                week_of_year=1,
-                month=1,
-                year=2020,
-            )
-            for i in range(week_data.n_cases)
-        ]
+        cases = build_case_records_from_week_data(week_data)
 
         schedule, predicted_cost, realized_cost, status, solve_time = solve_weekly_optimistic(
             cases=cases,

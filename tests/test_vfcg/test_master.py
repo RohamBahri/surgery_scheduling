@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.core.column import ScheduleColumn
 from src.core.config import CapacityConfig, Config, CostConfig, SolverConfig
 from src.core.types import BlockCalendar, CandidateBlock
 from src.estimation.recommendation import SOS2CaseData, WeekRecommendationData
@@ -43,6 +44,18 @@ def _config() -> Config:
     cfg.vfcg.master_mip_gap = 0.0
     cfg.vfcg.w_max = 10.0
     return cfg
+
+
+def _column(block: CandidateBlock) -> ScheduleColumn:
+    return ScheduleColumn(
+        z_assign={(0, block.id): 1.0},
+        z_defer=frozenset({1}),
+        v_open=frozenset({block.id}),
+        y_used=frozenset({block.id}),
+        n_cases=2,
+        block_capacities={block.id: block.capacity_minutes},
+        block_activation_costs={block.id: block.activation_cost},
+    )
 
 
 def test_empty_reference_sets_produce_solveable_relaxation() -> None:
@@ -119,3 +132,36 @@ def test_eligible_pair_sparsity_respected_in_extraction() -> None:
 
     col = res.schedules_by_week[0]
     assert all(bid != b2.id for (_, bid) in col.z_assign.keys())
+
+
+def test_native_master_fallback_returns_finite_values_and_uses_optimistic_solver(monkeypatch) -> None:
+    wd = _week()
+    cfg = _config()
+    cfg.vfcg.credibility_eta = -1.0
+
+    def _fake_solve_weekly_optimistic(**kwargs):
+        calendar = kwargs["calendar"]
+        return _column(calendar.candidates[0]), 12.5, 13.0, "OPTIMAL", 0.01
+
+    monkeypatch.setattr("src.vfcg.master.solve_weekly_optimistic", _fake_solve_weekly_optimistic)
+
+    def _raise_if_called(**_kwargs):
+        raise AssertionError("solve_pricing should not be used in fallback")
+
+    monkeypatch.setattr("src.vfcg.master.solve_pricing", _raise_if_called, raising=False)
+
+    res = solve_native_master(
+        week_data_list=[wd],
+        reference_sets={},
+        recommendation_model=_DummyRecommendation(),
+        config=cfg,
+        costs=CostConfig(),
+        capacity_cfg=CapacityConfig(),
+        solver_cfg=SolverConfig(time_limit_seconds=30, mip_gap=0.0, verbose=False),
+        turnover=0.0,
+    )
+
+    assert res.is_fallback is True
+    assert np.isfinite(res.objective)
+    assert np.isfinite(res.bound)
+    assert res.status.endswith("_FALLBACK")

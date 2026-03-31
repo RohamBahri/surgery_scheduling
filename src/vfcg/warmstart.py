@@ -86,11 +86,4 @@ def generate_warmstart_references(
 
         references[int(week_data.week_index)] = deduped
 
-    max_training_weeks = getattr(capacity_cfg, "max_training_weeks", None)
-    if max_training_weeks is not None:
-        nonempty_items = [(widx, cols) for widx, cols in references.items() if cols]
-        nonempty_items.sort(key=lambda x: x[0])
-        kept = nonempty_items[-int(max_training_weeks) :]
-        references = {widx: cols for widx, cols in kept}
-
     return references
