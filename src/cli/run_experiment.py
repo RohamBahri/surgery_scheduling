@@ -8,6 +8,8 @@ from src.core.paths import ArtifactManager
 from src.experiments.runner import run_experiment
 from src.methods.booked import BookedTimeMethod
 from src.methods.oracle import OracleMethod
+from src.methods.registry import MethodRegistry
+from src.methods.vfcg import VFCGMethod
 
 
 def main() -> int:
@@ -37,13 +39,11 @@ def main() -> int:
     registry = MethodRegistry()
     registry.register(BookedTimeMethod(config))
     registry.register(OracleMethod(config))
+    registry.register(VFCGMethod(config))
 
     artifact_run = ArtifactManager(args.artifact_root).run("experiments", args.run_label)
     run_experiment(registry, config, artifact_run=artifact_run)
     return 0
-
-
-from src.methods.registry import MethodRegistry
 
 if __name__ == "__main__":
     raise SystemExit(main())

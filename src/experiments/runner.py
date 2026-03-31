@@ -47,10 +47,19 @@ def _empty_kpi_row(method_name: str, week: int) -> Dict[str, Any]:
         "obj_bound": None,
         "planned_obj": None,
         "solve_time": None,
+        "training_objective": None,
+        "training_bound": None,
+        "training_gap": None,
+        "certification_status": None,
+        "vfcg_iterations": None,
+        "vfcg_total_cuts": None,
+        "vfcg_max_violation": None,
+        "vfcg_tie_break_flags": None,
     }
 
 
-def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float | None, solve_time: float, n_forced_defer: int, schedule_diag: Dict[str, Any]) -> Dict[str, Any]:
+def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float | None, solve_time: float, n_forced_defer: int, schedule_diag: Dict[str, Any], method_diag: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    method_diag = method_diag or {}
     return {
         "method": method_name,
         "week": week,
@@ -71,6 +80,14 @@ def _kpi_to_row(method_name: str, week: int, kpi: KPIResult, planned_obj: float 
         "obj_bound": schedule_diag.get("obj_bound"),
         "planned_obj": planned_obj,
         "solve_time": solve_time,
+        "training_objective": method_diag.get("training_objective"),
+        "training_bound": method_diag.get("training_bound"),
+        "training_gap": method_diag.get("training_gap"),
+        "certification_status": method_diag.get("certification_status"),
+        "vfcg_iterations": method_diag.get("vfcg_iterations"),
+        "vfcg_total_cuts": method_diag.get("vfcg_total_cuts"),
+        "vfcg_max_violation": method_diag.get("vfcg_max_violation"),
+        "vfcg_tie_break_flags": method_diag.get("vfcg_tie_break_flags"),
     }
 
 
@@ -120,6 +137,7 @@ def run_experiment(registry: MethodRegistry, config: Config, artifact_run=None) 
                 solve_time = time.perf_counter() - t0
                 kpi = evaluate(instance, schedule, config.costs, turnover=config.capacity.turnover_minutes)
                 n_forced = sum(1 for i in range(instance.num_cases) if len(instance.case_eligible_blocks.get(i, [])) == 0)
+                method_diag = getattr(method, "training_summary", None)
                 row = _kpi_to_row(
                     method.name,
                     h,
@@ -128,6 +146,7 @@ def run_experiment(registry: MethodRegistry, config: Config, artifact_run=None) 
                     solve_time,
                     n_forced,
                     schedule.diagnostics,
+                    method_diag=method_diag if isinstance(method_diag, dict) else None,
                 )
                 rows.append(row)
                 week_rows.append(row)
@@ -164,6 +183,14 @@ def run_experiment(registry: MethodRegistry, config: Config, artifact_run=None) 
                     "mean_planned_obj": float(sub["planned_obj"].dropna().mean()) if sub["planned_obj"].notna().any() else None,
                 }
         artifact_run.path("aggregate_summary.json").write_text(json.dumps(aggregate, indent=2))
+        vfcg_training = {}
+        for method in registry:
+            if method.name != "VFCG":
+                continue
+            summary = getattr(method, "training_summary", None)
+            if isinstance(summary, dict):
+                vfcg_training = summary
+        artifact_run.path("vfcg_training_summary.json").write_text(json.dumps(vfcg_training, indent=2))
 
     _validate_oracle_leq_booked(method_rows)
     _print_final_summary(results_df)
