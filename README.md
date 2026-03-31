@@ -4,8 +4,8 @@ This repository contains the current experiment stack for incentive-aware OR sch
 
 ## Current status
 - Implemented: rolling-horizon evaluation with `Booked` and `Oracle` methods plus estimation and diagnostics pipelines.
-- Legacy: the CCG-based behavioral method remains in `src/methods/legacy_behavioral_ccg.py` as a **legacy heuristic** (`LegacyBehavioralCCGHeuristic`), not the document's exact VFCG solver.
-- Next stage (not implemented here): exact VFCG method integration.
+- The production learning method is now the exact VFCG stack under `src/vfcg/` with the compact weekly MIP as its only follower oracle.
+- The CLI and experiment runner include VFCG training diagnostics and certification outputs.
 
 ## Setup
 ```bash
