@@ -201,4 +201,129 @@ def test_runner_executes_vfcg_and_writes_summary_artifact(monkeypatch, tmp_path:
     assert "training_objective" in out.columns
     summary_path = artifact_run.path("vfcg_training_summary.json")
     assert summary_path.exists()
-    assert "OPTIMAL_VERIFIED" in summary_path.read_text()
+    txt = summary_path.read_text()
+    assert "OPTIMAL_VERIFIED" in txt
+    assert "selected_training_weeks" in txt
+
+
+def test_vfcg_method_end_to_end_fit_then_plan_smoke(monkeypatch) -> None:
+    cfg = Config()
+    method = VFCGMethod(cfg)
+
+    monkeypatch.setattr("src.methods.vfcg.fit_estimation_pipeline", lambda **kwargs: object())
+
+    class _DummyRecModel:
+        def __init__(self, **kwargs):
+            self.feature_dim = 1
+
+        def prepare(self, df_train):
+            return self
+
+        def prepare_instance(self, instance):
+            return type("WD", (), {"week_index": instance.week_index, "n_cases": instance.num_cases, "bookings": np.array([100.0])})()
+
+        def compute_post_review(self, w, week_data):
+            _ = w, week_data
+            return np.array([101.0], dtype=float)
+
+    monkeypatch.setattr("src.methods.vfcg.RecommendationModel", _DummyRecModel)
+    monkeypatch.setattr("src.methods.vfcg.apply_experiment_scope", lambda df, config: (df, None))
+    monkeypatch.setattr("src.methods.vfcg.build_candidate_pools", lambda *args, **kwargs: object())
+    monkeypatch.setattr("src.methods.vfcg.build_eligibility_maps", lambda *args, **kwargs: object())
+
+    class _Inst:
+        def __init__(self):
+            self.week_index = 0
+            self.num_cases = 1
+
+    monkeypatch.setattr("src.methods.vfcg.build_weekly_instance", lambda **kwargs: _Inst())
+    monkeypatch.setattr(
+        "src.methods.vfcg.vfcg_solve",
+        lambda **kwargs: VFCGResult(
+            w_optimal=np.array([0.0]),
+            objective=1.0,
+            n_iterations=1,
+            certification=CertificationResult("OPTIMAL_VERIFIED", 0.0, 1.0, 1.0, 1.0, None),
+            iterations=[],
+            total_cuts_added=0,
+        ),
+    )
+    monkeypatch.setattr("src.methods.vfcg.solve_deterministic", lambda **kwargs: ScheduleResult(assignments=[]))
+
+    method.fit(_minimal_df_train())
+
+    case = CaseRecord(1, "P1", "S1", "Svc", "Elective", "OR1", 100.0, 500.0, datetime(2024, 1, 1), 1, 1, 2024, "TGH")
+    cal = BlockCalendar([CandidateBlock(0, "TGH", "OR1", 100.0, 10.0)])
+    instance = WeeklyInstance(0, date(2024, 1, 1), date(2024, 1, 7), [case], cal, {0: [cal.candidates[0].id]})
+    out = method.plan(instance)
+    assert isinstance(out, ScheduleResult)
+
+
+def test_runner_registration_includes_vfcg_booked_oracle(monkeypatch) -> None:
+    from src.cli import run_experiment as cli_mod
+
+    class _DummyMethod:
+        def __init__(self, name):
+            self.name = name
+
+        def fit(self, df_train):
+            return None
+
+        def plan(self, instance):
+            return ScheduleResult(assignments=[])
+
+    monkeypatch.setattr(cli_mod, "BookedTimeMethod", lambda config: _DummyMethod("Booked"))
+    monkeypatch.setattr(cli_mod, "OracleMethod", lambda config: _DummyMethod("Oracle"))
+    monkeypatch.setattr(cli_mod, "VFCGMethod", lambda config: _DummyMethod("VFCG"))
+
+    captured = {"names": None}
+
+    def _fake_run_experiment(registry, config, artifact_run=None):
+        captured["names"] = registry.names
+        return None
+
+    monkeypatch.setattr(cli_mod, "run_experiment", _fake_run_experiment)
+    monkeypatch.setattr("sys.argv", ["prog", "--quick"])
+    _ = cli_mod.main()
+    assert captured["names"] == ["Booked", "Oracle", "VFCG"]
+
+
+def test_fallback_path_smoke_sets_training_summary(monkeypatch) -> None:
+    cfg = Config()
+    method = VFCGMethod(cfg)
+
+    monkeypatch.setattr("src.methods.vfcg.fit_estimation_pipeline", lambda **kwargs: object())
+
+    class _DummyRecModel:
+        def __init__(self, **kwargs):
+            self.feature_dim = 1
+
+        def prepare(self, df_train):
+            return self
+
+        def prepare_instance(self, instance):
+            return type("WD", (), {"week_index": instance.week_index, "n_cases": instance.num_cases})()
+
+        def compute_post_review(self, w, week_data):
+            return np.array([100.0])
+
+    monkeypatch.setattr("src.methods.vfcg.RecommendationModel", _DummyRecModel)
+    monkeypatch.setattr("src.methods.vfcg.apply_experiment_scope", lambda df, config: (df, None))
+    monkeypatch.setattr("src.methods.vfcg.build_candidate_pools", lambda *args, **kwargs: object())
+    monkeypatch.setattr("src.methods.vfcg.build_eligibility_maps", lambda *args, **kwargs: object())
+    monkeypatch.setattr("src.methods.vfcg.build_weekly_instance", lambda **kwargs: type("I", (), {"week_index": 0, "num_cases": 1})())
+    monkeypatch.setattr(
+        "src.methods.vfcg.vfcg_solve",
+        lambda **kwargs: VFCGResult(
+            w_optimal=np.array([0.0]),
+            objective=float("inf"),
+            n_iterations=1,
+            certification=CertificationResult("TERMINATED_UNVERIFIED", 1.0, 1.0, 1.0, 1.0, ["fallback"]),
+            iterations=[],
+            total_cuts_added=0,
+        ),
+    )
+
+    method.fit(_minimal_df_train())
+    summary = method.training_summary
+    assert summary["certification_status"] == "TERMINATED_UNVERIFIED"
