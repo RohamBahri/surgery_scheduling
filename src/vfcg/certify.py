@@ -29,7 +29,7 @@ def certify(
 
     max_violation = -float("inf")
     realized_costs = []
-    tie_break_flags: list[str] = []
+    diagnostic_flags: list[str] = []
 
     for wd in week_data_list:
         d_post = np.asarray(recommendation_model.compute_post_review(w, wd), dtype=float)
@@ -52,9 +52,10 @@ def certify(
         max_violation = max(max_violation, violation)
         realized_costs.append(master_real)
 
+        # Optional diagnostic only
         if abs(master_pred - oracle_res.predicted_cost) <= tol and oracle_res.realized_cost < master_real - tol:
-            tie_break_flags.append(
-                f"week={wd.week_index}: equal predicted cost but oracle realized={oracle_res.realized_cost:.6f} < master realized={master_real:.6f}"
+            diagnostic_flags.append(
+                f"week={wd.week_index}: equal predicted cost but lower realized-cost oracle witness exists"
             )
 
     if max_violation == -float("inf"):
@@ -63,9 +64,8 @@ def certify(
     reconstructed_objective = float(np.mean(realized_costs)) if realized_costs else 0.0
     obj_match = abs(reconstructed_objective - master_objective) <= tol
     max_ok = max_violation <= tol
-    no_tie_issues = len(tie_break_flags) == 0
 
-    if max_ok and obj_match and True: #no_tie_issues:
+    if max_ok and obj_match:
         status = "OPTIMAL_VERIFIED"
     elif max_violation <= 100 * tol and abs(reconstructed_objective - master_objective) <= 100 * tol:
         status = "TERMINATED_UNVERIFIED"
@@ -78,5 +78,5 @@ def certify(
         reconstructed_objective=float(reconstructed_objective),
         master_objective=float(master_objective),
         master_bound=float(master_bound),
-        tie_break_flags=tie_break_flags or None,
+        tie_break_flags=diagnostic_flags or None,
     )

@@ -1,7 +1,6 @@
-"""Exact follower oracle wrapper for VFCG."""
-
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import numpy as np
@@ -9,7 +8,7 @@ import numpy as np
 from src.core.config import CapacityConfig, CostConfig, SolverConfig
 from src.core.types import CaseRecord
 from src.estimation.recommendation import RecommendationModel, WeekRecommendationData
-from src.solvers.deterministic import solve_weekly_optimistic
+from src.solvers.deterministic import solve_pricing
 from src.vfcg.types import OracleResult
 
 
@@ -35,7 +34,7 @@ def build_case_records_from_week_data(week_data: WeekRecommendationData) -> list
 
 
 class ExactFollowerOracle:
-    """Single authoritative follower oracle using the compact weekly MIP."""
+    """Authoritative exact oracle for follower predicted-cost optimality."""
 
     def solve(
         self,
@@ -50,6 +49,7 @@ class ExactFollowerOracle:
     ) -> OracleResult:
         _ = capacity_cfg
         _ = tol
+
         t0 = time.perf_counter()
 
         d_post = np.asarray(recommendation_model.compute_post_review(w, week_data), dtype=float)
@@ -64,7 +64,10 @@ class ExactFollowerOracle:
             model_name=f"vfcg_oracle_w{week_data.week_index}",
         )
         if col is None:
-            raise RuntimeError(f"Exact follower oracle failed for week {week_data.week_index}.")
+            raise RuntimeError(
+                f"Exact follower oracle failed to produce a predicted-optimal schedule "
+                f"for week {week_data.week_index}."
+            )
 
         realized = np.asarray(week_data.realized, dtype=float)
         realized_cost = float(col.compute_cost(realized, costs, turnover))
