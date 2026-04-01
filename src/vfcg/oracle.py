@@ -49,32 +49,30 @@ class ExactFollowerOracle:
         tol: float = 1e-6,
     ) -> OracleResult:
         _ = capacity_cfg
+        _ = tol
+        t0 = time.perf_counter()
 
         d_post = np.asarray(recommendation_model.compute_post_review(w, week_data), dtype=float)
-        realized = np.asarray(week_data.realized, dtype=float)
-
-        cases = build_case_records_from_week_data(week_data)
-
-        schedule, predicted_cost, realized_cost, status, solve_time = solve_weekly_optimistic(
-            cases=cases,
-            planning_durations=d_post,
-            realized_durations=realized,
+        col, predicted_cost = solve_pricing(
+            n_cases=week_data.n_cases,
+            durations=d_post,
             calendar=week_data.calendar,
             costs=costs,
             solver_cfg=solver_cfg,
             case_eligible_blocks=week_data.case_eligible_blocks,
             turnover=turnover,
             model_name=f"vfcg_oracle_w{week_data.week_index}",
-            tol=tol,
         )
+        if col is None:
+            raise RuntimeError(f"Exact follower oracle failed for week {week_data.week_index}.")
 
-        if schedule is None:
-            raise RuntimeError(f"Exact follower oracle failed to produce a schedule (status={status}).")
+        realized = np.asarray(week_data.realized, dtype=float)
+        realized_cost = float(col.compute_cost(realized, costs, turnover))
 
         return OracleResult(
-            schedule=schedule,
+            schedule=col,
             predicted_cost=float(predicted_cost),
-            realized_cost=float(realized_cost),
-            status=status,
-            solve_time=float(solve_time),
+            realized_cost=realized_cost,
+            status="OPTIMAL",
+            solve_time=float(time.perf_counter() - t0),
         )

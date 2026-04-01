@@ -254,6 +254,21 @@ def solve_weekly_optimistic(
     pass_b.model.addConstr(pass_b.predicted_total_cost <= p_star + tol, name="predicted_optimality_band")
     assert pass_b.realized_total_cost is not None
     pass_b.model.setObjective(pass_b.realized_total_cost, GRB.MINIMIZE)
+
+    # Warm-start pass B with pass A's predicted-optimal solution.
+    for key, var in pass_a.x.items():
+        if key in pass_b.x:
+            pass_b.x[key].Start = var.X
+    for key, var in pass_a.r.items():
+        if key in pass_b.r:
+            pass_b.r[key].Start = var.X
+    for key, var in pass_a.v.items():
+        if key in pass_b.v:
+            pass_b.v[key].Start = var.X
+    for key, var in pass_a.y.items():
+        if key in pass_b.y:
+            pass_b.y[key].Start = var.X
+
     pass_b.model.optimize()
 
     if pass_b.model.SolCount == 0:

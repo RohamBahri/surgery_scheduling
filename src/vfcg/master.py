@@ -53,6 +53,68 @@ def _compute_mae_base(week_data_list: list[WeekRecommendationData]) -> float:
     return float(np.mean(errs))
 
 
+def _inject_mip_start(
+    model: gp.Model,
+    w_vars,
+    z_vars: dict,
+    r_vars: dict,
+    v_vars: dict,
+    y_vars: dict,
+    d_post_vars: dict,
+    lam_vars: dict,
+    week_data_list: list,
+    reference_sets: dict,
+    feat_dim: int,
+) -> None:
+    """Seed the master with the w=0 feasible point (status-quo bookings).
+
+    At w=0: delta_rec=0 for all cases, delta_post=0 (inside the inaction
+    band), d_post=bookings.  The weekly schedule is taken from the first
+    warm-start reference (which was solved under bookings).
+    """
+    # w = 0
+    for j in range(feat_dim):
+        w_vars[j].Start = 0.0
+
+    for t, wd in enumerate(week_data_list):
+        week_key = int(wd.week_index)
+        ref_list = reference_sets.get(week_key, [])
+        ref = ref_list[0] if ref_list else None
+
+        # d_post = bookings (since w=0 → delta_rec=0 → delta_post=0)
+        for i in range(wd.n_cases):
+            if i in d_post_vars.get(t, {}):
+                d_post_vars[t][i].Start = float(wd.bookings[i])
+
+        # SOS2 lambdas: all weight on the center knot (delta_rec=0)
+        for i, lam_dict in lam_vars.get(t, {}).items():
+            n_knots = len(lam_dict)
+            center = n_knots // 2          # knot index where delta_rec=0
+            for k in range(n_knots):
+                lam_dict[k].Start = 1.0 if k == center else 0.0
+
+        # Scheduling variables from the reference schedule
+        for i in range(wd.n_cases):
+            is_deferred = ref is None or i in ref.z_defer
+            if i in r_vars.get(t, {}):
+                r_vars[t][i].Start = 1.0 if is_deferred else 0.0
+            for (ii, bid), var in z_vars.get(t, {}).items():
+                if ii == i:
+                    if is_deferred or ref is None:
+                        var.Start = 0.0
+                    else:
+                        var.Start = 1.0 if ref.z_assign.get((i, bid), 0.0) > 0.5 else 0.0
+
+        for bid in wd.calendar.block_ids:
+            if bid in v_vars.get(t, {}):
+                v_vars[t][bid].Start = (1.0 if ref is not None and bid in ref.v_open else 0.0)
+            if bid in y_vars.get(t, {}):
+                y_vars[t][bid].Start = (1.0 if ref is not None and bid in ref.y_used else 0.0)
+
+    logger.info("MIP start injected: w=0, booking-based reference schedules for %d weeks.", len(week_data_list))
+
+
+
 def solve_native_master(
     week_data_list: list[WeekRecommendationData],
     reference_sets: dict[int, list[ScheduleColumn]],
@@ -72,6 +134,8 @@ def solve_native_master(
     model.Params.MIPGap = config.vfcg.master_mip_gap
     model.Params.Threads = solver_cfg.threads
     model.Params.OutputFlag = 1 if solver_cfg.verbose else 0
+    model.Params.MIPFocus = 1 
+    model.Params.Symmetry = 2
 
     w = model.addVars(feat_dim, lb=-config.vfcg.w_max, ub=config.vfcg.w_max, name="w")
 
@@ -80,6 +144,8 @@ def solve_native_master(
     v_vars: dict[int, dict[object, gp.Var]] = {}
     y_vars: dict[int, dict[object, gp.Var]] = {}
     d_post_vars: dict[int, dict[int, gp.Var]] = {}
+
+    lam_vars: dict[int, dict[int, object]] = {}
 
     predicted_cost_exprs: dict[int, gp.LinExpr] = {}
     realized_cost_exprs: dict[int, gp.LinExpr] = {}
@@ -109,6 +175,9 @@ def solve_native_master(
             model.addConstr(delta_rec == quicksum(float(sos.knot_x[k]) * lam[k] for k in range(len(sos.knot_x))), name=f"sos_x_t{t}_i{i}")
             model.addConstr(delta_post == quicksum(float(sos.knot_y[k]) * lam[k] for k in range(len(sos.knot_y))), name=f"sos_y_t{t}_i{i}")
             model.addSOS(GRB.SOS_TYPE2, [lam[k] for k in range(len(sos.knot_x))])
+
+            lam_vars.setdefault(t, {})[i] = lam
+
             model.addConstr(dpost_t[i] == float(wd.bookings[i]) + delta_post, name=f"d_post_def_t{t}_i{i}")
 
             e_plus = model.addVar(lb=0.0, name=f"e_plus_t{t}_i{i}")
@@ -198,6 +267,22 @@ def solve_native_master(
 
     obj = (1.0 / max(1, n_weeks)) * quicksum(realized_cost_exprs[t] for t in range(n_weeks))
     model.setObjective(obj, GRB.MINIMIZE)
+
+    # ── MIP start from w=0 and booking-based reference schedules ─────────
+    _inject_mip_start(
+        model=model,
+        w_vars=w,
+        z_vars=z_vars,
+        r_vars=r_vars,
+        v_vars=v_vars,
+        y_vars=y_vars,
+        d_post_vars=d_post_vars,
+        lam_vars=lam_vars,
+        week_data_list=week_data_list,
+        reference_sets=reference_sets,
+        feat_dim=feat_dim,
+    )
+
     model.optimize()
 
     status_name = _status_name(model.Status)
