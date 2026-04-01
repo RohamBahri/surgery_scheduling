@@ -7,7 +7,9 @@ import numpy as np
 from src.core.config import CapacityConfig, CostConfig, SolverConfig
 from src.core.types import BlockCalendar, BlockId, CandidateBlock, CaseRecord
 from src.estimation.recommendation import WeekRecommendationData
-from src.solvers.deterministic import solve_deterministic, solve_weekly_optimistic
+import pytest
+
+from src.solvers.deterministic import solve_deterministic, solve_pricing, solve_weekly_optimistic
 from src.vfcg.oracle import ExactFollowerOracle
 from src.vfcg.types import OracleResult
 
@@ -180,3 +182,96 @@ def test_exact_follower_oracle_uses_post_review_durations_end_to_end() -> None:
     assert assigned_block == BlockId(0, "TGH", "OR1")
     assert np.isclose(result.predicted_cost, 10.0)
     assert np.isclose(result.realized_cost, 0.0)
+
+
+def test_solve_fast_returns_predicted_cost_minimizer() -> None:
+    cases = _single_case()
+    block = CandidateBlock(day_index=0, site="TGH", room="OR1", capacity_minutes=100.0, activation_cost=0.0)
+    week_data = WeekRecommendationData(
+        week_index=3,
+        n_cases=1,
+        features=np.zeros((1, 1), dtype=float),
+        bookings=np.array([100.0], dtype=float),
+        realized=np.array([90.0], dtype=float),
+        L_bounds=np.array([60.0], dtype=float),
+        U_bounds=np.array([180.0], dtype=float),
+        surgeon_codes=[cases[0].surgeon_code],
+        sos2_data=[],
+        case_eligible_blocks={0: [block.id]},
+        calendar=BlockCalendar([block]),
+    )
+    oracle = ExactFollowerOracle()
+    rec_model = _DummyRecommendationModel(returned_d_post=np.array([110.0], dtype=float))
+    costs = CostConfig(overtime_per_minute=1.0, idle_per_minute=1.0, deferral_per_case=1000.0)
+    solver_cfg = SolverConfig(time_limit_seconds=30, mip_gap=0.0, verbose=False)
+
+    fast = oracle.solve_fast(
+        week_data=week_data,
+        w=np.array([0.0], dtype=float),
+        recommendation_model=rec_model,
+        costs=costs,
+        capacity_cfg=CapacityConfig(),
+        solver_cfg=solver_cfg,
+        turnover=0.0,
+    )
+    full = oracle.solve(
+        week_data=week_data,
+        w=np.array([0.0], dtype=float),
+        recommendation_model=rec_model,
+        costs=costs,
+        capacity_cfg=CapacityConfig(),
+        solver_cfg=solver_cfg,
+        turnover=0.0,
+    )
+
+    assert np.isfinite(fast.predicted_cost)
+    assert fast.predicted_cost <= full.predicted_cost + 1e-6
+    assert fast.schedule is not None
+
+
+def test_solve_fast_raises_when_no_schedule_possible() -> None:
+    week_data = WeekRecommendationData(
+        week_index=4,
+        n_cases=1,
+        features=np.zeros((1, 1), dtype=float),
+        bookings=np.array([100.0], dtype=float),
+        realized=np.array([100.0], dtype=float),
+        L_bounds=np.array([60.0], dtype=float),
+        U_bounds=np.array([180.0], dtype=float),
+        surgeon_codes=["S1"],
+        sos2_data=[],
+        case_eligible_blocks={0: []},
+        calendar=BlockCalendar([]),
+    )
+    oracle = ExactFollowerOracle()
+
+    with pytest.raises(RuntimeError):
+        oracle.solve_fast(
+            week_data=week_data,
+            w=np.array([0.0], dtype=float),
+            recommendation_model=_DummyRecommendationModel(returned_d_post=np.array([100.0], dtype=float)),
+            costs=CostConfig(),
+            capacity_cfg=CapacityConfig(),
+            solver_cfg=SolverConfig(time_limit_seconds=30, mip_gap=0.0, verbose=False),
+            turnover=0.0,
+        )
+
+
+def test_symmetry_breaking_assigns_to_first_room() -> None:
+    block_a = CandidateBlock(day_index=0, site="TGH", room="OR1", capacity_minutes=100.0, activation_cost=0.0)
+    block_b = CandidateBlock(day_index=0, site="TGH", room="OR2", capacity_minutes=100.0, activation_cost=0.0)
+    calendar = BlockCalendar([block_a, block_b])
+    eligible = {0: [block_a.id, block_b.id]}
+    col, _ = solve_pricing(
+        n_cases=1,
+        durations=np.array([100.0], dtype=float),
+        calendar=calendar,
+        costs=CostConfig(overtime_per_minute=1.0, idle_per_minute=1.0, deferral_per_case=1000.0),
+        solver_cfg=SolverConfig(time_limit_seconds=30, mip_gap=0.0, verbose=False),
+        case_eligible_blocks=eligible,
+        turnover=0.0,
+        model_name="symmetry_test",
+    )
+    assert col is not None
+    assigned_block = next(iter(col.z_assign))[1]
+    assert assigned_block == block_a.id

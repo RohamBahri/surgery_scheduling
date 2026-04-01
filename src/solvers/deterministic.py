@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -124,6 +125,44 @@ def _build_weekly_schedule_model(
             model.addConstr(real_load - cap_val <= realized_ot[bid], name=f"real_ot_{bid.day_index}_{bid.site}_{bid.room}")
             model.addConstr(cap_val - real_load <= realized_idle[bid], name=f"real_idle_{bid.day_index}_{bid.site}_{bid.room}")
 
+    # Symmetry breaking: order loads on identical blocks and deferrals within eligibility classes.
+    block_eligible_set: Dict[BlockId, frozenset[int]] = {}
+    for bid in all_block_ids:
+        block_eligible_set[bid] = frozenset(block_cases[bid])
+
+    symmetry_groups: Dict[tuple, list[BlockId]] = defaultdict(list)
+    for bid in all_block_ids:
+        key = (bid.day_index, bid.site, cap[bid], f_cost[bid], block_eligible_set[bid])
+        symmetry_groups[key].append(bid)
+
+    for group_bids in symmetry_groups.values():
+        if len(group_bids) < 2:
+            continue
+        sorted_bids = sorted(group_bids, key=lambda b: b.room)
+        for idx in range(len(sorted_bids) - 1):
+            bid_hi = sorted_bids[idx]
+            bid_lo = sorted_bids[idx + 1]
+            eligible_hi = block_cases[bid_hi]
+            eligible_lo = block_cases[bid_lo]
+            if not eligible_hi or not eligible_lo:
+                continue
+            load_hi = quicksum(float(planning_durations[i]) * x[i, bid_hi] for i in eligible_hi if (i, bid_hi) in x)
+            load_lo = quicksum(float(planning_durations[i]) * x[i, bid_lo] for i in eligible_lo if (i, bid_lo) in x)
+            model.addConstr(load_hi >= load_lo, name=f"sym_load_{bid_hi.day_index}_{bid_hi.room}_{bid_lo.room}")
+
+    elig_class_cases: Dict[frozenset[BlockId], list[int]] = defaultdict(list)
+    for i in range(n_cases):
+        elig = frozenset(case_eligible_blocks.get(i, []))
+        if elig:
+            elig_class_cases[elig].append(i)
+
+    for case_list in elig_class_cases.values():
+        sorted_cases = sorted(case_list)
+        for idx in range(len(sorted_cases) - 1):
+            i1 = sorted_cases[idx]
+            i2 = sorted_cases[idx + 1]
+            model.addConstr(r[i1] <= r[i2], name=f"sym_defer_{i1}_{i2}")
+
     activation = quicksum(f_cost[bid] * v[bid] for bid in all_block_ids)
     deferral = costs.deferral_per_case * quicksum(r[i] for i in range(n_cases))
     predicted_total_cost = (
@@ -223,7 +262,7 @@ def solve_weekly_optimistic(
     pass_a = _build_weekly_schedule_model(
         cases=cases,
         planning_durations=planning_durations,
-        realized_durations=realized_durations,
+        realized_durations=None,
         calendar=calendar,
         costs=costs,
         solver_cfg=solver_cfg,
@@ -326,3 +365,6 @@ def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
     model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.MIPFocus = 1
     model.Params.Symmetry = 2
+    model.Params.Presolve = 2
+    model.Params.Cuts = 2
+    model.Params.Heuristics = 0.1

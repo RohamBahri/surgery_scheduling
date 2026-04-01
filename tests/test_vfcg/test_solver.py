@@ -78,6 +78,9 @@ def test_trivial_instance_terminates_one_iteration(monkeypatch) -> None:
         def solve(self, **kwargs):
             return OracleResult(schedule=col, predicted_cost=10.0, realized_cost=10.0, status="OPTIMAL", solve_time=0.01)
 
+        def solve_fast(self, **kwargs):
+            return self.solve(**kwargs)
+
     monkeypatch.setattr("src.vfcg.solver.ExactFollowerOracle", _Oracle)
     monkeypatch.setattr(
         "src.vfcg.solver.certify",
@@ -132,6 +135,9 @@ def test_detects_violated_week_and_adds_cut(monkeypatch) -> None:
             if self.k == 1:
                 return OracleResult(schedule=better_col, predicted_cost=0.0, realized_cost=0.0, status="OPTIMAL", solve_time=0.01)
             return OracleResult(schedule=better_col, predicted_cost=10.0, realized_cost=0.0, status="OPTIMAL", solve_time=0.01)
+
+        def solve_fast(self, **kwargs):
+            return self.solve(**kwargs)
 
     monkeypatch.setattr("src.vfcg.solver.ExactFollowerOracle", _Oracle)
     monkeypatch.setattr(

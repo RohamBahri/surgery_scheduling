@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import numpy as np
 
@@ -28,6 +29,7 @@ def vfcg_solve(
     turnover: float,
 ) -> VFCGResult:
     oracle = ExactFollowerOracle()
+    oracle_solver_cfg = replace(solver_cfg, time_limit_seconds=config.vfcg.oracle_time_limit)
     reference_sets = generate_warmstart_references(
         week_data_list=week_data_list,
         recommendation_model=recommendation_model,
@@ -61,15 +63,14 @@ def vfcg_solve(
 
         if not master_res.is_fallback:
             for wd in week_data_list:
-                oracle_res = oracle.solve(
+                oracle_res = oracle.solve_fast(
                     week_data=wd,
                     w=master_res.weights,
                     recommendation_model=recommendation_model,
                     costs=costs,
                     capacity_cfg=capacity_cfg,
-                    solver_cfg=solver_cfg,
+                    solver_cfg=oracle_solver_cfg,
                     turnover=turnover,
-                    tol=config.vfcg.convergence_tol,
                 )
                 oracle_time_total += oracle_res.solve_time
 
@@ -124,7 +125,7 @@ def vfcg_solve(
         config=config,
         costs=costs,
         capacity_cfg=capacity_cfg,
-        solver_cfg=solver_cfg,
+        solver_cfg=oracle_solver_cfg,
         turnover=turnover,
         master_objective=final_master.objective,
         master_bound=final_master.bound,
