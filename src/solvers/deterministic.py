@@ -223,7 +223,7 @@ def solve_weekly_optimistic(
     pass_a = _build_weekly_schedule_model(
         cases=cases,
         planning_durations=planning_durations,
-        realized_durations=realized_durations,
+        realized_durations=None,
         calendar=calendar,
         costs=costs,
         solver_cfg=solver_cfg,
