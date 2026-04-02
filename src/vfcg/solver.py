@@ -13,9 +13,56 @@ from src.vfcg.diagnostics import log_iteration_summary
 from src.vfcg.master import NativeMasterStart, solve_native_master
 from src.vfcg.oracle import ExactFollowerOracle
 from src.vfcg.types import CertificationResult, VFCGIteration, VFCGResult
-from src.vfcg.warmstart import generate_warmstart_references
+from src.vfcg.warmstart import (
+    estimate_linear_regression_warmstart,
+    generate_warmstart_references,
+    select_best_reference_schedules,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_initial_master_start(
+    week_data_list: list[WeekRecommendationData],
+    reference_sets: dict[int, list[object]],
+    recommendation_model: RecommendationModel,
+    costs: CostConfig,
+    turnover: float,
+    w_max: float,
+) -> NativeMasterStart | None:
+    """Build the first-iteration master seed from a linear-regression weight fit.
+
+    The initial schedule for each week is chosen as the cheapest *existing*
+    reference schedule under the seeded weights, which preserves feasibility
+    against the initial follower-cut bundle.
+    """
+    if not week_data_list:
+        return None
+
+    seed_w = estimate_linear_regression_warmstart(
+        week_data_list=week_data_list,
+        w_max=w_max,
+    )
+    if seed_w.size == 0:
+        return None
+
+    try:
+        initial_schedules = select_best_reference_schedules(
+            week_data_list=week_data_list,
+            reference_sets=reference_sets,
+            recommendation_model=recommendation_model,
+            costs=costs,
+            turnover=turnover,
+            weights=seed_w,
+        )
+    except Exception:
+        logger.exception("Failed to build initial schedule seed from linear-regression warm start; using default master seed.")
+        return None
+
+    return NativeMasterStart(
+        weights=np.asarray(seed_w, dtype=float).copy(),
+        schedules_by_week=initial_schedules,
+    )
 
 
 def _prepare_next_master_start(
@@ -63,7 +110,14 @@ def vfcg_solve(
     total_cuts_added = 0
 
     final_master = None
-    warm_start: NativeMasterStart | None = None
+    warm_start: NativeMasterStart | None = _prepare_initial_master_start(
+        week_data_list=week_data_list,
+        reference_sets=reference_sets,
+        recommendation_model=recommendation_model,
+        costs=costs,
+        turnover=turnover,
+        w_max=config.vfcg.w_max,
+    )
 
     for k in range(config.vfcg.max_iterations):
         master_res = solve_native_master(
