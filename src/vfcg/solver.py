@@ -10,12 +10,33 @@ from src.core.config import CapacityConfig, Config, CostConfig, SolverConfig
 from src.estimation.recommendation import RecommendationModel, WeekRecommendationData
 from src.vfcg.certify import certify
 from src.vfcg.diagnostics import log_iteration_summary
-from src.vfcg.master import solve_native_master
+from src.vfcg.master import NativeMasterStart, solve_native_master
 from src.vfcg.oracle import ExactFollowerOracle
 from src.vfcg.types import CertificationResult, VFCGIteration, VFCGResult
 from src.vfcg.warmstart import generate_warmstart_references
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_next_master_start(
+    master_weights: np.ndarray,
+    schedules_by_week: dict[int, object],
+    violated_weeks: list[tuple[WeekRecommendationData, object]],
+) -> NativeMasterStart:
+    """Build a cut-feasible start for the next master iteration.
+
+    We keep the current master weights and replace each violated week's schedule
+    with the oracle-optimal schedule found at those same weights. With the
+    weights held fixed, the oracle schedule satisfies every follower cut for
+    that week, including the newly added one.
+    """
+    next_schedules = dict(schedules_by_week)
+    for wd, oracle_res in violated_weeks:
+        next_schedules[int(wd.week_index)] = oracle_res.schedule
+    return NativeMasterStart(
+        weights=np.asarray(master_weights, dtype=float).copy(),
+        schedules_by_week=next_schedules,
+    )
 
 
 def vfcg_solve(
@@ -42,6 +63,7 @@ def vfcg_solve(
     total_cuts_added = 0
 
     final_master = None
+    warm_start: NativeMasterStart | None = None
 
     for k in range(config.vfcg.max_iterations):
         master_res = solve_native_master(
@@ -53,6 +75,7 @@ def vfcg_solve(
             capacity_cfg=capacity_cfg,
             solver_cfg=solver_cfg,
             turnover=turnover,
+            warm_start=warm_start,
         )
         final_master = master_res
 
@@ -112,6 +135,12 @@ def vfcg_solve(
 
         if len(violated_weeks) == 0:
             break
+
+        warm_start = _prepare_next_master_start(
+            master_weights=master_res.weights,
+            schedules_by_week=master_res.schedules_by_week,
+            violated_weeks=violated_weeks,
+        )
 
     if final_master is None:
         raise RuntimeError("VFCG solve loop produced no master result.")

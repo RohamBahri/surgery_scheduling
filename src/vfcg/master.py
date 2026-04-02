@@ -33,6 +33,20 @@ class NativeMasterResult:
     is_fallback: bool = False
 
 
+@dataclass
+class NativeMasterStart:
+    """Structured MIP start for the restricted compact master.
+
+    The start must be feasible for the current cut set. In later VFCG
+    iterations this is typically formed by keeping the previous master weights
+    and replacing any violated-week schedule with that week's oracle-optimal
+    schedule under those same weights.
+    """
+
+    weights: np.ndarray
+    schedules_by_week: dict[int, ScheduleColumn]
+
+
 def _status_name(status: int) -> str:
     mapping = {
         GRB.OPTIMAL: "OPTIMAL",
@@ -53,7 +67,69 @@ def _compute_mae_base(week_data_list: list[WeekRecommendationData]) -> float:
     return float(np.mean(errs))
 
 
-def _inject_mip_start(
+def _build_default_master_start(
+    week_data_list: list,
+    reference_sets: dict[int, list[ScheduleColumn]],
+    feat_dim: int,
+) -> NativeMasterStart:
+    """Construct the initial booking-based seed for the first master solve."""
+    schedules: dict[int, ScheduleColumn] = {}
+    for wd in week_data_list:
+        week_key = int(wd.week_index)
+        ref_list = reference_sets.get(week_key, [])
+        if not ref_list:
+            raise RuntimeError(f"No reference schedule available for week {week_key}.")
+        schedules[week_key] = ref_list[0]
+    return NativeMasterStart(weights=np.zeros(feat_dim, dtype=float), schedules_by_week=schedules)
+
+
+def _set_sos2_lambda_start(lam_dict, knot_x: np.ndarray, target_x: float, tol: float = 1e-9) -> None:
+    """Seed an SOS2 representation for a given scalar target.
+
+    The representation uses either a single knot or a convex combination of two
+    adjacent knots so that the model's SOS2 equalities are respected by the
+    start.
+    """
+    xs = np.asarray(knot_x, dtype=float)
+    n_knots = len(xs)
+
+    for k in range(n_knots):
+        lam_dict[k].Start = 0.0
+
+    if n_knots == 0:
+        return
+    if n_knots == 1:
+        lam_dict[0].Start = 1.0
+        return
+
+    if target_x <= xs[0] + tol:
+        lam_dict[0].Start = 1.0
+        return
+    if target_x >= xs[-1] - tol:
+        lam_dict[n_knots - 1].Start = 1.0
+        return
+
+    exact = np.where(np.isclose(xs, target_x, atol=tol, rtol=0.0))[0]
+    if len(exact) > 0:
+        lam_dict[int(exact[0])].Start = 1.0
+        return
+
+    right = int(np.searchsorted(xs, target_x, side="left"))
+    left = max(0, right - 1)
+
+    x_left = float(xs[left])
+    x_right = float(xs[right])
+    if abs(x_right - x_left) <= tol:
+        lam_dict[left].Start = 1.0
+        return
+
+    theta = (float(target_x) - x_left) / (x_right - x_left)
+    theta = min(1.0, max(0.0, theta))
+    lam_dict[left].Start = 1.0 - theta
+    lam_dict[right].Start = theta
+
+
+def _inject_structured_mip_start(
     model: gp.Model,
     w_vars,
     z_vars: dict,
@@ -63,56 +139,55 @@ def _inject_mip_start(
     d_post_vars: dict,
     lam_vars: dict,
     week_data_list: list,
-    reference_sets: dict,
+    recommendation_model: RecommendationModel,
     feat_dim: int,
+    start: NativeMasterStart,
 ) -> None:
-    """Seed the master with the w=0 feasible point (status-quo bookings).
+    """Inject a structured, cut-feasible MIP start into the master.
 
-    At w=0: delta_rec=0 for all cases, delta_post=0 (inside the inaction
-    band), d_post=bookings.  The weekly schedule is taken from the first
-    warm-start reference (which was solved under bookings).
+    The supplied schedules must already be feasible for the current follower-cut
+    set. Later VFCG iterations should therefore pass the previous master weights
+    together with oracle-optimal schedules on newly violated weeks.
     """
-    # w = 0
+    weights = np.asarray(start.weights, dtype=float)
+    if weights.shape != (feat_dim,):
+        raise ValueError(f"Warm-start weight dimension mismatch: got {weights.shape}, expected {(feat_dim,)}")
+
     for j in range(feat_dim):
-        w_vars[j].Start = 0.0
+        w_vars[j].Start = float(weights[j])
 
     for t, wd in enumerate(week_data_list):
         week_key = int(wd.week_index)
-        ref_list = reference_sets.get(week_key, [])
-        ref = ref_list[0] if ref_list else None
+        schedule = start.schedules_by_week.get(week_key)
+        if schedule is None:
+            raise ValueError(f"Warm start missing schedule for week {week_key}.")
 
-        # d_post = bookings (since w=0 → delta_rec=0 → delta_post=0)
+        delta_rec = np.asarray(wd.features, dtype=float) @ weights
+        d_post = np.asarray(recommendation_model.compute_post_review(weights, wd), dtype=float)
+
         for i in range(wd.n_cases):
             if i in d_post_vars.get(t, {}):
-                d_post_vars[t][i].Start = float(wd.bookings[i])
+                d_post_vars[t][i].Start = float(d_post[i])
+            lam_dict = lam_vars.get(t, {}).get(i)
+            if lam_dict is not None:
+                _set_sos2_lambda_start(lam_dict, wd.sos2_data[i].knot_x, float(delta_rec[i]))
 
-        # SOS2 lambdas: all weight on the center knot (delta_rec=0)
-        for i, lam_dict in lam_vars.get(t, {}).items():
-            n_knots = len(lam_dict)
-            center = n_knots // 2          # knot index where delta_rec=0
-            for k in range(n_knots):
-                lam_dict[k].Start = 1.0 if k == center else 0.0
-
-        # Scheduling variables from the reference schedule
         for i in range(wd.n_cases):
-            is_deferred = ref is None or i in ref.z_defer
+            is_deferred = i in schedule.z_defer
             if i in r_vars.get(t, {}):
                 r_vars[t][i].Start = 1.0 if is_deferred else 0.0
             for (ii, bid), var in z_vars.get(t, {}).items():
-                if ii == i:
-                    if is_deferred or ref is None:
-                        var.Start = 0.0
-                    else:
-                        var.Start = 1.0 if ref.z_assign.get((i, bid), 0.0) > 0.5 else 0.0
+                if ii != i:
+                    continue
+                var.Start = 0.0 if is_deferred else (1.0 if schedule.z_assign.get((i, bid), 0.0) > 0.5 else 0.0)
 
         for bid in wd.calendar.block_ids:
             if bid in v_vars.get(t, {}):
-                v_vars[t][bid].Start = (1.0 if ref is not None and bid in ref.v_open else 0.0)
+                v_vars[t][bid].Start = 1.0 if bid in schedule.v_open else 0.0
             if bid in y_vars.get(t, {}):
-                y_vars[t][bid].Start = (1.0 if ref is not None and bid in ref.y_used else 0.0)
+                y_vars[t][bid].Start = 1.0 if bid in schedule.y_used else 0.0
 
-    logger.info("MIP start injected: w=0, booking-based reference schedules for %d weeks.", len(week_data_list))
-
+    logger.info("Structured MIP start injected for %d weeks.", len(week_data_list))
 
 
 def solve_native_master(
@@ -124,6 +199,7 @@ def solve_native_master(
     capacity_cfg: CapacityConfig,
     solver_cfg: SolverConfig,
     turnover: float,
+    warm_start: NativeMasterStart | None = None,
 ) -> NativeMasterResult:
     t0 = time.perf_counter()
     n_weeks = len(week_data_list)
@@ -268,20 +344,44 @@ def solve_native_master(
     obj = (1.0 / max(1, n_weeks)) * quicksum(realized_cost_exprs[t] for t in range(n_weeks))
     model.setObjective(obj, GRB.MINIMIZE)
 
-    # ── MIP start from w=0 and booking-based reference schedules ─────────
-    _inject_mip_start(
-        model=model,
-        w_vars=w,
-        z_vars=z_vars,
-        r_vars=r_vars,
-        v_vars=v_vars,
-        y_vars=y_vars,
-        d_post_vars=d_post_vars,
-        lam_vars=lam_vars,
-        week_data_list=week_data_list,
-        reference_sets=reference_sets,
-        feat_dim=feat_dim,
-    )
+    start_to_use = warm_start
+    if start_to_use is None:
+        start_to_use = _build_default_master_start(week_data_list, reference_sets, feat_dim)
+
+    try:
+        _inject_structured_mip_start(
+            model=model,
+            w_vars=w,
+            z_vars=z_vars,
+            r_vars=r_vars,
+            v_vars=v_vars,
+            y_vars=y_vars,
+            d_post_vars=d_post_vars,
+            lam_vars=lam_vars,
+            week_data_list=week_data_list,
+            recommendation_model=recommendation_model,
+            feat_dim=feat_dim,
+            start=start_to_use,
+        )
+    except Exception:
+        if warm_start is not None:
+            logger.exception("Provided warm start could not be injected; reverting to default booking-based seed.")
+            _inject_structured_mip_start(
+                model=model,
+                w_vars=w,
+                z_vars=z_vars,
+                r_vars=r_vars,
+                v_vars=v_vars,
+                y_vars=y_vars,
+                d_post_vars=d_post_vars,
+                lam_vars=lam_vars,
+                week_data_list=week_data_list,
+                recommendation_model=recommendation_model,
+                feat_dim=feat_dim,
+                start=_build_default_master_start(week_data_list, reference_sets, feat_dim),
+            )
+        else:
+            raise
 
     model.optimize()
 
