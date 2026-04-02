@@ -83,6 +83,113 @@ def _build_default_master_start(
     return NativeMasterStart(weights=np.zeros(feat_dim, dtype=float), schedules_by_week=schedules)
 
 
+def _project_weights_to_master_feasible_region(
+    week_data_list: list[WeekRecommendationData],
+    weights: np.ndarray,
+    w_bound: float,
+) -> np.ndarray:
+    """Project a candidate warm-start weight vector onto the master-feasible region.
+
+    The native master enforces, for every case, the raw linear recommendation
+        delta_rec = x^T w
+    together with the explicit bounds
+        L - b <= delta_rec <= U - b.
+    A regression-derived seed can violate those bounds, in which case its MIP
+    start is invalid even if the *clipped* recommendation pipeline is feasible.
+
+    We therefore solve a small LP that finds the closest weight vector in L1
+    distance subject to all master-feasibility constraints. Since w=0 is always
+    feasible in this model family, this projection should always succeed.
+    """
+    weights = np.asarray(weights, dtype=float).reshape(-1)
+    feat_dim = int(weights.shape[0])
+    if feat_dim == 0 or not week_data_list:
+        return weights.copy()
+
+    proj = gp.Model("vfcg_warmstart_projection")
+    proj.Params.OutputFlag = 0
+    proj.Params.Threads = 1
+
+    w_proj = proj.addVars(feat_dim, lb=-float(w_bound), ub=float(w_bound), name="w_proj")
+    dev = proj.addVars(feat_dim, lb=0.0, name="dev")
+
+    for j in range(feat_dim):
+        proj.addConstr(w_proj[j] - float(weights[j]) <= dev[j], name=f"dev_pos_{j}")
+        proj.addConstr(float(weights[j]) - w_proj[j] <= dev[j], name=f"dev_neg_{j}")
+
+    for t, wd in enumerate(week_data_list):
+        X = np.asarray(wd.features, dtype=float)
+        if X.size == 0:
+            continue
+        lower = np.asarray(wd.L_bounds, dtype=float) - np.asarray(wd.bookings, dtype=float)
+        upper = np.asarray(wd.U_bounds, dtype=float) - np.asarray(wd.bookings, dtype=float)
+        for i in range(wd.n_cases):
+            expr = quicksum(float(X[i, j]) * w_proj[j] for j in range(feat_dim))
+            proj.addConstr(expr >= float(lower[i]), name=f"warm_lb_t{t}_i{i}")
+            proj.addConstr(expr <= float(upper[i]), name=f"warm_ub_t{t}_i{i}")
+
+    proj.setObjective(quicksum(dev[j] for j in range(feat_dim)), GRB.MINIMIZE)
+    proj.optimize()
+
+    if proj.SolCount == 0:
+        logger.warning("Warm-start weight projection failed; reverting to zero weights.")
+        return np.zeros(feat_dim, dtype=float)
+
+    projected = np.array([w_proj[j].X for j in range(feat_dim)], dtype=float)
+    return projected
+
+
+def _repair_master_start_for_model_feasibility(
+    start: NativeMasterStart,
+    week_data_list: list[WeekRecommendationData],
+    reference_sets: dict[int, list[ScheduleColumn]],
+    recommendation_model: RecommendationModel,
+    costs: CostConfig,
+    turnover: float,
+    w_bound: float,
+) -> NativeMasterStart:
+    """Repair a warm start so that it is feasible for the native master model.
+
+    If the proposed weights violate any raw master recommendation bound
+    constraint, we project them onto the master-feasible region. When that
+    happens, we also refresh the per-week schedule seed by selecting, from the
+    current reference set, the cheapest reference schedule under the repaired
+    weights. This guarantees satisfaction of the follower-cut bundle for the
+    repaired start.
+    """
+    raw_weights = np.asarray(start.weights, dtype=float).reshape(-1)
+    repaired_weights = _project_weights_to_master_feasible_region(
+        week_data_list=week_data_list,
+        weights=raw_weights,
+        w_bound=w_bound,
+    )
+
+    if np.allclose(repaired_weights, raw_weights, atol=1e-9, rtol=0.0):
+        return start
+
+    logger.info(
+        "Repaired warm-start weights to satisfy raw master recommendation bounds (max |Δw|=%.6f).",
+        float(np.max(np.abs(repaired_weights - raw_weights))) if repaired_weights.size else 0.0,
+    )
+
+    repaired_schedules: dict[int, ScheduleColumn] = {}
+    for wd in week_data_list:
+        week_key = int(wd.week_index)
+        ref_list = reference_sets.get(week_key, [])
+        if not ref_list:
+            raise RuntimeError(f"No reference schedules available for week {week_key}.")
+        d_post = np.asarray(recommendation_model.compute_post_review(repaired_weights, wd), dtype=float)
+        repaired_schedules[week_key] = min(
+            ref_list,
+            key=lambda col: float(col.compute_cost(d_post, costs, turnover)),
+        )
+
+    return NativeMasterStart(
+        weights=repaired_weights,
+        schedules_by_week=repaired_schedules,
+    )
+
+
 def _set_sos2_lambda_start(lam_dict, knot_x: np.ndarray, target_x: float, tol: float = 1e-9) -> None:
     """Seed an SOS2 representation for a given scalar target.
 
@@ -137,6 +244,8 @@ def _inject_structured_mip_start(
     v_vars: dict,
     y_vars: dict,
     d_post_vars: dict,
+    delta_rec_vars: dict,
+    delta_post_vars: dict,
     lam_vars: dict,
     week_data_list: list,
     recommendation_model: RecommendationModel,
@@ -164,8 +273,13 @@ def _inject_structured_mip_start(
 
         delta_rec = np.asarray(wd.features, dtype=float) @ weights
         d_post = np.asarray(recommendation_model.compute_post_review(weights, wd), dtype=float)
+        delta_post = d_post - np.asarray(wd.bookings, dtype=float)
 
         for i in range(wd.n_cases):
+            if i in delta_rec_vars.get(t, {}):
+                delta_rec_vars[t][i].Start = float(delta_rec[i])
+            if i in delta_post_vars.get(t, {}):
+                delta_post_vars[t][i].Start = float(delta_post[i])
             if i in d_post_vars.get(t, {}):
                 d_post_vars[t][i].Start = float(d_post[i])
             lam_dict = lam_vars.get(t, {}).get(i)
@@ -220,6 +334,8 @@ def solve_native_master(
     v_vars: dict[int, dict[object, gp.Var]] = {}
     y_vars: dict[int, dict[object, gp.Var]] = {}
     d_post_vars: dict[int, dict[int, gp.Var]] = {}
+    delta_rec_vars: dict[int, dict[int, gp.Var]] = {}
+    delta_post_vars: dict[int, dict[int, gp.Var]] = {}
 
     lam_vars: dict[int, dict[int, object]] = {}
 
@@ -238,10 +354,14 @@ def solve_native_master(
 
         # Recommendation pipeline variables.
         dpost_t: dict[int, gp.Var] = {}
+        delta_rec_t: dict[int, gp.Var] = {}
+        delta_post_t: dict[int, gp.Var] = {}
         for i in range(wd.n_cases):
             dpost_t[i] = model.addVar(lb=float(wd.L_bounds[i]), ub=float(wd.U_bounds[i]), name=f"d_post_t{t}_i{i}")
             delta_rec = model.addVar(lb=float(wd.L_bounds[i] - wd.bookings[i]), ub=float(wd.U_bounds[i] - wd.bookings[i]), name=f"delta_rec_t{t}_i{i}")
             delta_post = model.addVar(lb=-GRB.INFINITY, name=f"delta_post_t{t}_i{i}")
+            delta_rec_t[i] = delta_rec
+            delta_post_t[i] = delta_post
 
             model.addConstr(delta_rec == quicksum(float(wd.features[i, j]) * w[j] for j in range(feat_dim)), name=f"delta_rec_link_t{t}_i{i}")
 
@@ -334,6 +454,8 @@ def solve_native_master(
         v_vars[t] = v_t
         y_vars[t] = y_t
         d_post_vars[t] = dpost_t
+        delta_rec_vars[t] = delta_rec_t
+        delta_post_vars[t] = delta_post_t
 
     n_cases_total = sum(wd.n_cases for wd in week_data_list)
     mae_base = _compute_mae_base(week_data_list)
@@ -347,6 +469,15 @@ def solve_native_master(
     start_to_use = warm_start
     if start_to_use is None:
         start_to_use = _build_default_master_start(week_data_list, reference_sets, feat_dim)
+    start_to_use = _repair_master_start_for_model_feasibility(
+        start=start_to_use,
+        week_data_list=week_data_list,
+        reference_sets=reference_sets,
+        recommendation_model=recommendation_model,
+        costs=costs,
+        turnover=turnover,
+        w_bound=config.vfcg.w_max,
+    )
 
     try:
         _inject_structured_mip_start(
@@ -357,6 +488,8 @@ def solve_native_master(
             v_vars=v_vars,
             y_vars=y_vars,
             d_post_vars=d_post_vars,
+            delta_rec_vars=delta_rec_vars,
+            delta_post_vars=delta_post_vars,
             lam_vars=lam_vars,
             week_data_list=week_data_list,
             recommendation_model=recommendation_model,
@@ -374,6 +507,8 @@ def solve_native_master(
                 v_vars=v_vars,
                 y_vars=y_vars,
                 d_post_vars=d_post_vars,
+                delta_rec_vars=delta_rec_vars,
+                delta_post_vars=delta_post_vars,
                 lam_vars=lam_vars,
                 week_data_list=week_data_list,
                 recommendation_model=recommendation_model,
