@@ -11,10 +11,13 @@ logger = logging.getLogger(__name__)
 
 def log_iteration_summary(iteration: VFCGIteration) -> None:
     logger.info(
-        "VFCG iter=%d status=%s obj=%.4f bound=%.4f gap=%.4f cuts=%d violated=%d t_master=%.2fs t_oracle=%.2fs",
+        "VFCG iter=%d status=%s obj=%.4f realized=%.4f cred_mae=%.4f cred_slack=%.4f bound=%.4f gap=%.4f cuts=%d violated=%d t_master=%.2fs t_oracle=%.2fs",
         iteration.iteration_index,
         iteration.master_status,
         iteration.master_objective,
+        iteration.master_realized_objective,
+        iteration.master_credibility_mae,
+        iteration.master_credibility_slack,
         iteration.master_bound,
         iteration.master_gap,
         iteration.n_reference_cuts,

@@ -19,3 +19,10 @@ class VFCGConfig:
     certification_tol: float = 1e-6
     n_warmstart_vectors: int = 3
     max_training_weeks: int | None = 20
+    initial_reference_seed_scales: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+    initial_reference_include_booking: bool = True
+    initial_reference_include_q50: bool = True
+    initial_reference_include_realized: bool = True
+    max_initial_references_per_week: int | None = 12
+    credibility_mode: str = "hard"  # "hard" | "elastic_penalty"
+    credibility_penalty_rho: float = 0.0

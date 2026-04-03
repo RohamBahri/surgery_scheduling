@@ -23,6 +23,9 @@ class VFCGIteration:
     iteration_index: int
     master_status: str
     master_objective: float
+    master_realized_objective: float
+    master_credibility_mae: float
+    master_credibility_slack: float
     master_bound: float
     master_gap: float
     n_reference_cuts: int
@@ -36,7 +39,11 @@ class CertificationResult:
     status: str
     max_violation: float
     reconstructed_objective: float
+    reconstructed_realized_objective: float
+    reconstructed_credibility_mae: float
+    reconstructed_credibility_slack: float
     master_objective: float
+    master_realized_objective: float
     master_bound: float
     tie_break_flags: list[str] | None = None
 
@@ -45,6 +52,9 @@ class CertificationResult:
 class VFCGResult:
     w_optimal: np.ndarray
     objective: float
+    realized_objective: float
+    credibility_mae: float
+    credibility_slack: float
     n_iterations: int
     certification: CertificationResult
     iterations: list[VFCGIteration]

@@ -25,6 +25,9 @@ class NativeMasterResult:
     weights: np.ndarray
     schedules_by_week: dict[int, ScheduleColumn]
     objective: float
+    realized_objective: float
+    credibility_mae: float
+    credibility_slack: float
     bound: float
     gap: float
     solve_time: float
@@ -461,11 +464,29 @@ def solve_native_master(
     n_cases_total = sum(wd.n_cases for wd in week_data_list)
     mae_base = _compute_mae_base(week_data_list)
     e_pred_max = config.vfcg.credibility_eta * mae_base
+    credibility_mae_expr = (
+        (1.0 / n_cases_total) * quicksum(abs_err_terms)
+        if n_cases_total > 0
+        else gp.LinExpr(0.0)
+    )
+    credibility_slack_var: gp.Var | None = None
     if n_cases_total > 0:
-        model.addConstr((1.0 / n_cases_total) * quicksum(abs_err_terms) <= e_pred_max + 1e-9, name="credibility")
+        if config.vfcg.credibility_mode == "hard":
+            model.addConstr(credibility_mae_expr <= e_pred_max + 1e-9, name="credibility")
+        elif config.vfcg.credibility_mode == "elastic_penalty":
+            credibility_slack_var = model.addVar(lb=0.0, name="credibility_slack")
+            model.addConstr(
+                credibility_mae_expr <= e_pred_max + credibility_slack_var + 1e-9,
+                name="credibility_elastic",
+            )
+        else:
+            raise ValueError(f"Unknown credibility_mode={config.vfcg.credibility_mode!r}")
 
-    obj = (1.0 / max(1, n_weeks)) * quicksum(realized_cost_exprs[t] for t in range(n_weeks))
-    model.setObjective(obj, GRB.MINIMIZE)
+    realized_obj = (1.0 / max(1, n_weeks)) * quicksum(realized_cost_exprs[t] for t in range(n_weeks))
+    full_obj = realized_obj
+    if credibility_slack_var is not None:
+        full_obj = full_obj + float(config.vfcg.credibility_penalty_rho) * credibility_slack_var
+    model.setObjective(full_obj, GRB.MINIMIZE)
 
     start_to_use = warm_start
     if start_to_use is None:
@@ -531,6 +552,8 @@ def solve_native_master(
         schedules: dict[int, ScheduleColumn] = {}
         pred_costs: dict[int, float] = {}
         fallback_realized_costs: list[float] = []
+        abs_error_total = 0.0
+        total_cases = 0
         for wd in week_data_list:
             cases = build_case_records_from_week_data(wd)
             planning_durations = np.asarray(wd.bookings, dtype=float)
@@ -553,13 +576,31 @@ def solve_native_master(
             schedules[week_key] = col
             pred_costs[week_key] = float(predicted_cost)
             fallback_realized_costs.append(float(col.compute_cost(realized_durations, costs, turnover)))
+            d_post = np.asarray(recommendation_model.compute_post_review(weights, wd), dtype=float)
+            abs_error_total += float(np.sum(np.abs(realized_durations - d_post)))
+            total_cases += int(wd.n_cases)
 
-        fallback_objective = float(np.mean(fallback_realized_costs)) if fallback_realized_costs else float("inf")
+        fallback_realized_objective = (
+            float(np.mean(fallback_realized_costs)) if fallback_realized_costs else float("inf")
+        )
+        fallback_credibility_mae = abs_error_total / max(1, total_cases)
+        if config.vfcg.credibility_mode == "elastic_penalty":
+            fallback_credibility_slack = max(0.0, fallback_credibility_mae - e_pred_max)
+            fallback_objective = (
+                fallback_realized_objective
+                + float(config.vfcg.credibility_penalty_rho) * fallback_credibility_slack
+            )
+        else:
+            fallback_credibility_slack = 0.0
+            fallback_objective = fallback_realized_objective
 
         return NativeMasterResult(
             weights=weights,
             schedules_by_week=schedules,
             objective=fallback_objective,
+            realized_objective=fallback_realized_objective,
+            credibility_mae=fallback_credibility_mae,
+            credibility_slack=fallback_credibility_slack,
             bound=fallback_objective,
             gap=float("nan"),
             solve_time=time.perf_counter() - t0,
@@ -577,10 +618,16 @@ def solve_native_master(
         pred_costs[int(wd.week_index)] = float(predicted_cost_exprs[t].getValue())
 
     gap = float(model.MIPGap) if hasattr(model, "MIPGap") else float("nan")
+    realized_objective = float(realized_obj.getValue())
+    credibility_mae = float(credibility_mae_expr.getValue()) if n_cases_total > 0 else 0.0
+    credibility_slack = float(credibility_slack_var.X) if credibility_slack_var is not None else 0.0
     return NativeMasterResult(
         weights=weights,
         schedules_by_week=schedules,
         objective=float(model.ObjVal),
+        realized_objective=realized_objective,
+        credibility_mae=credibility_mae,
+        credibility_slack=credibility_slack,
         bound=float(model.ObjBound),
         gap=gap,
         solve_time=time.perf_counter() - t0,

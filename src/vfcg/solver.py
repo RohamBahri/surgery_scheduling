@@ -99,6 +99,7 @@ def vfcg_solve(
     reference_sets = generate_warmstart_references(
         week_data_list=week_data_list,
         recommendation_model=recommendation_model,
+        config=config,
         costs=costs,
         capacity_cfg=capacity_cfg,
         solver_cfg=solver_cfg,
@@ -173,6 +174,9 @@ def vfcg_solve(
             iteration_index=k,
             master_status=master_res.status,
             master_objective=master_res.objective,
+            master_realized_objective=master_res.realized_objective,
+            master_credibility_mae=master_res.credibility_mae,
+            master_credibility_slack=master_res.credibility_slack,
             master_bound=master_res.bound,
             master_gap=master_res.gap,
             n_reference_cuts=total_cuts_added,
@@ -210,6 +214,7 @@ def vfcg_solve(
         solver_cfg=solver_cfg,
         turnover=turnover,
         master_objective=final_master.objective,
+        master_realized_objective=final_master.realized_objective,
         master_bound=final_master.bound,
         weekly_schedules=final_master.schedules_by_week,
     )
@@ -222,7 +227,11 @@ def vfcg_solve(
             status="TERMINATED_UNVERIFIED",
             max_violation=certification.max_violation,
             reconstructed_objective=certification.reconstructed_objective,
+            reconstructed_realized_objective=certification.reconstructed_realized_objective,
+            reconstructed_credibility_mae=certification.reconstructed_credibility_mae,
+            reconstructed_credibility_slack=certification.reconstructed_credibility_slack,
             master_objective=certification.master_objective,
+            master_realized_objective=certification.master_realized_objective,
             master_bound=certification.master_bound,
             tie_break_flags=tie_break_flags,
         )
@@ -230,6 +239,9 @@ def vfcg_solve(
     return VFCGResult(
         w_optimal=np.asarray(final_master.weights, dtype=float),
         objective=float(final_master.objective),
+        realized_objective=float(final_master.realized_objective),
+        credibility_mae=float(final_master.credibility_mae),
+        credibility_slack=float(final_master.credibility_slack),
         n_iterations=len(iterations),
         certification=certification,
         iterations=iterations,

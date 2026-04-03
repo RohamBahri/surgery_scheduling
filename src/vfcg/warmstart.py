@@ -8,9 +8,10 @@ from typing import Dict, Iterable, List
 import numpy as np
 
 from src.core.column import ScheduleColumn
-from src.core.config import CapacityConfig, CostConfig, SolverConfig
+from src.core.config import CapacityConfig, Config, CostConfig, SolverConfig
 from src.estimation.recommendation import RecommendationModel, WeekRecommendationData
 from src.solvers.deterministic import solve_pricing
+from src.vfcg.oracle import ExactFollowerOracle
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,48 @@ def estimate_linear_regression_warmstart(
     return coef
 
 
+def generate_seed_weights(
+    week_data_list: list[WeekRecommendationData],
+    w_max: float,
+    scales: tuple[float, ...],
+) -> list[np.ndarray]:
+    base = estimate_linear_regression_warmstart(
+        week_data_list=week_data_list,
+        w_max=w_max,
+    )
+    active_scales = scales or (0.0, 1.0)
+    seeds: list[np.ndarray] = []
+    for s in active_scales:
+        cand = np.clip(float(s) * base, -float(w_max), float(w_max))
+        if not any(np.allclose(cand, prev, atol=1e-9, rtol=0.0) for prev in seeds):
+            seeds.append(cand)
+    return seeds
+
+
+def _append_duration_reference(
+    *,
+    built: list[ScheduleColumn],
+    week_data: WeekRecommendationData,
+    durations: np.ndarray,
+    costs: CostConfig,
+    solver_cfg: SolverConfig,
+    turnover: float,
+    tag: str,
+) -> None:
+    col, _ = solve_pricing(
+        n_cases=week_data.n_cases,
+        durations=np.asarray(durations, dtype=float),
+        calendar=week_data.calendar,
+        costs=costs,
+        solver_cfg=solver_cfg,
+        case_eligible_blocks=week_data.case_eligible_blocks,
+        turnover=turnover,
+        model_name=f"VFCGWarm_{week_data.week_index}_{tag}",
+    )
+    if col is not None:
+        built.append(col)
+
+
 def select_best_reference_schedules(
     week_data_list: list[WeekRecommendationData],
     reference_sets: Dict[int, List[ScheduleColumn]],
@@ -128,6 +171,7 @@ def select_best_reference_schedules(
 def generate_warmstart_references(
     week_data_list,
     recommendation_model: RecommendationModel,
+    config: Config,
     costs: CostConfig,
     capacity_cfg: CapacityConfig,
     solver_cfg: SolverConfig,
@@ -137,40 +181,80 @@ def generate_warmstart_references(
     _ = capacity_cfg
 
     references: Dict[int, List[ScheduleColumn]] = {}
-    use_count = max(1, min(int(n_vectors), 3))
+    n_seed = max(1, int(n_vectors))
+    active_scales = tuple(config.vfcg.initial_reference_seed_scales[:n_seed]) or (0.0, 1.0)
+    seed_weights = generate_seed_weights(
+        week_data_list=week_data_list,
+        w_max=config.vfcg.w_max,
+        scales=active_scales,
+    )
+    oracle = ExactFollowerOracle()
 
     for week_data in week_data_list:
-        candidates: List[np.ndarray] = [np.asarray(week_data.bookings, dtype=float)]
-
-        # Median-quantile candidate (optional for the first exact implementation).
-        try:
-            q50 = recommendation_model.predict_at_quantile(week_data, q=0.5)
-            if q50 is not None:
-                candidates.append(np.asarray(q50, dtype=float))
-        except Exception:
-            pass
-
-        candidates.append(np.asarray(week_data.realized, dtype=float))
-        candidates = candidates[:use_count]
-
         built: List[ScheduleColumn] = []
-        for idx, durations in enumerate(candidates):
-            col, _ = solve_pricing(
-                n_cases=week_data.n_cases,
-                durations=np.asarray(durations, dtype=float),
-                calendar=week_data.calendar,
+
+        if config.vfcg.initial_reference_include_booking:
+            _append_duration_reference(
+                built=built,
+                week_data=week_data,
+                durations=np.asarray(week_data.bookings, dtype=float),
                 costs=costs,
                 solver_cfg=solver_cfg,
-                case_eligible_blocks=week_data.case_eligible_blocks,
                 turnover=turnover,
-                model_name=f"VFCGWarm_{week_data.week_index}_{idx}",
+                tag="booking",
             )
-            if col is not None:
-                built.append(col)
+
+        if config.vfcg.initial_reference_include_q50:
+            try:
+                q50 = recommendation_model.predict_at_quantile(week_data, q=0.5)
+                if q50 is not None:
+                    _append_duration_reference(
+                        built=built,
+                        week_data=week_data,
+                        durations=np.asarray(q50, dtype=float),
+                        costs=costs,
+                        solver_cfg=solver_cfg,
+                        turnover=turnover,
+                        tag="q50",
+                    )
+            except Exception:
+                logger.exception("q50 warm-start reference failed for week %s", week_data.week_index)
+
+        if config.vfcg.initial_reference_include_realized:
+            _append_duration_reference(
+                built=built,
+                week_data=week_data,
+                durations=np.asarray(week_data.realized, dtype=float),
+                costs=costs,
+                solver_cfg=solver_cfg,
+                turnover=turnover,
+                tag="realized",
+            )
+
+        for idx, w_seed in enumerate(seed_weights):
+            try:
+                oracle_res = oracle.solve(
+                    week_data=week_data,
+                    w=np.asarray(w_seed, dtype=float),
+                    recommendation_model=recommendation_model,
+                    costs=costs,
+                    capacity_cfg=capacity_cfg,
+                    solver_cfg=solver_cfg,
+                    turnover=turnover,
+                )
+                built.append(oracle_res.schedule)
+            except Exception:
+                logger.exception(
+                    "Weight-seeded oracle warm-start failed for week %s seed=%d",
+                    week_data.week_index,
+                    idx,
+                )
 
         deduped = _unique_schedule_columns(built)
+        max_refs = config.vfcg.max_initial_references_per_week
+        if max_refs is not None and len(deduped) > int(max_refs):
+            deduped = deduped[: int(max_refs)]
 
-        # Final fallback retry on bookings to guarantee one reference per week.
         if not deduped:
             fallback_col, _ = solve_pricing(
                 n_cases=week_data.n_cases,
