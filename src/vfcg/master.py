@@ -324,8 +324,9 @@ def solve_native_master(
     model.Params.MIPGap = config.vfcg.master_mip_gap
     model.Params.Threads = solver_cfg.threads
     model.Params.OutputFlag = 1 if solver_cfg.verbose else 0
-    model.Params.MIPFocus = 1 
+    model.Params.MIPFocus = 2 
     model.Params.Symmetry = 2
+    model.Params.Cuts = 2
 
     w = model.addVars(feat_dim, lb=-config.vfcg.w_max, ub=config.vfcg.w_max, name="w")
 

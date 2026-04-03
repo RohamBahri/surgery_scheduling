@@ -20,9 +20,11 @@ Usage:
 """
 
 import argparse
+import math
 import sys
 import warnings
 from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -31,6 +33,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 from src.core.paths import ArtifactManager
 
@@ -3129,31 +3137,31 @@ def analyze_surgeon_weekly_patterns(df):
     for surg, grp in df_b.groupby("Surgeon_Code"):
         if len(grp) < MIN_SURGEON_CASES:
             continue
-        n_total_days = grp["OR_Date"].nunique()
-        # Most common day-of-week
-        dow_dist = grp["DayOfWeek"].value_counts()
-        top_dow  = dow_dist.iloc[0]
-        pct_dow  = 100 * top_dow / n_total_days
-        # Most common room
+        grp_days = grp.groupby(["OR_Date"]).agg(
+            day_name=("DayOfWeek", "first"),
+            room=("Operating_Room",
+                  lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ""))
+        n_total_days = len(grp_days)
+        # Most common day-of-week measured over operating DAYS, not cases.
+        dow_day_dist = grp_days["day_name"].value_counts()
+        top_dow_days = dow_day_dist.iloc[0]
+        pct_dow = 100 * top_dow_days / n_total_days if n_total_days > 0 else np.nan
+        # Most common room remains a case-weighted measure, as labelled below.
         room_dist = grp["Operating_Room"].value_counts()
         top_room_cnt = room_dist.iloc[0]
         pct_room = 100 * top_room_cnt / len(grp)
         # Most common (room, day) slot — by count of operating days that
         # match this combination
-        grp_days = grp.groupby(["OR_Date"]).agg(
-            day_name=("DayOfWeek", "first"),
-            room=("Operating_Room",
-                  lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else ""))
         slot_dist = grp_days.groupby(
             ["room", "day_name"]).size().sort_values(ascending=False)
         top_slot_cnt = slot_dist.iloc[0] if len(slot_dist) > 0 else 0
         top_slot     = slot_dist.index[0] if len(slot_dist) > 0 else ("—", "—")
-        pct_slot     = 100 * top_slot_cnt / n_total_days
+        pct_slot     = 100 * top_slot_cnt / n_total_days if n_total_days > 0 else np.nan
 
         surg_consistency.append(dict(
             surgeon=surg,
             total_days=n_total_days,
-            top_dow=dow_dist.index[0],
+            top_dow=dow_day_dist.index[0],
             pct_top_dow=pct_dow,
             top_room=room_dist.index[0],
             pct_top_room=pct_room,
@@ -4804,6 +4812,1254 @@ def analyze_block_load_decomposition(df, block_data=None):
 
     return bdf
 
+DEFAULT_SERVICES_OF_INTEREST = ["OTO", "NEUR", "ANAE", "GEN", "UROL", "ORTH"]
+DEFAULT_PAIR_GAP_DAYS = 60
+DEFAULT_BASELINE_K = 10
+DEFAULT_BASELINE_MIN_HISTORY = 3
+DEFAULT_HOSPITAL_Q = 0.50
+DEFAULT_MAX_DOWNWARD_REC = 45.0
+PERCENTILE_CUTOFFS = [50, 60, 70, 75, 80, 90]
+
+
+@dataclass
+class Scenario:
+    name: str
+    h_full: float
+    a: float
+    h_reject: float
+
+
+def _section(title: str) -> None:
+    print("\n" + "=" * 80)
+    print(f"  {title}")
+    print("=" * 80)
+
+
+
+def _subsection(title: str) -> None:
+    print(f"\n--- {title} ---")
+
+
+
+def _safe_slug(text: str) -> str:
+    text = str(text)
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in text).strip("_")
+
+
+
+def _save_csv(df_or_series: pd.DataFrame | pd.Series, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(df_or_series, pd.Series):
+        df_or_series.to_csv(path)
+    else:
+        df_or_series.to_csv(path, index=False)
+    print(f"  → Saved: {path}")
+
+
+
+def _describe_numeric(series: pd.Series, name: str) -> None:
+    s = pd.Series(series).dropna()
+    if len(s) == 0:
+        print(f"  {name}: no data")
+        return
+    q = s.quantile([0.25, 0.50, 0.75])
+    print(
+        f"  {name}: N={len(s):,}  mean={s.mean():.2f}  std={s.std():.2f}  "
+        f"min={s.min():.2f}  q25={q.loc[0.25]:.2f}  median={q.loc[0.50]:.2f}  "
+        f"q75={q.loc[0.75]:.2f}  max={s.max():.2f}"
+    )
+
+
+
+def _completion_col(df: pd.DataFrame) -> str:
+    for col in ["Actual Stop_DT", "Leave Room_DT", "Actual Start_DT", "Actual Start Date"]:
+        if col in df.columns and df[col].notna().any():
+            return col
+    raise ValueError("No usable chronology column found for pair construction.")
+
+
+
+def _service_list(pair_df: pd.DataFrame, requested: list[str] | None = None, topn: int = 6) -> list[str]:
+    available = pair_df["Case_Service"].dropna().astype(str)
+    if requested:
+        out = [svc for svc in requested if svc in set(available)]
+        if out:
+            return out
+    counts = available.value_counts()
+    out = [svc for svc in DEFAULT_SERVICES_OF_INTEREST if svc in counts.index]
+    if len(out) >= min(topn, len(counts)):
+        return out[:topn]
+    for svc in counts.index:
+        if svc not in out:
+            out.append(svc)
+        if len(out) >= topn:
+            break
+    return out
+
+
+
+def _chronological_week_split(df: pd.DataFrame, week_col: str = "Week_Start") -> tuple[pd.DataFrame, pd.DataFrame]:
+    tmp = df.copy()
+    tmp = tmp[tmp[week_col].notna()].sort_values(week_col)
+    weeks = pd.Index(pd.Series(tmp[week_col].unique()).sort_values())
+    if len(weeks) == 0:
+        return tmp.iloc[:0].copy(), tmp.iloc[:0].copy()
+    if len(weeks) > 52:
+        train_weeks = weeks[:52]
+        test_weeks = weeks[52:]
+    else:
+        cut = max(1, int(math.floor(0.8 * len(weeks))))
+        cut = min(cut, len(weeks) - 1) if len(weeks) > 1 else 1
+        train_weeks = weeks[:cut]
+        test_weeks = weeks[cut:]
+    train = tmp[tmp[week_col].isin(train_weeks)].copy()
+    test = tmp[tmp[week_col].isin(test_weeks)].copy()
+    if len(test_weeks) == 0:
+        print("  ⚠ Chronological split produced empty test set; falling back to 80/20 row split.")
+    if len(test) == 0 and len(train) > 1:
+        split = max(1, int(0.8 * len(tmp)))
+        train, test = tmp.iloc[:split].copy(), tmp.iloc[split:].copy()
+    return train, test
+
+
+
+def _ols_summary(x: pd.Series | np.ndarray, y: pd.Series | np.ndarray, add_intercept: bool = True) -> dict:
+    x_arr = np.asarray(pd.Series(x), dtype=float)
+    y_arr = np.asarray(pd.Series(y), dtype=float)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[mask]
+    y_arr = y_arr[mask]
+    n = len(x_arr)
+    if n < 3 or np.nanstd(x_arr) <= 1e-12:
+        return {
+            "n": n,
+            "intercept": np.nan,
+            "slope": np.nan,
+            "intercept_se": np.nan,
+            "slope_se": np.nan,
+            "t_slope": np.nan,
+            "p_two_sided": np.nan,
+            "p_one_sided_gt": np.nan,
+            "r2": np.nan,
+            "mae": np.nan,
+        }
+    X = np.column_stack([np.ones(n), x_arr]) if add_intercept else x_arr.reshape(-1, 1)
+    beta = np.linalg.pinv(X.T @ X) @ X.T @ y_arr
+    resid = y_arr - X @ beta
+    p = X.shape[1]
+    xtx_inv = np.linalg.pinv(X.T @ X)
+    meat = np.zeros((p, p))
+    for i in range(n):
+        xi = X[i : i + 1].T
+        meat += (resid[i] ** 2) * (xi @ xi.T)
+    cov = xtx_inv @ meat @ xtx_inv
+    if n > p:
+        cov *= n / (n - p)
+    se = np.sqrt(np.clip(np.diag(cov), 0.0, np.inf))
+    intercept = float(beta[0]) if add_intercept else 0.0
+    slope = float(beta[-1])
+    intercept_se = float(se[0]) if add_intercept else np.nan
+    slope_se = float(se[-1])
+    t_slope = slope / slope_se if slope_se > 0 else np.nan
+    dfree = max(n - p, 1)
+    p_two = 2 * (1 - sp_stats.t.cdf(abs(t_slope), df=dfree)) if np.isfinite(t_slope) else np.nan
+    p_one = 1 - sp_stats.t.cdf(t_slope, df=dfree) if np.isfinite(t_slope) else np.nan
+    y_hat = X @ beta
+    ss_res = float(np.sum((y_arr - y_hat) ** 2))
+    ss_tot = float(np.sum((y_arr - y_arr.mean()) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    mae = float(np.mean(np.abs(y_arr - y_hat)))
+    return {
+        "n": n,
+        "intercept": intercept,
+        "slope": slope,
+        "intercept_se": intercept_se,
+        "slope_se": slope_se,
+        "t_slope": float(t_slope),
+        "p_two_sided": float(p_two),
+        "p_one_sided_gt": float(p_one),
+        "r2": float(r2),
+        "mae": mae,
+    }
+
+
+
+def _one_sample_mean_test(values: pd.Series | np.ndarray, alternative: str = "two-sided") -> dict:
+    arr = np.asarray(pd.Series(values).dropna(), dtype=float)
+    n = len(arr)
+    if n < 2:
+        return {"n": n, "mean": np.nan if n == 0 else float(arr.mean()), "se": np.nan, "t": np.nan, "p": np.nan}
+    mean = float(arr.mean())
+    se = float(arr.std(ddof=1) / np.sqrt(n)) if n > 1 else np.nan
+    t = mean / se if se and se > 0 else np.nan
+    dfree = max(n - 1, 1)
+    if not np.isfinite(t):
+        p = np.nan
+    elif alternative == "greater":
+        p = 1 - sp_stats.t.cdf(t, df=dfree)
+    elif alternative == "less":
+        p = sp_stats.t.cdf(t, df=dfree)
+    else:
+        p = 2 * (1 - sp_stats.t.cdf(abs(t), df=dfree))
+    return {"n": n, "mean": mean, "se": se, "t": float(t), "p": float(p)}
+
+
+
+def _weighted_average(values: pd.Series, weights: pd.Series) -> float:
+    v = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    if len(v) == 0 or np.sum(w) <= 0:
+        return np.nan
+    return float(np.sum(v * w) / np.sum(w))
+
+
+
+def _lowess(x: pd.Series | np.ndarray, y: pd.Series | np.ndarray, frac: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
+    x_arr = np.asarray(pd.Series(x), dtype=float)
+    y_arr = np.asarray(pd.Series(y), dtype=float)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[mask]
+    y_arr = y_arr[mask]
+    if len(x_arr) < 5:
+        order = np.argsort(x_arr)
+        return x_arr[order], y_arr[order]
+    order = np.argsort(x_arr)
+    x_arr = x_arr[order]
+    y_arr = y_arr[order]
+    n = len(x_arr)
+    span = max(3, int(math.ceil(frac * n)))
+    y_hat = np.empty(n, dtype=float)
+    for i in range(n):
+        dist = np.abs(x_arr - x_arr[i])
+        h = np.partition(dist, span - 1)[span - 1]
+        if not np.isfinite(h) or h <= 0:
+            y_hat[i] = y_arr[i]
+            continue
+        w = np.clip(1 - (dist / h) ** 3, 0, None) ** 3
+        if np.sum(w > 0) < 2:
+            y_hat[i] = y_arr[i]
+            continue
+        X = np.column_stack([np.ones(n), x_arr - x_arr[i]])
+        WX = X * w[:, None]
+        beta = np.linalg.pinv(X.T @ WX) @ (WX.T @ y_arr)
+        y_hat[i] = beta[0]
+    return x_arr, y_hat
+
+
+
+def _binned_means(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 10) -> pd.DataFrame:
+    sub = df[[x_col, y_col]].dropna().copy()
+    if len(sub) == 0:
+        return pd.DataFrame(columns=["bin", "x_mean", "y_mean", "y_se", "n"])
+    unique_x = sub[x_col].nunique()
+    q = max(2, min(n_bins, unique_x))
+    try:
+        sub["bin"] = pd.qcut(sub[x_col], q=q, duplicates="drop")
+    except ValueError:
+        return pd.DataFrame(columns=["bin", "x_mean", "y_mean", "y_se", "n"])
+    out = (
+        sub.groupby("bin", observed=True)
+        .agg(
+            x_mean=(x_col, "mean"),
+            y_mean=(y_col, "mean"),
+            y_std=(y_col, "std"),
+            n=(y_col, "size"),
+        )
+        .reset_index()
+    )
+    out["y_se"] = out["y_std"] / np.sqrt(out["n"].clip(lower=1))
+    return out
+
+
+
+def _fit_old_piecewise(x: np.ndarray, y: np.ndarray) -> dict:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 20:
+        return {"model": "old_piecewise", "a": np.nan, "h_plus": np.nan, "h_minus": np.nan, "mae": np.nan}
+    grid_a = [0.01, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60]
+    grid_h = list(range(0, 105, 5))
+    best = None
+    for a in grid_a:
+        for h_plus in grid_h:
+            for h_minus in grid_h:
+                pred = np.zeros_like(x)
+                pos = x > h_plus
+                neg = x < -h_minus
+                pred[pos] = a * (x[pos] - h_plus)
+                pred[neg] = a * (x[neg] + h_minus)
+                mae = float(np.mean(np.abs(y - pred)))
+                if best is None or mae < best["mae"]:
+                    best = {"model": "old_piecewise", "a": a, "h_plus": h_plus, "h_minus": h_minus, "mae": mae}
+    zero_mae = float(np.mean(np.abs(y)))
+    best["zero_baseline_mae"] = zero_mae
+    best["beats_zero"] = best["mae"] < zero_mae
+    return best
+
+
+
+def _fit_new_piecewise(x: np.ndarray, y: np.ndarray) -> dict:
+    """Fit the literature-consistent 3-regime response (symmetric version).
+
+    This diagnostic fit uses a symmetric response where upward and downward
+    corrections share the same (h_full, a, h_reject). A directionally
+    asymmetric version is deferred to the later optimization experiments.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 20:
+        return {"model": "new_piecewise", "a": np.nan, "h_full": np.nan, "h_reject": np.nan, "mae": np.nan}
+    # Exclude a = 0 from the search grid: that null model is identified
+    # separately by the explicit zero-prediction baseline. Including a=0
+    # makes h parameters unidentified.
+    grid_a = [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00]
+    grid_full = list(range(0, 45, 5))
+    grid_reject = list(range(5, 105, 5))
+    best = None
+    abs_x = np.abs(x)
+    sign_x = np.sign(x)
+    for h_full in grid_full:
+        for h_reject in grid_reject:
+            if h_reject < h_full:
+                continue
+            for a in grid_a:
+                pred_abs = np.empty_like(abs_x)
+                mask_full = abs_x <= h_full
+                mask_comp = (abs_x > h_full) & (abs_x <= h_reject)
+                mask_sat = abs_x > h_reject
+                pred_abs[mask_full] = abs_x[mask_full]
+                pred_abs[mask_comp] = h_full + a * (abs_x[mask_comp] - h_full)
+                pred_abs[mask_sat] = h_full + a * (h_reject - h_full)
+                pred = sign_x * pred_abs
+                mae = float(np.mean(np.abs(y - pred)))
+                if best is None or mae < best["mae"]:
+                    best = {
+                        "model": "new_piecewise",
+                        "a": a,
+                        "h_full": h_full,
+                        "h_reject": h_reject,
+                        "mae": mae,
+                    }
+    return best
+
+
+
+def _piecewise_new_response(delta_rec: np.ndarray, h_full: float, a: float, h_reject: float) -> np.ndarray:
+    delta_rec = np.asarray(delta_rec, dtype=float)
+    abs_x = np.abs(delta_rec)
+    sign_x = np.sign(delta_rec)
+    out_abs = np.empty_like(abs_x)
+    mask_full = abs_x <= h_full
+    mask_comp = (abs_x > h_full) & (abs_x <= h_reject)
+    mask_sat = abs_x > h_reject
+    out_abs[mask_full] = abs_x[mask_full]
+    out_abs[mask_comp] = h_full + a * (abs_x[mask_comp] - h_full)
+    out_abs[mask_sat] = h_full + a * max(h_reject - h_full, 0.0)
+    return sign_x * out_abs
+
+
+def _piecewise_new_downward_capacity(rec_magnitude: float, h_full: float, a: float, h_reject: float) -> float:
+    """Maximum achievable *downward* post-edit correction for a positive
+    downward recommendation magnitude.
+
+    This keeps the treatability logic explicit instead of relying on the sign
+    convention of a symmetric response function.
+    """
+    rec = float(rec_magnitude)
+    if not np.isfinite(rec):
+        return np.nan
+    rec = max(rec, 0.0)
+    if rec <= h_full:
+        return rec
+    if rec <= h_reject:
+        return h_full + a * (rec - h_full)
+    return h_full + a * max(h_reject - h_full, 0.0)
+
+
+def _build_pair_dataset(
+    df: pd.DataFrame,
+    baseline_k: int = DEFAULT_BASELINE_K,
+    min_history: int = DEFAULT_BASELINE_MIN_HISTORY,
+    max_gap_days: int = DEFAULT_PAIR_GAP_DAYS,
+) -> pd.DataFrame:
+    sort_col = _completion_col(df)
+    ordered = df.sort_values(["Surgeon_Code", "Main_Procedure_Id", sort_col]).copy()
+    ordered["case_row_id"] = ordered.index.astype(str)
+    records: list[dict] = []
+    group_cols = ["Surgeon_Code", "Main_Procedure_Id"]
+    for (surgeon, procedure), grp in ordered.groupby(group_cols, sort=False):
+        grp = grp.sort_values(sort_col).copy()
+        if len(grp) < 2:
+            continue
+        booked = grp["Booked Time (Minutes)"].to_numpy(dtype=float)
+        realized = grp["Realized_Duration_Min"].to_numpy(dtype=float)
+        times = pd.to_datetime(grp[sort_col], errors="coerce")
+        rows = grp.reset_index(drop=False)
+        for i in range(1, len(rows)):
+            # Leave-pair-out: exclude both current case i and previous case i-1.
+            pool = booked[:max(0, i - 1)]
+            if len(pool) < min_history:
+                continue
+            baseline = float(np.mean(pool[max(0, len(pool) - baseline_k) :]))
+            gap_days = (times.iloc[i] - times.iloc[i - 1]).total_seconds() / 86400.0 if pd.notna(times.iloc[i]) and pd.notna(times.iloc[i - 1]) else np.nan
+            if not np.isfinite(gap_days) or gap_days > max_gap_days:
+                continue
+            curr = rows.iloc[i]
+            prev = rows.iloc[i - 1]
+            records.append(
+                {
+                    "Surgeon_Code": surgeon,
+                    "Main_Procedure_Id": procedure,
+                    "Case_Service": curr.get("Case_Service", np.nan),
+                    "current_case_row_id": str(curr["index"]),
+                    "prev_case_row_id": str(prev["index"]),
+                    "current_time": curr[sort_col],
+                    "prev_time": prev[sort_col],
+                    "gap_days": gap_days,
+                    "b_curr": float(curr["Booked Time (Minutes)"]),
+                    "b_prev": float(prev["Booked Time (Minutes)"]),
+                    "d_curr": float(curr["Realized_Duration_Min"]),
+                    "d_prev": float(prev["Realized_Duration_Min"]),
+                    "booking_error_prev": float(prev["Booked Time (Minutes)"] - prev["Realized_Duration_Min"]),
+                    "booking_error_curr": float(curr["Booked Time (Minutes)"] - curr["Realized_Duration_Min"]),
+                    "baseline_booked_curr": baseline,
+                    "Y_abnormal_booking": float(curr["Booked Time (Minutes)"] - baseline),
+                    "X_prev_overrun": float(prev["Realized_Duration_Min"] - prev["Booked Time (Minutes)"]),
+                    "Case_Service_prev": prev.get("Case_Service", np.nan),
+                    "Main_Procedure": curr.get("Main_Procedure", np.nan),
+                }
+            )
+    pair_df = pd.DataFrame(records)
+    if len(pair_df) == 0:
+        return pair_df
+    pair_df["current_time"] = pd.to_datetime(pair_df["current_time"], errors="coerce")
+    pair_df["prev_time"] = pd.to_datetime(pair_df["prev_time"], errors="coerce")
+    pair_df["Week_Start"] = (pair_df["current_time"] - pd.to_timedelta(pair_df["current_time"].dt.weekday, unit="D")).dt.normalize()
+    pair_df["abs_X_prev_overrun"] = pair_df["X_prev_overrun"].abs()
+    pair_df["X_prev_rel"] = pair_df["X_prev_overrun"] / pair_df["b_prev"].replace(0, np.nan)
+    pair_df["Y_abnormal_rel"] = pair_df["Y_abnormal_booking"] / pair_df["b_curr"].replace(0, np.nan)
+    return pair_df
+
+
+
+def _surgeon_qhat(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    work["covered"] = work["Realized_Duration_Min"] <= work["Booked Time (Minutes)"]
+    agg = (
+        work.groupby("Surgeon_Code")
+        .agg(
+            q_hat=("covered", "mean"),
+            surgeon_cases=("Patient_ID", "size"),
+            mean_booking_error=("Booking_Error_Min", "mean"),
+            median_booking_error=("Booking_Error_Min", "median"),
+        )
+        .reset_index()
+    )
+    if "Case_Service" in work.columns:
+        primary_service = work.groupby("Surgeon_Code")["Case_Service"].agg(lambda s: s.mode().iloc[0] if len(s.mode()) > 0 else np.nan)
+        agg = agg.merge(primary_service.rename("primary_service"), on="Surgeon_Code", how="left")
+    return agg
+
+
+
+def _ensure_prediction_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "Actual Start Date" in df.columns:
+        dt = pd.to_datetime(df["Actual Start Date"], errors="coerce")
+        df["DayOfWeek"] = dt.dt.day_name()
+        df["Month"] = dt.dt.month
+        df["Year"] = dt.dt.year
+    return df
+
+
+def _feature_candidates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[str], list[str]]:
+    df = _ensure_prediction_feature_columns(df)
+    categorical_candidates = [
+        "Main_Procedure_Id",
+        "Surgeon_Code",
+        "Case_Service",
+        "Site",
+        "Patient_Type",
+        "DayOfWeek",
+        "Month",
+        "Year",
+    ]
+    numeric_candidates = [
+        "q_hat_empirical",
+        "Age",
+        "Patient_Age",
+        "Age_at_Surgery",
+        "BMI",
+        "ASA",
+        "ASA_Class",
+        "ASA_Score",
+    ]
+    categorical = [c for c in categorical_candidates if c in df.columns]
+    numeric = [c for c in numeric_candidates if c in df.columns]
+    combined = categorical + numeric
+    return df, categorical, numeric, combined
+
+
+
+def _fit_linear_prediction(train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str, feature_cols: list[str]) -> dict:
+    if len(feature_cols) == 0:
+        return {"n_train": len(train_df), "n_test": len(test_df), "mae": np.nan, "r2": np.nan, "model": None, "feature_cols": []}
+    train = train_df.dropna(subset=[target_col]).copy()
+    test = test_df.dropna(subset=[target_col]).copy()
+    if len(train) == 0 or len(test) == 0:
+        return {"n_train": len(train), "n_test": len(test), "mae": np.nan, "r2": np.nan, "model": None, "feature_cols": feature_cols}
+    categorical = [c for c in feature_cols if train[c].dtype == "object" or str(train[c].dtype).startswith("category")]
+    numeric = [c for c in feature_cols if c not in categorical]
+    pre = ColumnTransformer(
+        transformers=[
+            ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric),
+            ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
+        ],
+        remainder="drop",
+    )
+    model = Pipeline([("pre", pre), ("lr", LinearRegression())])
+    model.fit(train[feature_cols], train[target_col])
+    pred = model.predict(test[feature_cols])
+    return {
+        "n_train": len(train),
+        "n_test": len(test),
+        "mae": float(mean_absolute_error(test[target_col], pred)),
+        "r2": float(r2_score(test[target_col], pred)),
+        "model": model,
+        "feature_cols": feature_cols,
+        "pred": pred,
+        "y_test": test[target_col].to_numpy(dtype=float),
+        "test_index": test.index.to_numpy(),
+    }
+
+
+
+def _group_ablation_importance(train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str, feature_groups: dict[str, list[str]]) -> pd.DataFrame:
+    all_features = [feat for feats in feature_groups.values() for feat in feats]
+    all_features = [f for f in dict.fromkeys(all_features) if f in train_df.columns]
+    base = _fit_linear_prediction(train_df, test_df, target_col, all_features)
+    rows = [
+        {
+            "group": "all_features",
+            "mae": base["mae"],
+            "r2": base["r2"],
+            "delta_mae_vs_full": 0.0,
+            "delta_r2_vs_full": 0.0,
+        }
+    ]
+    for group_name, feats in feature_groups.items():
+        reduced = [f for f in all_features if f not in feats]
+        if len(reduced) == 0:
+            continue
+        fit = _fit_linear_prediction(train_df, test_df, target_col, reduced)
+        rows.append(
+            {
+                "group": group_name,
+                "mae": fit["mae"],
+                "r2": fit["r2"],
+                "delta_mae_vs_full": fit["mae"] - base["mae"],
+                "delta_r2_vs_full": fit["r2"] - base["r2"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+
+def _weighted_between_within_variance(df: pd.DataFrame, value_col: str, group_col: str) -> dict:
+    sub = df[[value_col, group_col]].dropna().copy()
+    if len(sub) == 0:
+        return {"total_variance": np.nan, "between_variance": np.nan, "within_variance": np.nan, "between_share": np.nan}
+    total = float(sub[value_col].var(ddof=0))
+    grp = sub.groupby(group_col)[value_col]
+    means = grp.mean()
+    counts = grp.size()
+    within = grp.var(ddof=0).fillna(0.0)
+    grand = _weighted_average(means, counts)
+    between = float(np.sum(counts * (means - grand) ** 2) / np.sum(counts))
+    within_w = float(np.sum(counts * within) / np.sum(counts))
+    share = between / total if total > 0 else np.nan
+    return {
+        "total_variance": total,
+        "between_variance": between,
+        "within_variance": within_w,
+        "between_share": share,
+    }
+
+
+
+def _choose_dominant_procedure(df: pd.DataFrame, service: str) -> pd.DataFrame:
+    sub = df[df["Case_Service"] == service].copy()
+    if len(sub) == 0:
+        return pd.DataFrame()
+    cols = ["Main_Procedure_Id"]
+    if "Main_Procedure" in sub.columns:
+        cols.append("Main_Procedure")
+    out = sub.groupby(cols).size().rename("cases").reset_index().sort_values("cases", ascending=False)
+    return out
+
+
+
+def _plot_service_lowess(pair_df: pd.DataFrame, services: list[str], fig_path: Path, x_col: str = "X_prev_overrun", y_col: str = "Y_abnormal_booking") -> None:
+    n = len(services)
+    if n == 0:
+        return
+    rows = int(math.ceil(n / 2))
+    fig, axes = plt.subplots(rows, 2, figsize=(14, 4 * rows), squeeze=False)
+    fracs = [0.35, 0.50, 0.65]
+    for ax, service in zip(axes.ravel(), services):
+        sub = pair_df[pair_df["Case_Service"] == service].dropna(subset=[x_col, y_col]).copy()
+        if len(sub) == 0:
+            ax.set_visible(False)
+            continue
+        sample = sub.sample(min(len(sub), 2000), random_state=42) if len(sub) > 2000 else sub
+        ax.scatter(sample[x_col], sample[y_col], alpha=0.15, s=8)
+        for frac in fracs:
+            xs, ys = _lowess(sub[x_col], sub[y_col], frac=frac)
+            ax.plot(xs, ys, linewidth=1.5, label=f"LOWESS {frac:.2f}")
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.axvline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_title(f"{service}  (N={len(sub):,})")
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(y_col)
+        ax.legend(fontsize=8)
+    for ax in axes.ravel()[n:]:
+        ax.set_visible(False)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {fig_path}")
+
+
+
+def _plot_service_binned_means(pair_df: pd.DataFrame, services: list[str], fig_path: Path, x_col: str = "X_prev_overrun", y_col: str = "Y_abnormal_booking") -> None:
+    n = len(services)
+    if n == 0:
+        return
+    rows = int(math.ceil(n / 2))
+    fig, axes = plt.subplots(rows, 2, figsize=(14, 4 * rows), squeeze=False)
+    for ax, service in zip(axes.ravel(), services):
+        sub = pair_df[pair_df["Case_Service"] == service].dropna(subset=[x_col, y_col]).copy()
+        binned = _binned_means(sub, x_col=x_col, y_col=y_col, n_bins=10)
+        if len(binned) == 0:
+            ax.set_visible(False)
+            continue
+        ax.errorbar(binned["x_mean"], binned["y_mean"], yerr=binned["y_se"], fmt="o-", capsize=3)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.axvline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_title(f"{service}  (N={len(sub):,})")
+        ax.set_xlabel(f"Mean {x_col} within bin")
+        ax.set_ylabel(f"Mean {y_col}")
+    for ax in axes.ravel()[n:]:
+        ax.set_visible(False)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {fig_path}")
+
+
+
+def run_agenda_diagnostics(
+    df: pd.DataFrame,
+    figdir: str | Path,
+    tbldir: str | Path,
+    hospital_q: float = DEFAULT_HOSPITAL_Q,
+    max_downward_rec: float = DEFAULT_MAX_DOWNWARD_REC,
+    services_of_interest: list[str] | None = None,
+) -> None:
+    figdir = Path(figdir)
+    tbldir = Path(tbldir)
+    figdir.mkdir(parents=True, exist_ok=True)
+    tbldir.mkdir(parents=True, exist_ok=True)
+
+    _section("AGENDA DIAGNOSTICS — DECISIVE MODEL DESIGN CHECKS")
+    print("  Pair construction uses consecutive same-surgeon same-procedure cases")
+    print("  ordered by completion time, with a chronological K-nearest historical")
+    print("  baseline for the current booking (K=10, minimum 3 prior cases).")
+    print(f"  Max consecutive-pair gap: {DEFAULT_PAIR_GAP_DAYS} days")
+    print(f"  Hospital reference quantile q^H: {hospital_q:.2f}")
+    print(f"  Max downward recommendation used in treatability analysis: {max_downward_rec:.0f} min")
+
+    surgeon_q = _surgeon_qhat(df)
+    df_aug = df.merge(surgeon_q[["Surgeon_Code", "q_hat"]].rename(columns={"q_hat": "q_hat_empirical"}), on="Surgeon_Code", how="left")
+    pair_df = _build_pair_dataset(df_aug)
+    if len(pair_df) == 0:
+        print("  ⚠ No valid agenda pair data available. Skipping agenda diagnostics.")
+        return
+    pair_df = pair_df.merge(surgeon_q[["Surgeon_Code", "q_hat", "surgeon_cases", "mean_booking_error", "median_booking_error"]], on="Surgeon_Code", how="left")
+    _save_csv(pair_df, tbldir / "agenda_pair_dataset.csv")
+
+    services = _service_list(pair_df, requested=services_of_interest)
+    _subsection("Pair dataset overview")
+    print(f"  Valid pairs: {len(pair_df):,}")
+    print(f"  Surgeons with ≥1 valid pair: {pair_df['Surgeon_Code'].nunique():,}")
+    print(f"  Services represented: {pair_df['Case_Service'].nunique():,}")
+    print(f"  Services highlighted in figures: {services}")
+    _describe_numeric(pair_df["X_prev_overrun"], "X = previous overrun (realized − booked)")
+    _describe_numeric(pair_df["Y_abnormal_booking"], "Y = abnormal current booking")
+
+    # Task 1: Model-free checks
+    _section("TASK 1 — MODEL-FREE RESPONSE CHECKS")
+    rows = []
+    pooled = _ols_summary(pair_df["X_prev_overrun"], pair_df["Y_abnormal_booking"])
+    rows.append({"group": "ALL", **pooled})
+    print(
+        f"  Pooled OLS: slope={pooled['slope']:.4f}, se={pooled['slope_se']:.4f}, "
+        f"R²={pooled['r2']:.4f}, N={pooled['n']:,}"
+    )
+    zero_mae = float(pair_df["Y_abnormal_booking"].abs().mean())
+    print(f"  Zero-prediction baseline MAE: {zero_mae:.4f}")
+    print(f"  Pooled OLS MAE: {pooled['mae']:.4f}")
+    print(f"  OLS {'beats' if pooled['mae'] < zero_mae else 'does NOT beat'} zero baseline")
+    for service, sub in pair_df.groupby("Case_Service"):
+        fit = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
+        rows.append({"group": service, **fit})
+    task1_df = pd.DataFrame(rows).sort_values(["group"])
+    _save_csv(task1_df, tbldir / "agenda_task1_model_free_ols.csv")
+
+    _plot_service_lowess(pair_df, services, figdir / "agenda_task1_lowess_by_service.png")
+    _plot_service_binned_means(pair_df, services, figdir / "agenda_task1_binned_means_by_service.png")
+
+    # Task 2: Surgeon-level responders
+    _section("TASK 2 — SURGEON-LEVEL RESPONDERS VS NON-RESPONDERS")
+    surgeon_rows = []
+    for surgeon, sub in pair_df.groupby("Surgeon_Code"):
+        if len(sub) < 30:
+            continue
+        fit = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
+        pos_abs = sub.loc[sub["X_prev_overrun"] > 30, "Y_abnormal_booking"]
+        neg_abs = sub.loc[sub["X_prev_overrun"] < -30, "Y_abnormal_booking"]
+        sd_thr = sub["X_prev_overrun"].std(ddof=1)
+        pos_sd = sub.loc[sub["X_prev_overrun"] > sd_thr, "Y_abnormal_booking"] if np.isfinite(sd_thr) else pd.Series(dtype=float)
+        neg_sd = sub.loc[sub["X_prev_overrun"] < -sd_thr, "Y_abnormal_booking"] if np.isfinite(sd_thr) else pd.Series(dtype=float)
+        test_pos_abs = _one_sample_mean_test(pos_abs, alternative="greater")
+        test_neg_abs = _one_sample_mean_test(neg_abs, alternative="less")
+        test_pos_sd = _one_sample_mean_test(pos_sd, alternative="greater")
+        test_neg_sd = _one_sample_mean_test(neg_sd, alternative="less")
+        responder = bool(
+            (np.isfinite(fit["slope"]) and fit["slope"] > 0 and fit["p_one_sided_gt"] < 0.05)
+            or (np.isfinite(test_pos_abs["mean"]) and test_pos_abs["mean"] > 0 and test_pos_abs["p"] < 0.05)
+            or (np.isfinite(test_neg_abs["mean"]) and test_neg_abs["mean"] < 0 and test_neg_abs["p"] < 0.05)
+            or (np.isfinite(test_pos_sd["mean"]) and test_pos_sd["mean"] > 0 and test_pos_sd["p"] < 0.05)
+            or (np.isfinite(test_neg_sd["mean"]) and test_neg_sd["mean"] < 0 and test_neg_sd["p"] < 0.05)
+        )
+        surgeon_rows.append(
+            {
+                "Surgeon_Code": surgeon,
+                "n_pairs": len(sub),
+                "Case_Service": sub["Case_Service"].mode().iloc[0] if sub["Case_Service"].notna().any() else np.nan,
+                "slope": fit["slope"],
+                "slope_se": fit["slope_se"],
+                "t_slope": fit["t_slope"],
+                "p_slope_gt0": fit["p_one_sided_gt"],
+                "r2": fit["r2"],
+                "mean_y_pos_abs30": test_pos_abs["mean"],
+                "p_y_pos_abs30_gt0": test_pos_abs["p"],
+                "n_pos_abs30": test_pos_abs["n"],
+                "mean_y_neg_abs30": test_neg_abs["mean"],
+                "p_y_neg_abs30_lt0": test_neg_abs["p"],
+                "n_neg_abs30": test_neg_abs["n"],
+                "mean_y_pos_sd": test_pos_sd["mean"],
+                "p_y_pos_sd_gt0": test_pos_sd["p"],
+                "n_pos_sd": test_pos_sd["n"],
+                "mean_y_neg_sd": test_neg_sd["mean"],
+                "p_y_neg_sd_lt0": test_neg_sd["p"],
+                "n_neg_sd": test_neg_sd["n"],
+                "responder": responder,
+                "q_hat": sub["q_hat"].iloc[0],
+                "surgeon_cases": sub["surgeon_cases"].iloc[0],
+            }
+        )
+    surgeon_df = pd.DataFrame(surgeon_rows).sort_values(["responder", "slope"], ascending=[False, False])
+    _save_csv(surgeon_df, tbldir / "agenda_task2_surgeon_response_summary.csv")
+    if len(surgeon_df) > 0:
+        n_resp = int(surgeon_df["responder"].sum())
+        n_total_tested = len(surgeon_df)
+        n_expected_fp = 0.05 * n_total_tested
+        print(f"  Surgeons with ≥30 pairs: {n_total_tested:,}")
+        print(f"  Responders (p < 0.05 on any test): {n_resp:,} / {n_total_tested:,} ({100 * n_resp / n_total_tested:.1f}%)")
+        print("")
+        print(f"  ⚠ Multiple comparisons: with {n_total_tested} surgeons tested at α=0.05,")
+        print(f"  about {n_expected_fp:.1f} false positives are expected by chance alone.")
+        alpha_bonf = 0.05 / max(n_total_tested, 1)
+        surgeon_df["responder_bonferroni"] = (
+            surgeon_df["p_slope_gt0"].lt(alpha_bonf) & surgeon_df["slope"].gt(0)
+        )
+        n_resp_bonf = int(surgeon_df["responder_bonferroni"].sum())
+        print(f"  After Bonferroni correction: {n_resp_bonf:,} surgeons with slope > 0 at α_adj={alpha_bonf:.5f}")
+        _save_csv(surgeon_df, tbldir / "agenda_task2_surgeon_response_summary.csv")
+        _describe_numeric(surgeon_df["slope"], "Surgeon-level linear slopes")
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].hist(surgeon_df["slope"].dropna(), bins=30, edgecolor="white", alpha=0.8)
+        axes[0].axvline(0, color="red", linestyle="--", linewidth=1)
+        axes[0].set_xlabel("Surgeon-level slope")
+        axes[0].set_ylabel("Surgeons")
+        axes[0].set_title("Distribution of surgeon response slopes")
+        grouped = surgeon_df.groupby(["Case_Service", "responder"]).size().unstack(fill_value=0)
+        grouped = grouped.sort_values(list(grouped.columns), ascending=False)
+        grouped.plot(kind="bar", stacked=True, ax=axes[1])
+        axes[1].set_xlabel("Service")
+        axes[1].set_ylabel("Surgeons")
+        axes[1].set_title("Responders vs non-responders by service")
+        axes[1].tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        fig.savefig(figdir / "agenda_task2_surgeon_response_figures.png", dpi=150)
+        plt.close(fig)
+        print(f"  → Saved: {figdir / 'agenda_task2_surgeon_response_figures.png'}")
+        responder_profile = surgeon_df.groupby("responder").agg(
+            n_surgeons=("Surgeon_Code", "size"),
+            mean_pairs=("n_pairs", "mean"),
+            mean_cases=("surgeon_cases", "mean"),
+            mean_q_hat=("q_hat", "mean"),
+            median_q_hat=("q_hat", "median"),
+        ).reset_index()
+        _save_csv(responder_profile, tbldir / "agenda_task2_responder_profile.csv")
+
+    # Task 3: ANAE deep dive
+    _section("TASK 3 — ANAE DEEP DIVE")
+    anae_cases = (
+        df_aug[df_aug["Case_Service"] == "ANAE"].copy()
+        if "Case_Service" in df_aug.columns
+        else df_aug.iloc[:0].copy()
+    )       
+    anae_pairs = pair_df[pair_df["Case_Service"] == "ANAE"].copy() if "Case_Service" in pair_df.columns else pair_df.iloc[:0].copy()
+    if len(anae_cases) == 0:
+        print("  ANAE not present in dataset — skipping ANAE deep dive.")
+    else:
+        anae_surgeon = anae_cases.groupby("Surgeon_Code").agg(
+            n_cases=("Patient_ID", "size"),
+            mean_duration=("Realized_Duration_Min", "mean"),
+            median_duration=("Realized_Duration_Min", "median"),
+            q_hat=("q_hat_empirical", "first"),
+        ).reset_index()
+        anae_pair_counts = anae_pairs.groupby("Surgeon_Code").size().rename("n_valid_pairs").reset_index()
+        anae_profile = anae_surgeon.merge(anae_pair_counts, on="Surgeon_Code", how="left").fillna({"n_valid_pairs": 0})
+        _save_csv(anae_profile, tbldir / "agenda_task3_anae_surgeon_profile.csv")
+        _describe_numeric(anae_cases["Realized_Duration_Min"], "ANAE realized duration")
+        print(f"  ANAE surgeons: {anae_cases['Surgeon_Code'].nunique():,}")
+        print(f"  ANAE valid pairs: {len(anae_pairs):,}")
+        dom_proc = _choose_dominant_procedure(anae_cases, "ANAE")
+        if len(dom_proc) > 0:
+            _save_csv(dom_proc.head(25), tbldir / "agenda_task3_anae_procedure_profile.csv")
+            top_proc = dom_proc.iloc[0]
+            proc_desc = f" ({top_proc['Main_Procedure']})" if "Main_Procedure" in top_proc.index and pd.notna(top_proc['Main_Procedure']) else ""
+            print(f"  Dominant ANAE procedure: {top_proc['Main_Procedure_Id']}{proc_desc}, N={int(top_proc['cases']):,}")
+        if len(anae_pairs) > 0:
+            anae_fit = _ols_summary(anae_pairs["X_prev_overrun"], anae_pairs["Y_abnormal_booking"])
+            print(f"  ANAE model-free slope: {anae_fit['slope']:.4f} (se={anae_fit['slope_se']:.4f}, N={anae_fit['n']:,})")
+            cut_rows = []
+            train_anae, test_anae = _chronological_week_split(anae_pairs)
+            for p in PERCENTILE_CUTOFFS:
+                thr = np.nanpercentile(train_anae["abs_X_prev_overrun"], p) if len(train_anae) > 0 else np.nan
+                tr = train_anae[train_anae["abs_X_prev_overrun"] >= thr] if np.isfinite(thr) else train_anae.iloc[:0]
+                te = test_anae[test_anae["abs_X_prev_overrun"] >= thr] if np.isfinite(thr) else test_anae.iloc[:0]
+                fit = _ols_summary(tr["X_prev_overrun"], tr["Y_abnormal_booking"])
+                if len(te) > 0 and np.isfinite(fit["slope"]):
+                    pred = fit["intercept"] + fit["slope"] * te["X_prev_overrun"].to_numpy(dtype=float)
+                    test_mae = float(np.mean(np.abs(te["Y_abnormal_booking"].to_numpy(dtype=float) - pred)))
+                else:
+                    test_mae = np.nan
+                cut_rows.append({"percentile": p, "threshold": thr, "n_train": len(tr), "n_test": len(te), "slope": fit["slope"], "slope_se": fit["slope_se"], "test_mae": test_mae})
+            cut_df = pd.DataFrame(cut_rows)
+            _save_csv(cut_df, tbldir / "agenda_task3_anae_cutoff_scan.csv")
+            if cut_df["test_mae"].notna().any():
+                best_row = cut_df.sort_values("test_mae").iloc[0]
+                print(f"  Best ANAE cutoff by chronological holdout MAE: P{int(best_row['percentile'])} (test MAE={best_row['test_mae']:.2f})")
+            loo_surg_rows = []
+            for surg in sorted(anae_pairs["Surgeon_Code"].unique()):
+                sub = anae_pairs[anae_pairs["Surgeon_Code"] != surg]
+                fit = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
+                loo_surg_rows.append({"dropped_surgeon": surg, **fit})
+            _save_csv(pd.DataFrame(loo_surg_rows), tbldir / "agenda_task3_anae_leave_one_surgeon_out.csv")
+            loo_pair_rows = []
+            if len(anae_pairs) <= 500:
+                for idx in anae_pairs.index:
+                    sub = anae_pairs.drop(index=idx)
+                    fit = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
+                    loo_pair_rows.append({"dropped_pair_index": str(idx), **fit})
+            _save_csv(pd.DataFrame(loo_pair_rows), tbldir / "agenda_task3_anae_leave_one_pair_out.csv")
+            fig, ax = plt.subplots(figsize=(7, 5))
+            for surg, sub in anae_pairs.groupby("Surgeon_Code"):
+                ax.scatter(sub["X_prev_overrun"], sub["Y_abnormal_booking"], label=str(surg), alpha=0.7, s=30)
+            xs, ys = _lowess(anae_pairs["X_prev_overrun"], anae_pairs["Y_abnormal_booking"], frac=0.6)
+            ax.plot(xs, ys, color="black", linewidth=2, label="LOWESS")
+            ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+            ax.axvline(0, color="gray", linestyle="--", linewidth=0.8)
+            ax.set_xlabel("Previous overrun")
+            ax.set_ylabel("Current abnormal booking")
+            ax.set_title("ANAE pair scatter")
+            ax.legend(fontsize=8, ncol=2)
+            fig.tight_layout()
+            fig.savefig(figdir / "agenda_task3_anae_scatter.png", dpi=150)
+            plt.close(fig)
+            print(f"  → Saved: {figdir / 'agenda_task3_anae_scatter.png'}")
+
+    # Task 4: prediction without booking
+    _section("TASK 4 — PREDICTIVE POWER WITHOUT THE BOOKING")
+    # Any historical surgeon statistic used as a feature must be estimated on
+    # the training period only. Otherwise the test period leaks into x.
+    train_base, test_base = _chronological_week_split(df.copy())
+    if len(test_base) == 0:
+        print("  Insufficient out-of-sample weeks for predictive task.")
+    else:
+        _subsection("4A. Chronological split and training-only historical features")
+        train_only_q = _surgeon_qhat(train_base)
+        q_feature = train_only_q[["Surgeon_Code", "q_hat"]].rename(columns={"q_hat": "q_hat_empirical"})
+        train_df = train_base.merge(q_feature, on="Surgeon_Code", how="left")
+        test_df = test_base.merge(q_feature, on="Surgeon_Code", how="left")
+        print(f"  Train cases: {len(train_df):,}")
+        print(f"  Test cases:  {len(test_df):,}")
+        q_avail = test_df["q_hat_empirical"].notna().mean() if "q_hat_empirical" in test_df.columns and len(test_df) > 0 else np.nan
+        if np.isfinite(q_avail):
+            print(f"  q_hat_empirical available in test from training history: {100 * q_avail:.1f}%")
+        print("  Booking-only is not a data leak: the current booking is observed")
+        print("  at decision time. The main leakage risk is from historical")
+        print("  features estimated using the full sample.")
+
+        train_df, categorical, numeric, all_feature_only = _feature_candidates(train_df)
+        test_df = _ensure_prediction_feature_columns(test_df)
+        feature_only = all_feature_only.copy()
+        combined = all_feature_only + (["Booked Time (Minutes)"] if "Booked Time (Minutes)" in train_df.columns else [])
+        booking_only = ["Booked Time (Minutes)"] if "Booked Time (Minutes)" in train_df.columns else []
+
+        _subsection("4B. Feature leak audit")
+        POST_OP_COLUMNS = {
+            "Realized_Duration_Min", "Surgical_Duration_Min", "Room_Time_Min",
+            "Booking_Error_Min", "Booking_Error_Surgical", "Booking_Error_Room",
+            "Acute LOS", "LOS", "Recovery_Time_Mins", "Complication_diag1",
+            "Actual Stop_DT", "Leave Room_DT", "Actual Stop Date", "Actual Stop Time",
+            "Leave Room Date", "Leave Room Time",
+        }
+        leaked = [c for c in feature_only if c in POST_OP_COLUMNS]
+        if leaked:
+            print(f"  ⚠ Post-operative features detected in x: {leaked}")
+            print("    Removing leaked features before fitting.")
+            feature_only = [c for c in feature_only if c not in POST_OP_COLUMNS]
+            combined = [c for c in combined if c not in POST_OP_COLUMNS]
+        else:
+            print("  ✓ No explicit post-operative features detected in feature set.")
+        if "q_hat_empirical" in feature_only:
+            print("  ✓ q_hat_empirical is retained, but it is estimated on the")
+            print("    training period only, so it is a valid historical feature.")
+
+        _subsection("4C. Dimensionality audit (feature-only model)")
+        cat_in_feat = [c for c in feature_only if train_df[c].dtype == "object" or str(train_df[c].dtype).startswith("category")]
+        num_in_feat = [c for c in feature_only if c not in cat_in_feat]
+        total_onehot = sum(train_df[c].nunique() for c in cat_in_feat)
+        total_dim = total_onehot + len(num_in_feat)
+        print(f"  Categorical features: {len(cat_in_feat)}")
+        for c in cat_in_feat:
+            n_levels = train_df[c].nunique()
+            n_test_unseen = 0
+            if c in test_df.columns:
+                train_levels = set(train_df[c].dropna().astype(str).unique())
+                test_levels = set(test_df[c].dropna().astype(str).unique())
+                n_test_unseen = len(test_levels - train_levels)
+            print(f"    {c:25s}  {n_levels:5d} levels in train  ({n_test_unseen:d} unseen in test)")
+        print(f"  Numeric features: {len(num_in_feat)}")
+        for c in num_in_feat:
+            print(f"    {c:25s}")
+        print(f"  Total encoded dimensions (approx): {total_dim:,}")
+        print(f"  Training cases: {len(train_df):,}")
+        print(f"  Ratio cases/features: {len(train_df) / max(total_dim, 1):.1f}")
+
+        _subsection("4D. Duration prediction (realized duration)")
+        fit_feat_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", feature_only)
+        fit_book_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", booking_only)
+        fit_comb_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", combined)
+        proc_counts = train_df["Main_Procedure_Id"].value_counts() if "Main_Procedure_Id" in train_df.columns else pd.Series(dtype=float)
+        common_procs = set(proc_counts[proc_counts >= 50].index)
+        train_common = train_df[train_df["Main_Procedure_Id"].isin(common_procs)].copy() if len(common_procs) > 0 else train_df.iloc[:0].copy()
+        test_common = test_df[test_df["Main_Procedure_Id"].isin(common_procs)].copy() if len(common_procs) > 0 else test_df.iloc[:0].copy()
+        fit_feat_common = _fit_linear_prediction(train_common, test_common, "Realized_Duration_Min", feature_only) if len(test_common) > 0 else {"mae": np.nan, "r2": np.nan, "n_test": 0}
+        fit_book_common = _fit_linear_prediction(train_common, test_common, "Realized_Duration_Min", booking_only) if len(test_common) > 0 else {"mae": np.nan, "r2": np.nan, "n_test": 0}
+        pred_rows = [
+            {"target": "realized_duration", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_d["mae"], "r2": fit_feat_d["r2"], "n_test": fit_feat_d["n_test"]},
+            {"target": "realized_duration", "model": "booking_only (1d)", "mae": fit_book_d["mae"], "r2": fit_book_d["r2"], "n_test": fit_book_d["n_test"]},
+            {"target": "realized_duration", "model": f"combined (~{total_dim+1}d)", "mae": fit_comb_d["mae"], "r2": fit_comb_d["r2"], "n_test": fit_comb_d["n_test"]},
+            {"target": "realized_duration (common procs)", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_common["mae"], "r2": fit_feat_common["r2"], "n_test": fit_feat_common["n_test"]},
+            {"target": "realized_duration (common procs)", "model": "booking_only (1d)", "mae": fit_book_common["mae"], "r2": fit_book_common["r2"], "n_test": fit_book_common["n_test"]},
+        ]
+
+        _subsection("4E. Bias prediction (booking_error = b − d̃)")
+        print("  This is the operationally relevant target: can historical features")
+        print("  recover systematic booking bias without using the booking itself?")
+        train_df = train_df.copy()
+        test_df = test_df.copy()
+        train_df["booking_bias_target"] = train_df["Booked Time (Minutes)"] - train_df["Realized_Duration_Min"]
+        test_df["booking_bias_target"] = test_df["Booked Time (Minutes)"] - test_df["Realized_Duration_Min"]
+        fit_feat_bias = _fit_linear_prediction(train_df, test_df, "booking_bias_target", feature_only)
+        pred_rows.append({"target": "booking_bias", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_bias["mae"], "r2": fit_feat_bias["r2"], "n_test": fit_feat_bias["n_test"]})
+        train_surg_bias = train_df.groupby("Surgeon_Code")["booking_bias_target"].mean()
+        test_df_bias = test_df.copy()
+        test_df_bias["pred_surg_mean"] = test_df_bias["Surgeon_Code"].map(train_surg_bias)
+        test_df_bias = test_df_bias.dropna(subset=["pred_surg_mean", "booking_bias_target"])
+        if len(test_df_bias) > 0:
+            surg_mean_mae = float(mean_absolute_error(test_df_bias["booking_bias_target"], test_df_bias["pred_surg_mean"]))
+            surg_mean_r2 = float(r2_score(test_df_bias["booking_bias_target"], test_df_bias["pred_surg_mean"]))
+            pred_rows.append({
+                "target": "booking_bias",
+                "model": "surgeon_mean_only (1 param/surgeon)",
+                "mae": surg_mean_mae,
+                "r2": surg_mean_r2,
+                "n_test": len(test_df_bias),
+            })
+            print(f"  Surgeon-mean-bias baseline: MAE={surg_mean_mae:.2f}, R²={surg_mean_r2:.4f}")
+            print(f"  Feature-model bias:         MAE={fit_feat_bias['mae']:.2f}, R²={fit_feat_bias['r2']:.4f}")
+            if np.isfinite(fit_feat_bias["mae"]) and np.isfinite(surg_mean_mae) and abs(fit_feat_bias["mae"] - surg_mean_mae) < 2.0:
+                print("  → The feature model performs similarly to a simple surgeon-mean")
+                print("    baseline, suggesting limited extra recoverable signal beyond")
+                print("    stable surgeon-specific effects.")
+        zero_bias_mae = float(test_df["booking_bias_target"].abs().mean())
+        pred_rows.append({"target": "booking_bias", "model": "zero (predict no bias)", "mae": zero_bias_mae, "r2": 0.0, "n_test": len(test_df)})
+        pred_df = pd.DataFrame(pred_rows)
+        _save_csv(pred_df, tbldir / "agenda_task4_prediction_comparison.csv")
+        print("\n  Full comparison table:")
+        print(pred_df.to_string(index=False, float_format=lambda z: f"{z:.4f}" if isinstance(z, float) else str(z)))
+        feature_groups = {
+            "surgeon_identity": [c for c in ["Surgeon_Code", "q_hat_empirical"] if c in feature_only],
+            "procedure": [c for c in ["Main_Procedure_Id"] if c in feature_only],
+            "service_site_patient": [c for c in ["Case_Service", "Site", "Patient_Type"] if c in feature_only],
+            "calendar": [c for c in ["DayOfWeek", "Month", "Year"] if c in feature_only],
+        }
+        feature_groups = {k: v for k, v in feature_groups.items() if len(v) > 0}
+        if len(feature_groups) > 0:
+            _subsection("4F. Feature-group ablation (bias prediction)")
+            bias_importance = _group_ablation_importance(train_df, test_df, "booking_bias_target", feature_groups)
+            _save_csv(bias_importance, tbldir / "agenda_task4_bias_feature_group_importance.csv")
+            print(bias_importance.to_string(index=False, float_format=lambda z: f"{z:.4f}" if isinstance(z, float) else str(z)))
+        _subsection("4G. Variance decomposition of booking bias")
+        var_source = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+        var_decomp = _weighted_between_within_variance(var_source.assign(booking_bias=var_source["Booked Time (Minutes)"] - var_source["Realized_Duration_Min"]), "booking_bias", "Surgeon_Code")
+        var_df = pd.DataFrame([var_decomp])
+        _save_csv(var_df, tbldir / "agenda_task4_booking_bias_variance_decomposition.csv")
+        if np.isfinite(var_decomp["between_share"]):
+            print(f"  Between-surgeon share of booking-bias variance: {100 * var_decomp['between_share']:.1f}%")
+            print(f"  Within-surgeon share: {100 * (1 - var_decomp['between_share']):.1f}%")
+            print("  Note: variance share is not the same as scheduling-cost share;")
+            print("  a modest systematic bias can still matter operationally because")
+            print("  it does not average out within blocks.")
+            train_bias_profile = train_only_q.copy()
+            train_bias_profile["abs_mean_bias"] = train_bias_profile["mean_booking_error"].abs()
+            train_bias_profile = train_bias_profile[train_bias_profile["surgeon_cases"] >= 30]
+            if len(train_bias_profile) > 0:
+                vol_weighted_abs_bias = float((train_bias_profile["abs_mean_bias"] * train_bias_profile["surgeon_cases"]).sum() / train_bias_profile["surgeon_cases"].sum())
+                case_level_mae = float(var_source["Booking_Error_Min"].abs().mean())
+                print(f"  Volume-weighted mean |surgeon bias|: {vol_weighted_abs_bias:.1f} min")
+                print(f"  Overall case-level MAE(b − d̃): {case_level_mae:.1f} min")
+                print(f"  Surgeon-level bias as fraction of case-level MAE: {100 * vol_weighted_abs_bias / case_level_mae:.1f}%")
+
+    # Task 5: response-function landscape
+    _section("TASK 5 — RESPONSE-FUNCTION LANDSCAPE")
+    stability_rows = []
+    stable_services = [svc for svc, n in pair_df["Case_Service"].value_counts().items() if n >= 30]
+    for service in stable_services:
+        sub = pair_df[pair_df["Case_Service"] == service].copy()
+        for p in PERCENTILE_CUTOFFS:
+            thr = np.nanpercentile(sub["abs_X_prev_overrun"], p)
+            ss = sub[sub["abs_X_prev_overrun"] >= thr]
+            fit = _ols_summary(ss["X_prev_overrun"], ss["Y_abnormal_booking"])
+            stability_rows.append({"Case_Service": service, "percentile": p, "threshold": thr, **fit})
+    stability_df = pd.DataFrame(stability_rows)
+    _save_csv(stability_df, tbldir / "agenda_task5_service_slope_stability.csv")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    plot_services = [svc for svc in ["ANAE", "OTO", "NEUR", "GEN", "UROL", "ORTH"] if svc in set(stability_df["Case_Service"])]
+    for service in plot_services:
+        sub = stability_df[stability_df["Case_Service"] == service].sort_values("percentile")
+        ax.errorbar(sub["percentile"], sub["slope"], yerr=sub["slope_se"], marker="o", capsize=3, label=service)
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Absolute-signal percentile cutoff")
+    ax.set_ylabel("Slope of Y on X")
+    ax.set_title("Service-level slope stability")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(figdir / "agenda_task5_service_slope_stability.png", dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {figdir / 'agenda_task5_service_slope_stability.png'}")
+
+    fit_rows = []
+    for service in stable_services:
+        sub = pair_df[pair_df["Case_Service"] == service].sort_values("current_time").copy()
+        train_s, test_s = _chronological_week_split(sub)
+        if len(train_s) < 20 or len(test_s) < 10:
+            continue
+        old_fit = _fit_old_piecewise(train_s["X_prev_overrun"].to_numpy(), train_s["Y_abnormal_booking"].to_numpy())
+        new_fit = _fit_new_piecewise(train_s["X_prev_overrun"].to_numpy(), train_s["Y_abnormal_booking"].to_numpy())
+        x_test = test_s["X_prev_overrun"].to_numpy(dtype=float)
+        y_test = test_s["Y_abnormal_booking"].to_numpy(dtype=float)
+        pred_old = np.zeros_like(x_test)
+        pos = x_test > old_fit["h_plus"]
+        neg = x_test < -old_fit["h_minus"]
+        pred_old[pos] = old_fit["a"] * (x_test[pos] - old_fit["h_plus"])
+        pred_old[neg] = old_fit["a"] * (x_test[neg] + old_fit["h_minus"])
+        pred_new = _piecewise_new_response(x_test, new_fit["h_full"], new_fit["a"], new_fit["h_reject"])
+        zero_test_mae = float(np.mean(np.abs(y_test)))
+        fit_rows.append({
+            "Case_Service": service,
+            "n_train": len(train_s),
+            "n_test": len(test_s),
+            "old_a": old_fit["a"],
+            "old_h_plus": old_fit["h_plus"],
+            "old_h_minus": old_fit["h_minus"],
+            "old_train_mae": old_fit["mae"],
+            "old_test_mae": float(np.mean(np.abs(y_test - pred_old))),
+            "new_a": new_fit["a"],
+            "new_h_full": new_fit["h_full"],
+            "new_h_reject": new_fit["h_reject"],
+            "new_train_mae": new_fit["mae"],
+            "new_test_mae": float(np.mean(np.abs(y_test - pred_new))),
+            "zero_test_mae": zero_test_mae,
+            "old_beats_zero": float(np.mean(np.abs(y_test - pred_old))) < zero_test_mae,
+            "new_beats_zero": float(np.mean(np.abs(y_test - pred_new))) < zero_test_mae,
+        })
+    fit_df = pd.DataFrame(fit_rows)
+    _save_csv(fit_df, tbldir / "agenda_task5_piecewise_fit_comparison.csv")
+    if len(fit_df) > 0:
+        n_old_beats = int(fit_df["old_beats_zero"].sum()) if "old_beats_zero" in fit_df.columns else 0
+        n_new_beats = int(fit_df["new_beats_zero"].sum()) if "new_beats_zero" in fit_df.columns else 0
+        n_services_tested = len(fit_df)
+        print(f"  Services tested: {n_services_tested}")
+        print(f"  Old (inaction-band) model beats zero on holdout: {n_old_beats} / {n_services_tested}")
+        print(f"  New (3-regime, symmetric diagnostic) model beats zero on holdout: {n_new_beats} / {n_services_tested}")
+        if n_old_beats == 0 and n_new_beats == 0:
+            print("  → Neither response model beats zero-prediction on any service.")
+            print("    This supports treating experience-based response parameters as")
+            print("    scenario inputs rather than directly estimated empirical truths.")
+
+    # Task 6: relative vs absolute thresholds
+    _section("TASK 6 — RELATIVE VS ABSOLUTE THRESHOLDS")
+    pair_df["duration_bucket"] = pd.cut(pair_df["b_prev"], bins=[-np.inf, 90, 180, np.inf], labels=["short (<90)", "medium (90–180)", "long (>180)"])
+    rel_rows = []
+    for bucket, sub in pair_df.groupby("duration_bucket", observed=True):
+        fit_abs = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
+        fit_rel = _ols_summary(sub["X_prev_rel"], sub["Y_abnormal_rel"])
+        rel_rows.append({"duration_bucket": bucket, "metric": "absolute", **fit_abs})
+        rel_rows.append({"duration_bucket": bucket, "metric": "relative", **fit_rel})
+    rel_df = pd.DataFrame(rel_rows)
+    _save_csv(rel_df, tbldir / "agenda_task6_relative_vs_absolute_ols.csv")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    for bucket, sub in pair_df.groupby("duration_bucket", observed=True):
+        xs, ys = _lowess(sub["X_prev_overrun"], sub["Y_abnormal_booking"], frac=0.5)
+        axes[0].plot(xs, ys, label=str(bucket))
+        xs_r, ys_r = _lowess(sub["X_prev_rel"], sub["Y_abnormal_rel"], frac=0.5)
+        axes[1].plot(xs_r, ys_r, label=str(bucket))
+    axes[0].axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    axes[0].axvline(0, color="gray", linestyle="--", linewidth=0.8)
+    axes[0].set_title("LOWESS in absolute minutes")
+    axes[0].set_xlabel("X_prev_overrun")
+    axes[0].set_ylabel("Y_abnormal_booking")
+    axes[1].axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    axes[1].axvline(0, color="gray", linestyle="--", linewidth=0.8)
+    axes[1].set_title("LOWESS in relative terms")
+    axes[1].set_xlabel("X_prev_rel")
+    axes[1].set_ylabel("Y_abnormal_rel")
+    for ax in axes:
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(figdir / "agenda_task6_relative_vs_absolute_lowess.png", dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {figdir / 'agenda_task6_relative_vs_absolute_lowess.png'}")
+
+    # Task 7: treatable subpopulation
+    _section("TASK 7 — TREATABLE SUBPOPULATION")
+    surgeon_gap = surgeon_q.copy()
+    surgeon_gap["needed_downward_correction"] = surgeon_gap["mean_booking_error"].clip(lower=0.0)
+    surgeon_gap["misalignment_vs_hospital"] = surgeon_gap["q_hat"] - hospital_q
+    scenarios = [
+        Scenario("conservative_proxy", h_full=0.0, a=0.10, h_reject=15.0),
+        Scenario("literature_uniform", h_full=8.0, a=0.20, h_reject=30.0),
+        Scenario("q_profiled_proxy", h_full=8.0, a=0.20, h_reject=45.0),
+    ]
+    sc_rows = []
+    for _, row in surgeon_gap.iterrows():
+        qhat = row["q_hat"]
+        need = row["needed_downward_correction"]
+        for sc in scenarios:
+            if sc.name == "q_profiled_proxy" and np.isfinite(qhat):
+                h_reject = max(5.0, sc.h_reject * max(1e-6, 1 - qhat))
+                h_full = sc.h_full
+                a = sc.a
+            else:
+                h_reject = sc.h_reject
+                h_full = sc.h_full
+                a = sc.a
+            rec = max_downward_rec
+            max_post = _piecewise_new_downward_capacity(rec, h_full=h_full, a=a, h_reject=h_reject)
+            frac = min(max_post / need, 1.0) if need > 0 else np.nan
+            sc_rows.append({
+                "Surgeon_Code": row["Surgeon_Code"],
+                "scenario": sc.name,
+                "q_hat": qhat,
+                "surgeon_cases": row["surgeon_cases"],
+                "needed_downward_correction": need,
+                "max_achievable_downward": max_post,
+                "fraction_achievable": frac,
+                "misalignment_vs_hospital": row["misalignment_vs_hospital"],
+            })
+    sc_df = pd.DataFrame(sc_rows)
+    _save_csv(sc_df, tbldir / "agenda_task7_treatable_subpopulation.csv")
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4), sharey=True)
+    for ax, sc in zip(axes, scenarios):
+        sub = sc_df[sc_df["scenario"] == sc.name]
+        ax.scatter(sub["q_hat"], sub["fraction_achievable"], s=np.clip(sub["surgeon_cases"], 20, 300), alpha=0.6)
+        ax.axhline(0.40, color="red", linestyle="--", linewidth=0.8)
+        ax.axvline(hospital_q, color="gray", linestyle="--", linewidth=0.8)
+        ax.set_title(sc.name)
+        ax.set_xlabel("q_hat")
+    axes[0].set_ylabel("Fraction of needed correction achievable")
+    fig.tight_layout()
+    fig.savefig(figdir / "agenda_task7_treatable_subpopulation.png", dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {figdir / 'agenda_task7_treatable_subpopulation.png'}")
+
+    # Task 8: within-group booking signal value
+    _section("TASK 8 — WITHIN-GROUP BOOKING SIGNAL VALUE")
+    print("  This task measures how much within-(surgeon × procedure) booking")
+    print("  variation reflects genuine case-level complexity differences.")
+    print("  A positive slope means that, within the same surgeon doing the same")
+    print("  procedure, longer bookings are associated with longer realized")
+    print("  durations. That is evidence of informational content in the booking.")
+    print("")
+    print("  Important caution: this is not a causal Parkinson's-Law test.")
+    print("  The same positive slope can arise because surgeons observe patient")
+    print("  complexity and adjust bookings accordingly. Separating a causal")
+    print("  'booking changes duration' channel from an informational channel")
+    print("  would require exogenous variation in bookings, which this dataset")
+    print("  does not provide.")
+    group_counts = df.groupby(["Surgeon_Code", "Main_Procedure_Id"]).size().rename("n_cases")
+    eligible_groups = group_counts[group_counts >= 3].index
+    if len(eligible_groups) == 0:
+        print("  No repeated surgeon × procedure groups with ≥3 cases.")
+    else:
+        temp = df.set_index(["Surgeon_Code", "Main_Procedure_Id"]).loc[eligible_groups].reset_index().copy()
+        temp["booking_c"] = temp["Booked Time (Minutes)"] - temp.groupby(["Surgeon_Code", "Main_Procedure_Id"])["Booked Time (Minutes)"].transform("mean")
+        temp["realized_c"] = temp["Realized_Duration_Min"] - temp.groupby(["Surgeon_Code", "Main_Procedure_Id"])["Realized_Duration_Min"].transform("mean")
+        fit_signal = _ols_summary(temp["booking_c"], temp["realized_c"])
+        _save_csv(pd.DataFrame([fit_signal]), tbldir / "agenda_task8_within_group_booking_signal.csv")
+        print(
+            f"  Within (surgeon × procedure) centered slope of realized on booking: {fit_signal['slope']:.4f} "
+            f"(se={fit_signal['slope_se']:.4f}, N={fit_signal['n']:,})"
+        )
+        print(f"  R² (within-group): {fit_signal['r2']:.4f}")
+        if np.isfinite(fit_signal["slope"]):
+            print("")
+            print("  Interpretation:")
+            print("  A 10-minute within-group booking increase is associated with")
+            print(f"  roughly {10 * fit_signal['slope']:.1f} additional realized minutes on average.")
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        sample = temp.sample(min(3000, len(temp)), random_state=42) if len(temp) > 3000 else temp
+        ax.scatter(sample["booking_c"], sample["realized_c"], alpha=0.15, s=8)
+        xs, ys = _lowess(temp["booking_c"], temp["realized_c"], frac=0.5)
+        ax.plot(xs, ys, linewidth=2)
+        ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax.axvline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax.set_title("Within surgeon×procedure: booking vs realized")
+        ax.set_xlabel("Centered booking")
+        ax.set_ylabel("Centered realized")
+        fig.tight_layout()
+        fig.savefig(figdir / "agenda_task8_within_group_booking_signal.png", dpi=150)
+        plt.close(fig)
+        print(f"  → Saved: {figdir / 'agenda_task8_within_group_booking_signal.png'}")
+
 # ── Summary ────────────────────────────────────────────────────────────────
 def generate_summary(df, df_raw):
     section("SUMMARY — KEY NUMBERS")
@@ -4930,6 +6186,7 @@ def main():
         analyze_surgeon_week_patterns(df)
         analyze_prediction_headroom(df)
         block_load_data = analyze_block_load_decomposition(df, block_data)
+        run_agenda_diagnostics(df, FIGDIR, TBLDIR)
         generate_summary(df, df_raw)
 
         print(f"\n{SEPARATOR}")
