@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, List, Sequence, Tuple
 
@@ -26,6 +26,18 @@ class SOS2CaseData:
 
 
 @dataclass
+class DiscreteDisplayCaseData:
+    case_index: int
+    profile_id: int
+    booking: float
+    L_bound: float
+    U_bound: float
+    grid_values: np.ndarray
+    delta_rec_lb: np.ndarray
+    delta_rec_ub: np.ndarray
+
+
+@dataclass
 class WeekRecommendationData:
     week_index: int
     n_cases: int
@@ -38,6 +50,7 @@ class WeekRecommendationData:
     sos2_data: List[SOS2CaseData]
     case_eligible_blocks: Dict[int, List[BlockId]]
     calendar: BlockCalendar
+    discrete_display_data: List[DiscreteDisplayCaseData] = field(default_factory=list)
 
 
 class RecommendationModel:
@@ -57,6 +70,8 @@ class RecommendationModel:
         self._feature_names: List[str] = []
         self._service_levels: List[str] = []
         self._is_prepared = False
+        self._display_grid_step: float = 5.0
+        self._display_grid_residue: float = 0.0
 
     @property
     def feature_dim(self) -> int:
@@ -72,6 +87,12 @@ class RecommendationModel:
         else:
             self._service_levels = []
 
+        if Col.BOOKED_MINUTES in df_train.columns:
+            bookings = pd.to_numeric(df_train[Col.BOOKED_MINUTES], errors="coerce").dropna().to_numpy(dtype=float)
+            if bookings.size > 0:
+                residues = np.mod(bookings, self._display_grid_step)
+                self._display_grid_residue = self._normalize_residue(float(np.median(residues)))
+
         train_cases = self._df_to_cases(df_train)
         _ = self.build_features(train_cases)
         self._is_prepared = True
@@ -80,6 +101,10 @@ class RecommendationModel:
     def prepare_instance(self, instance: WeeklyInstance) -> WeekRecommendationData:
         if not self._is_prepared:
             self._service_levels = sorted({c.service for c in instance.cases})
+            bookings = np.array([c.booked_duration_min for c in instance.cases], dtype=float)
+            if bookings.size > 0:
+                residues = np.mod(bookings, self._display_grid_step)
+                self._display_grid_residue = self._normalize_residue(float(np.median(residues)))
             _ = self.build_features(instance.cases)
             self._is_prepared = True
 
@@ -101,8 +126,10 @@ class RecommendationModel:
             sos2_data=[],
             case_eligible_blocks=instance.case_eligible_blocks,
             calendar=instance.calendar,
+            discrete_display_data=[],
         )
         week_data.sos2_data = self.build_sos2_data(week_data)
+        week_data.discrete_display_data = self.build_discrete_display_data(week_data)
         return week_data
 
     def build_features(self, cases: Sequence[CaseRecord]) -> np.ndarray:
@@ -171,7 +198,21 @@ class RecommendationModel:
             U=week_data.U_bounds,
         )
         delta_post = self.apply_response(delta_rec=delta_rec, surgeon_codes=week_data.surgeon_codes)
-        return week_data.bookings + delta_post
+        d_cont = week_data.bookings + delta_post
+
+        if len(week_data.discrete_display_data) != week_data.n_cases:
+            week_data.discrete_display_data = self.build_discrete_display_data(week_data)
+
+        d_disc = np.empty_like(d_cont, dtype=float)
+        for i, target in enumerate(d_cont):
+            case_data = week_data.discrete_display_data[i]
+            idx = self._nearest_grid_index(
+                grid_values=case_data.grid_values,
+                target=float(target),
+                booking=float(week_data.bookings[i]),
+            )
+            d_disc[i] = float(case_data.grid_values[idx])
+        return d_disc
 
     def build_sos2_data(self, week_data: WeekRecommendationData) -> List[SOS2CaseData]:
         if self._estimation.response_profiler is None:
@@ -200,6 +241,71 @@ class RecommendationModel:
             )
         return out
 
+    def build_discrete_display_data(self, week_data: WeekRecommendationData) -> List[DiscreteDisplayCaseData]:
+        out: List[DiscreteDisplayCaseData] = []
+        for i in range(week_data.n_cases):
+            surgeon = week_data.surgeon_codes[i]
+            profile = self._get_profile(surgeon)
+            pid = int(getattr(profile, "profile_id", 0))
+            booking = float(week_data.bookings[i])
+            L_bound = float(week_data.L_bounds[i])
+            U_bound = float(week_data.U_bounds[i])
+            global_lb = L_bound - booking
+            global_ub = U_bound - booking
+
+            grid_values = self._make_display_grid(
+                booking=booking,
+                L_bound=L_bound,
+                U_bound=U_bound,
+            )
+
+            feasible_grid: List[float] = []
+            pre_lb: List[float] = []
+            pre_ub: List[float] = []
+            for g_idx, g_val in enumerate(grid_values):
+                d_low, d_high = self._display_cell_bounds(
+                    grid_values=grid_values,
+                    grid_index=g_idx,
+                    L_bound=L_bound,
+                    U_bound=U_bound,
+                )
+                interval = self._delta_rec_interval_for_display_cell(
+                    booking=booking,
+                    d_low=d_low,
+                    d_high=d_high,
+                    a=float(getattr(profile, "a", 0.0)),
+                    h_plus=float(getattr(profile, "h_plus", 0.0)),
+                    h_minus=float(getattr(profile, "h_minus", 0.0)),
+                    global_lb=global_lb,
+                    global_ub=global_ub,
+                )
+                if interval is None:
+                    continue
+                lb, ub = interval
+                if ub + 1e-9 < lb:
+                    continue
+                feasible_grid.append(float(g_val))
+                pre_lb.append(float(lb))
+                pre_ub.append(float(ub))
+
+            if not feasible_grid:
+                feasible_grid = [booking]
+                pre_lb = [global_lb]
+                pre_ub = [global_ub]
+
+            out.append(
+                DiscreteDisplayCaseData(
+                    case_index=i,
+                    profile_id=pid,
+                    booking=booking,
+                    L_bound=L_bound,
+                    U_bound=U_bound,
+                    grid_values=np.asarray(feasible_grid, dtype=float),
+                    delta_rec_lb=np.asarray(pre_lb, dtype=float),
+                    delta_rec_ub=np.asarray(pre_ub, dtype=float),
+                )
+            )
+        return out
 
     def predict_at_quantile(self, week_data: WeekRecommendationData, q: float) -> np.ndarray:
         case_df = self._cases_to_quantile_df(self._week_cases_from_data(week_data))
@@ -213,6 +319,85 @@ class RecommendationModel:
         if self._estimation.response_profiler is not None:
             return self._estimation.response_profiler.get_profile(surgeon_code)
         return self._estimation.response_estimator.get_params(surgeon_code)
+
+    def _normalize_residue(self, residue: float) -> float:
+        residue = float(np.mod(residue, self._display_grid_step))
+        if abs(residue - self._display_grid_step) <= 1e-8:
+            return 0.0
+        return residue
+
+    def _make_display_grid(self, booking: float, L_bound: float, U_bound: float) -> np.ndarray:
+        step = self._display_grid_step
+        residue = self._display_grid_residue
+        start = int(np.ceil((L_bound - residue) / step))
+        end = int(np.floor((U_bound - residue) / step))
+        if end < start:
+            return np.asarray([float(np.clip(booking, L_bound, U_bound))], dtype=float)
+
+        grid = residue + step * np.arange(start, end + 1, dtype=float)
+        if not np.any(np.isclose(grid, booking, atol=1e-8, rtol=0.0)):
+            grid = np.sort(np.unique(np.concatenate([grid, [float(booking)]])))
+        return np.asarray(grid, dtype=float)
+
+    def _display_cell_bounds(
+        self,
+        grid_values: np.ndarray,
+        grid_index: int,
+        L_bound: float,
+        U_bound: float,
+    ) -> Tuple[float, float]:
+        if grid_index == 0:
+            lower = float(L_bound)
+        else:
+            lower = 0.5 * (float(grid_values[grid_index - 1]) + float(grid_values[grid_index]))
+        if grid_index == len(grid_values) - 1:
+            upper = float(U_bound)
+        else:
+            upper = 0.5 * (float(grid_values[grid_index]) + float(grid_values[grid_index + 1]))
+        return lower, upper
+
+    def _delta_rec_interval_for_display_cell(
+        self,
+        booking: float,
+        d_low: float,
+        d_high: float,
+        a: float,
+        h_plus: float,
+        h_minus: float,
+        global_lb: float,
+        global_ub: float,
+        tol: float = 1e-8,
+    ) -> Tuple[float, float] | None:
+        if a <= tol:
+            if d_low - tol <= booking <= d_high + tol:
+                return global_lb, global_ub
+            return None
+
+        if d_high < booking - tol:
+            lb = (d_low - booking) / a - h_minus
+            ub = (d_high - booking) / a - h_minus
+        elif d_low > booking + tol:
+            lb = (d_low - booking) / a + h_plus
+            ub = (d_high - booking) / a + h_plus
+        else:
+            lb = -h_minus if d_low >= booking - tol else (d_low - booking) / a - h_minus
+            ub = h_plus if d_high <= booking + tol else (d_high - booking) / a + h_plus
+
+        lb = max(global_lb, lb)
+        ub = min(global_ub, ub)
+        if ub + tol < lb:
+            return None
+        return float(lb), float(ub)
+
+    def _nearest_grid_index(self, grid_values: np.ndarray, target: float, booking: float) -> int:
+        best_idx = 0
+        best_key = (float("inf"), float("inf"), float("inf"))
+        for idx, g in enumerate(np.asarray(grid_values, dtype=float)):
+            key = (abs(float(g) - target), abs(float(g) - booking), abs(float(g)))
+            if key < best_key:
+                best_key = key
+                best_idx = idx
+        return best_idx
 
     def _cases_to_quantile_df(self, cases: Sequence[CaseRecord]) -> pd.DataFrame:
         rows = []
@@ -228,7 +413,6 @@ class RecommendationModel:
                 }
             )
         return pd.DataFrame(rows)
-
 
     def _week_cases_from_data(self, week_data: WeekRecommendationData) -> List[CaseRecord]:
         cases: List[CaseRecord] = []
