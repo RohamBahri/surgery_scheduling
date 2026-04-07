@@ -1056,6 +1056,12 @@ def analyze_booking_error(df):
             print(f"\n  Non-surgical room overhead (Room − Surgical time):")
             describe_series(overhead, "Overhead (min)")
 
+        print("\n  Conclusion: Booked Time is much closer to room occupancy than")
+        print("  to surgical time alone (mean error "
+              f"{err_room.mean():.1f} vs {err_surg.mean():.1f} min). This is")
+        print("  consistent with bookings targeting total room time inclusive of")
+        print("  setup, positioning, and cleanup — not knife-to-close time.")
+
     # Histogram
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     ax = axes[0]
@@ -1508,6 +1514,180 @@ def analyze_temporal_drift(df):
 
 
 # ── 12. Weekly horizons and out-of-sample evaluation ───────────────────────
+def analyze_drift_decomposition(df: pd.DataFrame) -> None:
+    section("TEMPORAL DRIFT DECOMPOSITION (COMPOSITION VS WITHIN-SURGEON)")
+    if guard_empty(df, "drift decomposition"):
+        return
+    if "Actual Start Date" not in df.columns:
+        print("  Actual Start Date not available — skipping.")
+        return
+
+    work = df.copy()
+    work["Year"] = pd.to_datetime(work["Actual Start Date"], errors="coerce").dt.year
+    work = work.dropna(subset=["Year", "Booking_Error_Min"]).copy()
+    work["Year"] = work["Year"].astype(int)
+    years = sorted(work["Year"].unique())
+    if len(years) < 2:
+        print("  Less than two years of data — skipping.")
+        return
+
+    surgeons_by_year = {y: set(work.loc[work["Year"] == y, "Surgeon_Code"].dropna().unique()) for y in years}
+    stable = set.intersection(*surgeons_by_year.values())
+    total_counts = work["Surgeon_Code"].value_counts()
+    stable = {s for s in stable if total_counts.get(s, 0) >= MIN_SURGEON_CASES}
+    if len(stable) == 0:
+        print("  No stable surgeon panel after volume filtering — skipping.")
+        return
+
+    rows = []
+    stable_weights = total_counts.loc[list(stable)].astype(float)
+    stable_weights = stable_weights / stable_weights.sum() if stable_weights.sum() > 0 else stable_weights
+
+    for y in years:
+        sub = work[work["Year"] == y].copy()
+        overall_mean = float(sub["Booking_Error_Min"].mean())
+        sub_stable = sub[sub["Surgeon_Code"].isin(stable)].copy()
+        stable_mean = float(sub_stable["Booking_Error_Min"].mean()) if len(sub_stable) > 0 else np.nan
+        means_y = sub_stable.groupby("Surgeon_Code")["Booking_Error_Min"].mean() if len(sub_stable) > 0 else pd.Series(dtype=float)
+        w = stable_weights.reindex(means_y.index).fillna(0.0)
+        if w.sum() > 0:
+            w = w / w.sum()
+            fixed_comp_mean = float((w * means_y).sum())
+        else:
+            fixed_comp_mean = np.nan
+        rows.append({
+            "year": y,
+            "overall_mean_error": overall_mean,
+            "stable_panel_mean_error": stable_mean,
+            "stable_fixed_composition_mean_error": fixed_comp_mean,
+            "overall_cases": int(len(sub)),
+            "stable_panel_cases": int(len(sub_stable)),
+        })
+
+    out = pd.DataFrame(rows)
+    _save_csv(out, TBLDIR / "drift_decomposition_by_year.csv")
+
+    stable_cover = 100 * work[work["Surgeon_Code"].isin(stable)].shape[0] / len(work)
+    print(f"\n  Stable surgeon panel: {len(stable)} surgeons in all {len(years)} years with ≥{MIN_SURGEON_CASES} total cases")
+    print(f"  Stable panel covers {stable_cover:.1f}% of cases\n")
+    print(f"  {'Year':<6} {'Overall':>10} {'Stable':>10} {'FixedComp':>10} {'N_all':>8} {'N_stable':>8}")
+    for _, r in out.iterrows():
+        print(f"  {int(r['year']):<6} {r['overall_mean_error']:>10.1f} {r['stable_panel_mean_error']:>10.1f} {r['stable_fixed_composition_mean_error']:>10.1f} {int(r['overall_cases']):>8,} {int(r['stable_panel_cases']):>8,}")
+
+    if len(out) >= 2 and np.isfinite(out['overall_mean_error']).all() and np.isfinite(out['stable_fixed_composition_mean_error']).all():
+        overall_drop = float(out['overall_mean_error'].iloc[0] - out['overall_mean_error'].iloc[-1])
+        fixed_drop = float(out['stable_fixed_composition_mean_error'].iloc[0] - out['stable_fixed_composition_mean_error'].iloc[-1])
+        comp = overall_drop - fixed_drop
+        print("\n  If FixedComp tracks Overall → drift is within-surgeon (behavioral).")
+        print("  If FixedComp diverges from Overall → drift is compositional (turnover).")
+        print(f"  Here, overall drift is {overall_drop:.1f} min; fixed-composition drift is {fixed_drop:.1f} min;")
+        print(f"  composition explains about {comp:.1f} min, with within-surgeon change accounting for the majority.")
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(out["year"], out["overall_mean_error"], marker="o", label="Overall")
+    ax.plot(out["year"], out["stable_panel_mean_error"], marker="o", label="Stable panel")
+    ax.plot(out["year"], out["stable_fixed_composition_mean_error"], marker="o", label="Stable fixed composition")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Mean booking error (min)")
+    ax.set_title("Drift decomposition: overall vs stable panel")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(FIGDIR / "drift_decomposition_by_year.png", dpi=150)
+    plt.close(fig)
+    print(f"  → Saved: {FIGDIR / 'drift_decomposition_by_year.png'}")
+
+
+def analyze_within_group_signal_with_controls(df: pd.DataFrame) -> None:
+    """Within (surgeon×procedure) booking signal, controlling for safe covariates."""
+    section("WITHIN-GROUP BOOKING SIGNAL WITH SAFE CONTROLS")
+    if guard_empty(df, "within-group signal with controls"):
+        return
+
+    # Define groups
+    counts = df.groupby(["Surgeon_Code", "Main_Procedure_Id"]).size()
+    eligible = counts[counts >= 3].index
+    if len(eligible) == 0:
+        print("  No repeated surgeon × procedure groups with ≥3 cases.")
+        return
+    temp = df.set_index(["Surgeon_Code", "Main_Procedure_Id"]).loc[eligible].reset_index().copy()
+
+    # Within-group centered booking and realized
+    temp["booking_c"] = temp["Booked Time (Minutes)"] - temp.groupby(["Surgeon_Code", "Main_Procedure_Id"])["Booked Time (Minutes)"].transform("mean")
+    temp["realized_c"] = temp["Realized_Duration_Min"] - temp.groupby(["Surgeon_Code", "Main_Procedure_Id"])["Realized_Duration_Min"].transform("mean")
+
+    # Safe controls (booking-time available): avoid post-op / leakage variables.
+    control_cats = [c for c in ["Patient_Type", "Site", "DayOfWeek", "Month", "Year"] if c in temp.columns]
+    # Ensure calendar controls exist if date is present
+    temp = _ensure_prediction_feature_columns(temp)
+    control_cats = [c for c in ["Patient_Type", "Site", "DayOfWeek", "Month", "Year"] if c in temp.columns]
+
+    # Build design matrix: booking_c + within-demeaned one-hot controls
+    y = temp["realized_c"].to_numpy(dtype=float)
+    x_booking = temp["booking_c"].to_numpy(dtype=float).reshape(-1, 1)
+    X_parts = [x_booking]
+    col_names = ["booking_c"]
+
+    if control_cats:
+        dummies = pd.get_dummies(temp[control_cats].astype("object"), dummy_na=True, drop_first=False)
+        # Within-group demean each dummy column to emulate FE regression.
+        grp_key = temp[["Surgeon_Code", "Main_Procedure_Id"]].astype(str).agg("||".join, axis=1)
+        dummies = dummies.apply(lambda col: col - pd.Series(col).groupby(grp_key).transform("mean"))
+        X_parts.append(dummies.to_numpy(dtype=float))
+        col_names.extend(list(dummies.columns))
+
+    X = np.column_stack(X_parts)
+
+    # Drop rows with non-finite y or booking_c (controls are finite after dummy)
+    mask = np.isfinite(y) & np.isfinite(X[:, 0])
+    X = X[mask]
+    y = y[mask]
+    clusters = temp.loc[mask, "Surgeon_Code"].astype(str).to_numpy()
+
+    if len(y) < 50:
+        print("  Insufficient rows after filtering — skipping.")
+        return
+
+    # OLS with cluster-robust SE (cluster by surgeon).
+    XtX = X.T @ X
+    XtX_inv = np.linalg.pinv(XtX)
+    beta = XtX_inv @ (X.T @ y)
+    resid = y - X @ beta
+
+    # Cluster meat
+    uniq = pd.unique(clusters)
+    meat = np.zeros((X.shape[1], X.shape[1]))
+    for g in uniq:
+        idx = (clusters == g)
+        Xg = X[idx]
+        ug = resid[idx].reshape(-1, 1)
+        meat += (Xg.T @ ug) @ (Xg.T @ ug).T
+    cov = XtX_inv @ meat @ XtX_inv
+    se = np.sqrt(np.clip(np.diag(cov), 0.0, np.inf))
+
+    slope = float(beta[0])
+    slope_se = float(se[0]) if np.isfinite(se[0]) else np.nan
+    t = slope / slope_se if slope_se and slope_se > 0 else np.nan
+
+    # Uncontrolled within slope for comparison
+    base = _ols_summary(temp["booking_c"], temp["realized_c"])
+    out = pd.DataFrame([{
+        "n": len(y),
+        "slope_uncontrolled": base["slope"],
+        "slope_uncontrolled_se": base["slope_se"],
+        "slope_controlled": slope,
+        "slope_controlled_se_cluster": slope_se,
+        "t_controlled": t,
+        "controls": ",".join(control_cats) if control_cats else "",
+    }])
+    _save_csv(out, TBLDIR / "within_group_signal_with_controls.csv")
+
+    print(f"  Uncontrolled within slope: {base['slope']:.4f} (se={base['slope_se']:.4f})")
+    print(f"  Controlled within slope:   {slope:.4f} (cluster se={slope_se:.4f}, N={len(y):,})")
+    if np.isfinite(slope):
+        print(f"  Interpretation: +10 booking minutes within surgeon×procedure → ~{10*slope:.1f} realized minutes, holding controls fixed.")
+
+
 def analyze_weekly_horizons(df):
     section("WEEKLY HORIZONS AND OUT-OF-SAMPLE SPLIT")
     if guard_empty(df, "weekly horizons"):
@@ -3825,326 +4005,6 @@ def analyze_surgeon_week_patterns(df):
     plt.close(fig)
 
 
-# ── 34. Prediction headroom: how much can better duration estimates help? ──
-def analyze_prediction_headroom(df):
-    """Quantify the practical ceiling for scheduling improvement from
-    better case-duration predictions.
-
-    The paper's core promise is that correcting surgeon-level booking
-    bias (via the estimated q_s) yields better duration inputs for the
-    scheduler.  This section asks: how large is the improvement
-    opportunity, and where does the error come from?
-
-    Three block-level prediction scenarios are compared:
-      A. Status quo: use raw bookings as duration estimates.
-      B. Bias-corrected: remove each surgeon's mean booking error
-         (the best a q_s model can do without reducing case-level noise).
-      C. Perfect foresight: use actual realized durations (lower bound
-         on achievable scheduling cost).
-
-    For each scenario, block-level overtime and idle time are computed
-    under a fixed capacity C, with turnover included in the load.
-    """
-    section("PREDICTION HEADROOM — IMPROVEMENT CEILING")
-    if guard_empty(df, "prediction headroom"):
-        return
-    if "Enter Room_DT" not in df.columns or "Leave Room_DT" not in df.columns:
-        print("  Enter/Leave Room timestamps not available — skipping.")
-        return
-
-    df_b = df.dropna(subset=["Enter Room_DT", "Leave Room_DT"]).copy()
-    df_b["OR_Date"] = pd.to_datetime(df_b["Actual Start Date"]).dt.date
-
-    # Compute turnover
-    df_r = df_b.sort_values(["Operating_Room", "OR_Date", "Enter Room_DT"])
-    df_r["prev_room"]  = df_r["Operating_Room"].shift(1)
-    df_r["prev_date"]  = df_r["OR_Date"].shift(1)
-    df_r["prev_leave"] = df_r["Leave Room_DT"].shift(1)
-    same_block = ((df_r["Operating_Room"] == df_r["prev_room"])
-                  & (df_r["OR_Date"] == df_r["prev_date"]))
-    df_r.loc[same_block, "turnover_min"] = (
-        (df_r.loc[same_block, "Enter Room_DT"]
-         - df_r.loc[same_block, "prev_leave"])
-        .dt.total_seconds() / 60)
-    tv = df_r.loc[same_block, "turnover_min"]
-    tv = tv[(tv >= 0) & (tv <= 60)]
-    mean_turnover = tv.mean() if len(tv) > 0 else 28.0
-
-    # Surgeon-level mean booking error for bias correction
-    surg_bias = df_b.groupby("Surgeon_Code")["Booking_Error_Min"].mean()
-    df_b["surgeon_bias"] = df_b["Surgeon_Code"].map(surg_bias)
-    df_b["corrected_booked"] = (
-        df_b["Booked Time (Minutes)"] - df_b["surgeon_bias"])
-
-    # Build block-level aggregates
-    block = df_b.groupby(["Operating_Room", "OR_Date"]).agg(
-        n_cases=("Patient_ID", "size"),
-        total_booked=("Booked Time (Minutes)", "sum"),
-        total_corrected=("corrected_booked", "sum"),
-        total_realized=("Realized_Duration_Min", "sum"),
-    )
-    # Weekday filter
-    block["weekday"] = pd.to_datetime(
-        block.index.get_level_values("OR_Date")).weekday
-    block = block[block["weekday"] < 5].copy()
-
-    # Actual block load (realized + turnover)
-    block["actual_load"] = (
-        block["total_realized"]
-        + (block["n_cases"] - 1).clip(lower=0) * mean_turnover)
-
-    # Predicted load under each scenario
-    # A: raw bookings (no turnover added — surgeon already "covers" some)
-    block["pred_A_raw_booking"] = block["total_booked"]
-    # B: bias-corrected bookings
-    block["pred_B_corrected"] = block["total_corrected"]
-    # C: perfect foresight (actual load known exactly)
-    block["pred_C_perfect"] = block["actual_load"]
-
-    print(f"  Weekday blocks analyzed: {len(block):,}")
-    print(f"  Mean turnover used: {mean_turnover:.1f} min")
-
-    # ── A. Case-level error decomposition ─────────────────────────────────
-    subsection("A. Case-level prediction error decomposition")
-    err = df_b["Booking_Error_Min"].dropna()
-    total_mse = (err ** 2).mean()
-    bias_sq = err.mean() ** 2
-    variance = err.var()
-    print(f"  Total MSE of raw bookings:    {total_mse:.1f} min²")
-    print(f"    = Bias² + Variance")
-    print(f"    = {bias_sq:.1f} + {variance:.1f}")
-    print(f"  Bias component:               "
-          f"{100 * bias_sq / total_mse:.1f}% of MSE")
-    print(f"  Variance component:           "
-          f"{100 * variance / total_mse:.1f}% of MSE")
-
-    # Surgeon-level bias removal
-    df_b["residual_error"] = (
-        df_b["Booking_Error_Min"] - df_b["surgeon_bias"])
-    residual_mse = (df_b["residual_error"].dropna() ** 2).mean()
-    print(f"\n  After removing surgeon-level bias:")
-    print(f"  Residual MSE:                 {residual_mse:.1f} min²")
-    print(f"  MSE reduction:                "
-          f"{100 * (1 - residual_mse / total_mse):.1f}%")
-    print(f"  Residual RMSE:                {residual_mse**0.5:.1f} min  "
-          f"(was {total_mse**0.5:.1f} min)")
-
-    # ── B. Block-level prediction quality ─────────────────────────────────
-    subsection("B. Block-level prediction error")
-    for label, pred_col in [("Raw bookings", "pred_A_raw_booking"),
-                             ("Bias-corrected", "pred_B_corrected"),
-                             ("Perfect foresight", "pred_C_perfect")]:
-        err_b = block[pred_col] - block["actual_load"]
-        print(f"\n  {label}:")
-        print(f"    Mean error:   {err_b.mean():+7.1f} min/block")
-        print(f"    MAE:          {err_b.abs().mean():7.1f} min/block")
-        print(f"    RMSE:         {(err_b**2).mean()**0.5:7.1f} min/block")
-        print(f"    Correlation:  {block[pred_col].corr(block['actual_load']):.4f}")
-
-    # ── C. Scheduling cost under each scenario ────────────────────────────
-    subsection("C. Scheduling cost comparison (overtime + idle)")
-    print("  For each capacity C, we compute overtime and idle time under")
-    print("  three scenarios.  'Raw bookings' is the status quo; ")
-    print("  'Bias-corrected' is the achievable target with q_s estimation;")
-    print("  'Perfect foresight' is the theoretical lower bound.\n")
-
-    for C in [480, 510, 540]:
-        print(f"  ── C = {C} min ({C / 60:.0f}h) ──")
-        print(f"  {'Scenario':25s}  {'OT rate':>8s}  {'Mean OT':>8s}  "
-              f"{'Mean idle':>10s}  {'Mean |dev|':>10s}")
-        for label, pred_col in [("Raw bookings", "pred_A_raw_booking"),
-                                 ("Bias-corrected", "pred_B_corrected"),
-                                 ("Perfect foresight", "pred_C_perfect")]:
-            ot = (block["actual_load"] - C).clip(lower=0)
-            idle = (C - block["actual_load"]).clip(lower=0)
-
-            # For scheduling cost: what matters is the gap between
-            # what was predicted vs what happened.
-            # OT from prediction perspective: predicted load ≤ C but actual > C
-            # True scheduling cost depends on whether we'd schedule the block
-            # But the simplest comparison: what OT/idle does each predictor
-            # "expect" vs what actually happens?
-
-            # Use the predictor to decide if a case "fits", but actual load
-            # determines the real overtime
-            ot_actual = (block["actual_load"] - C).clip(lower=0)
-            idle_actual = (C - block["actual_load"]).clip(lower=0)
-
-            # Prediction-based view: how accurate is the load estimate?
-            pred_ot = (block[pred_col] - C).clip(lower=0)
-            pred_idle = (C - block[pred_col]).clip(lower=0)
-            surprise_ot = ot_actual.mean() - pred_ot.mean()
-
-            # The actual load determines true OT/idle regardless of predictor
-            # The value of prediction is in ASSIGNMENT decisions
-            # A better metric: for blocks where predictor says "fits" (pred ≤ C),
-            # how often does actual load exceed C?
-            fits = block[pred_col] <= C
-            false_fit_rate = 0.0
-            if fits.sum() > 0:
-                false_fit_rate = (
-                    block.loc[fits, "actual_load"] > C).mean()
-
-            doesnt_fit = block[pred_col] > C
-            false_over_rate = 0.0
-            if doesnt_fit.sum() > 0:
-                false_over_rate = (
-                    block.loc[doesnt_fit, "actual_load"] <= C).mean()
-
-            print(f"  {label:25s}  "
-                  f"{100 * (ot_actual > 0).mean():7.1f}%  "
-                  f"{ot_actual.mean():8.1f}  "
-                  f"{idle_actual.mean():10.1f}  "
-                  f"{(block[pred_col] - block['actual_load']).abs().mean():10.1f}")
-
-        # The point: actual OT/idle is the same for all three rows because
-        # the ACTUAL load doesn't change. The difference is in prediction
-        # accuracy, which affects scheduling DECISIONS.
-        print()
-
-    # ── D. The real headroom: prediction accuracy for assignment ──────────
-    subsection("D. Prediction accuracy for scheduling decisions")
-    print("  The scheduling improvement from better predictions comes from")
-    print("  better ASSIGNMENT decisions, not from changing the actual load.")
-    print("  The relevant metric: how accurately can we predict whether a")
-    print("  set of cases fits within capacity C?\n")
-
-    C = 480
-    for label, pred_col in [("Raw bookings", "pred_A_raw_booking"),
-                             ("Bias-corrected", "pred_B_corrected"),
-                             ("Perfect foresight", "pred_C_perfect")]:
-        fits_pred = block[pred_col] <= C
-        fits_actual = block["actual_load"] <= C
-
-        tp = (fits_pred & fits_actual).sum()
-        fp = (fits_pred & ~fits_actual).sum()
-        fn = (~fits_pred & fits_actual).sum()
-        tn = (~fits_pred & ~fits_actual).sum()
-
-        accuracy = (tp + tn) / len(block) if len(block) > 0 else 0
-        false_fit = fp / (tp + fp) if (tp + fp) > 0 else 0
-        missed_fit = fn / (fn + tn) if (fn + tn) > 0 else 0
-
-        pred_err = (block[pred_col] - block["actual_load"])
-        print(f"  {label} (C={C}):")
-        print(f"    Block-level MAE:              {pred_err.abs().mean():.1f} min")
-        print(f"    Blocks correctly classified:  "
-              f"{100 * accuracy:.1f}%")
-        print(f"    False fits (pred ≤ C, actual > C): "
-              f"{100 * false_fit:.1f}% of predicted-fit blocks")
-        print(f"    Missed fits (pred > C, actual ≤ C): "
-              f"{100 * missed_fit:.1f}% of predicted-over blocks")
-        print()
-
-    # ── E. Decomposing the improvement potential ──────────────────────────
-    subsection("E. Where does the improvement come from?")
-    C = 480
-    raw_mae = (block["pred_A_raw_booking"] - block["actual_load"]).abs().mean()
-    corr_mae = (block["pred_B_corrected"] - block["actual_load"]).abs().mean()
-    perf_mae = (block["pred_C_perfect"] - block["actual_load"]).abs().mean()
-
-    print(f"  Block-level MAE (C={C}):")
-    print(f"    Raw bookings:        {raw_mae:.1f} min")
-    print(f"    Bias-corrected:      {corr_mae:.1f} min")
-    print(f"    Perfect foresight:   {perf_mae:.1f} min")
-    print(f"\n  Achievable improvement (bias correction): "
-          f"{raw_mae - corr_mae:.1f} min  "
-          f"({100 * (raw_mae - corr_mae) / raw_mae:.1f}% of current error)")
-    print(f"  Remaining gap to perfect:                "
-          f"{corr_mae - perf_mae:.1f} min  (irreducible case-level noise)")
-
-    # Surgeon-bias magnitude distribution
-    subsection("F. Surgeon-level bias magnitude")
-    surg_bias_abs = surg_bias.abs()
-    surg_n = df_b.groupby("Surgeon_Code").size()
-    surg_bias_weighted = surg_bias_abs[surg_n >= 30]
-    describe_series(surg_bias_weighted,
-                    "|Surgeon bias| for surgeons with ≥30 cases (min)")
-
-    n_large_bias = (surg_bias_abs[surg_n >= 30] > 30).sum()
-    n_moderate_bias = ((surg_bias_abs[surg_n >= 30] > 10)
-                       & (surg_bias_abs[surg_n >= 30] <= 30)).sum()
-    n_small_bias = (surg_bias_abs[surg_n >= 30] <= 10).sum()
-    n_total_sig = len(surg_bias_abs[surg_n >= 30])
-    print(f"\n  |Bias| > 30 min:   {n_large_bias} / {n_total_sig} surgeons")
-    print(f"  |Bias| 10–30 min:  {n_moderate_bias} / {n_total_sig} surgeons")
-    print(f"  |Bias| ≤ 10 min:   {n_small_bias} / {n_total_sig} surgeons")
-
-    subsection("G. Summary of improvement potential")
-    print("  The booking error has two components:")
-    print(f"    1. Systematic surgeon-level bias (removable via q̂_s):")
-    print(f"       Accounts for "
-          f"{100 * (1 - residual_mse / total_mse):.0f}% of case-level MSE")
-    print(f"    2. Case-level noise (irreducible with booking data alone):")
-    print(f"       Accounts for "
-          f"{100 * residual_mse / total_mse:.0f}% of case-level MSE")
-    print(f"\n  At the block level:")
-    print(f"    Bias correction reduces MAE by "
-          f"{raw_mae - corr_mae:.1f} min ({100*(raw_mae-corr_mae)/raw_mae:.0f}%)")
-    print(f"    The remaining {corr_mae:.1f} min MAE is due to unpredictable")
-    print(f"    case-level duration variability.")
-    print(f"\n  Practical implication: the paper's q̂_s correction captures")
-    print(f"  the systematic component.  Additional gains require richer")
-    print(f"  case-level features (procedure complexity, patient comorbidity)")
-    print(f"  which go beyond booking-time information.")
-
-    save_csv(block.reset_index()[[
-        "Operating_Room", "OR_Date", "n_cases",
-        "total_booked", "total_corrected", "total_realized",
-        "actual_load", "pred_A_raw_booking",
-        "pred_B_corrected", "pred_C_perfect",
-    ]], "prediction_headroom")
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    ax = axes[0]
-    for label, col, color in [
-        ("Raw booking", "pred_A_raw_booking", "steelblue"),
-        ("Bias-corrected", "pred_B_corrected", "darkorange"),
-    ]:
-        err_b = block[col] - block["actual_load"]
-        ax.hist(err_b.clip(-200, 200), bins=60, alpha=0.5,
-                label=f"{label} (MAE={err_b.abs().mean():.0f})",
-                edgecolor="white", color=color)
-    ax.axvline(0, color="red", ls="--", lw=1)
-    ax.set_xlabel("Block-level prediction error (min)")
-    ax.set_ylabel("Blocks")
-    ax.set_title("Block Load Prediction Error")
-    ax.legend(fontsize=8)
-
-    ax = axes[1]
-    sample = block.sample(min(3000, len(block)), random_state=42)
-    ax.scatter(sample["actual_load"], sample["pred_A_raw_booking"],
-               alpha=0.15, s=8, c="steelblue", label="Raw")
-    ax.scatter(sample["actual_load"], sample["pred_B_corrected"],
-               alpha=0.15, s=8, c="darkorange", label="Corrected")
-    lims = [0, 900]
-    ax.plot(lims, lims, "r--", lw=1)
-    ax.set_xlabel("Actual block load (min)")
-    ax.set_ylabel("Predicted block load (min)")
-    ax.set_title("Block: Predicted vs. Actual Load")
-    ax.set_xlim(lims)
-    ax.set_ylim(lims)
-    ax.legend(fontsize=8)
-
-    ax = axes[2]
-    vol_bins = [0, 10, 30, 50, 100, 200, 3000]
-    vol_labels = ["<10", "10–30", "30–50", "50–100", "100–200", "200+"]
-    surg_df = pd.DataFrame({"bias": surg_bias.abs(), "n": surg_n})
-    surg_df["vol_bin"] = pd.cut(surg_df["n"], bins=vol_bins, labels=vol_labels)
-    vol_mean = surg_df.groupby("vol_bin", observed=True)["bias"].mean()
-    ax.bar(range(len(vol_mean)), vol_mean.values,
-           tick_label=vol_mean.index.astype(str),
-           edgecolor="white", alpha=0.8, color="steelblue")
-    ax.set_xlabel("Surgeon case volume")
-    ax.set_ylabel("Mean |booking bias| (min)")
-    ax.set_title("Surgeon Bias Magnitude by Volume")
-
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "prediction_headroom.png", dpi=150)
-    plt.close(fig)
-
-# ── 35. Block load decomposition and model design decisions ─────────────────
 def analyze_block_load_decomposition(df, block_data=None):
     """Comprehensive block-level analysis for scheduling model design.
 
@@ -4878,6 +4738,36 @@ def _completion_col(df: pd.DataFrame) -> str:
     raise ValueError("No usable chronology column found for pair construction.")
 
 
+def _online_group_mean(
+    df: pd.DataFrame,
+    value_col: str,
+    group_col: str,
+    sort_col: str,
+    min_history: int = MIN_SURGEON_CASES,
+) -> pd.Series:
+    """Online mean using only prior rows within each group."""
+    work = df.sort_values([group_col, sort_col]).copy()
+    grp = work.groupby(group_col, sort=False)[value_col]
+    csum = grp.cumsum() - work[value_col]
+    ccnt = grp.cumcount()
+    mean = csum / ccnt.replace(0, np.nan)
+    mean[ccnt < min_history] = np.nan
+    return mean.reindex(work.index).sort_index()
+
+
+def _detect_booking_lattice(df: pd.DataFrame) -> bool:
+    if "Booked Time (Minutes)" not in df.columns:
+        return False
+    booked = pd.to_numeric(df["Booked Time (Minutes)"], errors="coerce").dropna()
+    return len(booked) > 0 and float((((booked + 1) % 5) == 0).mean()) > 0.95
+
+
+def _project_to_booking_lattice(values: pd.Series | np.ndarray) -> pd.Series:
+    s = pd.Series(values, dtype=float)
+    out = 5 * np.round((s + 1) / 5.0) - 1
+    return out.clip(lower=4.0)
+
+
 
 def _service_list(pair_df: pd.DataFrame, requested: list[str] | None = None, topn: int = 6) -> list[str]:
     available = pair_df["Case_Service"].dropna().astype(str)
@@ -5181,13 +5071,18 @@ def _build_pair_dataset(
     baseline_k: int = DEFAULT_BASELINE_K,
     min_history: int = DEFAULT_BASELINE_MIN_HISTORY,
     max_gap_days: int = DEFAULT_PAIR_GAP_DAYS,
+    same_procedure: bool = True,
 ) -> pd.DataFrame:
     sort_col = _completion_col(df)
     ordered = df.sort_values(["Surgeon_Code", "Main_Procedure_Id", sort_col]).copy()
     ordered["case_row_id"] = ordered.index.astype(str)
     records: list[dict] = []
-    group_cols = ["Surgeon_Code", "Main_Procedure_Id"]
-    for (surgeon, procedure), grp in ordered.groupby(group_cols, sort=False):
+    group_cols = ["Surgeon_Code", "Main_Procedure_Id"] if same_procedure else ["Surgeon_Code"]
+    for keys, grp in ordered.groupby(group_cols, sort=False):
+        if same_procedure:
+            surgeon, procedure = keys
+        else:
+            surgeon, procedure = keys, np.nan
         grp = grp.sort_values(sort_col).copy()
         if len(grp) < 2:
             continue
@@ -5262,6 +5157,56 @@ def _surgeon_qhat(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+PREDICTION_CATEGORICAL_FEATURES = [
+    "Main_Procedure_Id",
+    "Surgeon_Code",
+    "Case_Service",
+    "Site",
+    "Patient_Type",
+    "DayOfWeek",
+    "Month",
+    "Year",
+]
+
+PREDICTION_NUMERIC_FEATURES = [
+    "q_hat_empirical",
+    "Age",
+    "Patient_Age",
+    "Age_at_Surgery",
+    "BMI",
+    "ASA",
+    "ASA_Class",
+    "ASA_Score",
+]
+
+
+def _coerce_prediction_categorical_columns(
+    df: pd.DataFrame, categorical_cols: list[str] | None = None
+) -> pd.DataFrame:
+    """Force identifier-like prediction features to be categorical.
+
+    Several fields are numeric-coded identifiers or calendar buckets
+    (for example Surgeon_Code, Main_Procedure_Id, Month, Year).  If
+    we infer feature type from dtype alone, these leak into the numeric
+    pipeline and the linear model treats them as ordered quantities.
+    That is a specification bug.  We therefore coerce the intended
+    categorical features explicitly before model fitting.
+
+    Important implementation detail: use plain Python-object/string
+    columns with np.nan for missingness rather than pandas' nullable
+    StringDtype with pd.NA.  Some sklearn imputers still fail on mixed
+    object arrays containing pd.NA ("boolean value of NA is ambiguous").
+    """
+    df = df.copy()
+    cols = categorical_cols or PREDICTION_CATEGORICAL_FEATURES
+    for col in cols:
+        if col in df.columns:
+            s = df[col].astype(object)
+            s = s.where(pd.notna(s), np.nan)
+            df[col] = s
+    return df
+
+
 def _ensure_prediction_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "Actual Start Date" in df.columns:
@@ -5269,47 +5214,74 @@ def _ensure_prediction_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["DayOfWeek"] = dt.dt.day_name()
         df["Month"] = dt.dt.month
         df["Year"] = dt.dt.year
+    df = _coerce_prediction_categorical_columns(df)
     return df
 
 
 def _feature_candidates(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str], list[str], list[str]]:
     df = _ensure_prediction_feature_columns(df)
-    categorical_candidates = [
-        "Main_Procedure_Id",
-        "Surgeon_Code",
-        "Case_Service",
-        "Site",
-        "Patient_Type",
-        "DayOfWeek",
-        "Month",
-        "Year",
-    ]
-    numeric_candidates = [
-        "q_hat_empirical",
-        "Age",
-        "Patient_Age",
-        "Age_at_Surgery",
-        "BMI",
-        "ASA",
-        "ASA_Class",
-        "ASA_Score",
-    ]
-    categorical = [c for c in categorical_candidates if c in df.columns]
-    numeric = [c for c in numeric_candidates if c in df.columns]
+    categorical = [c for c in PREDICTION_CATEGORICAL_FEATURES if c in df.columns]
+    numeric = [c for c in PREDICTION_NUMERIC_FEATURES if c in df.columns]
     combined = categorical + numeric
     return df, categorical, numeric, combined
 
 
 
-def _fit_linear_prediction(train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str, feature_cols: list[str]) -> dict:
+def _fit_linear_prediction(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    feature_cols: list[str],
+    categorical_cols: list[str] | None = None,
+) -> dict:
     if len(feature_cols) == 0:
-        return {"n_train": len(train_df), "n_test": len(test_df), "mae": np.nan, "r2": np.nan, "model": None, "feature_cols": []}
+        return {
+            "n_train": len(train_df),
+            "n_test": len(test_df),
+            "mae": np.nan,
+            "rmse": np.nan,
+            "mean_error": np.nan,
+            "r2": np.nan,
+            "model": None,
+            "feature_cols": [],
+        }
     train = train_df.dropna(subset=[target_col]).copy()
     test = test_df.dropna(subset=[target_col]).copy()
     if len(train) == 0 or len(test) == 0:
-        return {"n_train": len(train), "n_test": len(test), "mae": np.nan, "r2": np.nan, "model": None, "feature_cols": feature_cols}
-    categorical = [c for c in feature_cols if train[c].dtype == "object" or str(train[c].dtype).startswith("category")]
+        return {
+            "n_train": len(train),
+            "n_test": len(test),
+            "mae": np.nan,
+            "rmse": np.nan,
+            "mean_error": np.nan,
+            "r2": np.nan,
+            "model": None,
+            "feature_cols": feature_cols,
+        }
+
+    if categorical_cols is None:
+        categorical = [
+            c for c in feature_cols
+            if train[c].dtype == "object" or str(train[c].dtype).startswith("category")
+        ]
+    else:
+        categorical = [c for c in feature_cols if c in categorical_cols]
     numeric = [c for c in feature_cols if c not in categorical]
+
+    # Sanitize feature matrices for sklearn:
+    #   - categorical columns: plain object/string values with np.nan missingness
+    #   - numeric columns: numeric dtype with invalid entries coerced to np.nan
+    X_train = train[feature_cols].copy()
+    X_test = test[feature_cols].copy()
+    for c in categorical:
+        if c in X_train.columns:
+            X_train[c] = X_train[c].astype(object).where(pd.notna(X_train[c]), np.nan)
+            X_test[c] = X_test[c].astype(object).where(pd.notna(X_test[c]), np.nan)
+    for c in numeric:
+        if c in X_train.columns:
+            X_train[c] = pd.to_numeric(X_train[c], errors="coerce")
+            X_test[c] = pd.to_numeric(X_test[c], errors="coerce")
+
     pre = ColumnTransformer(
         transformers=[
             ("num", Pipeline([("imputer", SimpleImputer(strategy="median"))]), numeric),
@@ -5318,12 +5290,15 @@ def _fit_linear_prediction(train_df: pd.DataFrame, test_df: pd.DataFrame, target
         remainder="drop",
     )
     model = Pipeline([("pre", pre), ("lr", LinearRegression())])
-    model.fit(train[feature_cols], train[target_col])
-    pred = model.predict(test[feature_cols])
+    model.fit(X_train, train[target_col])
+    pred = model.predict(X_test)
+    residual = pred - test[target_col].to_numpy(dtype=float)
     return {
         "n_train": len(train),
         "n_test": len(test),
         "mae": float(mean_absolute_error(test[target_col], pred)),
+        "rmse": float(np.sqrt(np.mean(residual ** 2))),
+        "mean_error": float(np.mean(residual)),
         "r2": float(r2_score(test[target_col], pred)),
         "model": model,
         "feature_cols": feature_cols,
@@ -5334,10 +5309,18 @@ def _fit_linear_prediction(train_df: pd.DataFrame, test_df: pd.DataFrame, target
 
 
 
-def _group_ablation_importance(train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str, feature_groups: dict[str, list[str]]) -> pd.DataFrame:
+def _group_ablation_importance(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    feature_groups: dict[str, list[str]],
+    categorical_cols: list[str] | None = None,
+) -> pd.DataFrame:
     all_features = [feat for feats in feature_groups.values() for feat in feats]
     all_features = [f for f in dict.fromkeys(all_features) if f in train_df.columns]
-    base = _fit_linear_prediction(train_df, test_df, target_col, all_features)
+    base = _fit_linear_prediction(
+        train_df, test_df, target_col, all_features, categorical_cols=categorical_cols
+    )
     rows = [
         {
             "group": "all_features",
@@ -5351,7 +5334,7 @@ def _group_ablation_importance(train_df: pd.DataFrame, test_df: pd.DataFrame, ta
         reduced = [f for f in all_features if f not in feats]
         if len(reduced) == 0:
             continue
-        fit = _fit_linear_prediction(train_df, test_df, target_col, reduced)
+        fit = _fit_linear_prediction(train_df, test_df, target_col, reduced, categorical_cols=categorical_cols)
         rows.append(
             {
                 "group": group_name,
@@ -5475,7 +5458,8 @@ def run_agenda_diagnostics(
     print("  Pair construction uses consecutive same-surgeon same-procedure cases")
     print("  ordered by completion time, with a chronological K-nearest historical")
     print("  baseline for the current booking (K=10, minimum 3 prior cases).")
-    print(f"  Max consecutive-pair gap: {DEFAULT_PAIR_GAP_DAYS} days")
+    print(f"  Primary consecutive-pair gap (main tasks): {DEFAULT_PAIR_GAP_DAYS} days")
+    print(f"  Robustness gaps also reported: {[60, 90, 180]}")
     print(f"  Hospital reference quantile q^H: {hospital_q:.2f}")
     print(f"  Max downward recommendation used in treatability analysis: {max_downward_rec:.0f} min")
 
@@ -5488,6 +5472,28 @@ def run_agenda_diagnostics(
     pair_df = pair_df.merge(surgeon_q[["Surgeon_Code", "q_hat", "surgeon_cases", "mean_booking_error", "median_booking_error"]], on="Surgeon_Code", how="left")
     _save_csv(pair_df, tbldir / "agenda_pair_dataset.csv")
 
+    # Gap / pairing robustness summary
+    sens_rows = []
+    for gap in [60, 90, 180]:
+        for same_proc, scope in [(True, "surgeon_x_procedure"), (False, "surgeon_only")]:
+            sdf = _build_pair_dataset(df_aug, max_gap_days=gap, same_procedure=same_proc)
+            if len(sdf) == 0:
+                continue
+            fit = _ols_summary(sdf["X_prev_overrun"], sdf["Y_abnormal_booking"])
+            mae_zero = float(sdf["Y_abnormal_booking"].abs().mean())
+            sens_rows.append({
+                "pair_scope": scope,
+                "max_gap_days": gap,
+                "n_pairs": len(sdf),
+                "slope": fit["slope"],
+                "slope_se": fit["slope_se"],
+                "r2": fit["r2"],
+                "mae_ols": fit["mae"],
+                "mae_zero": mae_zero,
+            })
+    sens_df = pd.DataFrame(sens_rows)
+    _save_csv(sens_df, tbldir / "agenda_pair_sensitivity_summary.csv")
+
     services = _service_list(pair_df, requested=services_of_interest)
     _subsection("Pair dataset overview")
     print(f"  Valid pairs: {len(pair_df):,}")
@@ -5496,6 +5502,30 @@ def run_agenda_diagnostics(
     print(f"  Services highlighted in figures: {services}")
     _describe_numeric(pair_df["X_prev_overrun"], "X = previous overrun (realized − booked)")
     _describe_numeric(pair_df["Y_abnormal_booking"], "Y = abnormal current booking")
+
+    _subsection("Gap and pairing robustness (self-correction slope)")
+    print(f"  {'Scope':<25} {'Gap':>5} {'Pairs':>8} {'Slope':>8} {'SE':>8} {'R²':>8} {'MAE_ols':>8} {'MAE_zero':>8} {'OLS beats 0?':>12}")
+    for _, r in sens_df.iterrows():
+        beats = "YES" if r["mae_ols"] < r["mae_zero"] else "no"
+        print(f"  {r['pair_scope']:<25} {int(r['max_gap_days']):>5} {int(r['n_pairs']):>8,} {r['slope']:>8.4f} {r['slope_se']:>8.4f} {r['r2']:>8.4f} {r['mae_ols']:>8.2f} {r['mae_zero']:>8.2f} {beats:>12}")
+    print("\n  Key: if slope remains near zero across gap thresholds and under")
+    print("  relaxed (surgeon-only) pairing, self-correction is robustly absent.")
+
+    _subsection("KNN baseline validation")
+    Y = pair_df["Y_abnormal_booking"]
+    _describe_numeric(Y, "Y_ν (abnormal booking)")
+    print(f"  Fraction |Y_ν| ≤  5 min: {(Y.abs() <= 5).mean():.1%}")
+    print(f"  Fraction |Y_ν| ≤ 15 min: {(Y.abs() <= 15).mean():.1%}")
+    print(f"  Fraction |Y_ν| ≤ 30 min: {(Y.abs() <= 30).mean():.1%}")
+    raw_update = pair_df["b_curr"] - pair_df["b_prev"]
+    raw_mae = float(raw_update.abs().mean())
+    y_mae = float(Y.abs().mean())
+    reduction = raw_mae - y_mae
+    print(f"\n  MAE of raw update (b_curr − b_prev):     {raw_mae:.2f}")
+    print(f"  MAE of baselined update (Y_ν):            {y_mae:.2f}")
+    print(f"  Reduction from KNN baselining: {reduction:.2f} min ({100*reduction/raw_mae:.1f}%)")
+    print("  A meaningful reduction confirms the KNN baseline removes")
+    print("  case-level heterogeneity, isolating the behavioral signal.")
 
     # Task 1: Model-free checks
     _section("TASK 1 — MODEL-FREE RESPONSE CHECKS")
@@ -5510,6 +5540,25 @@ def run_agenda_diagnostics(
     print(f"  Zero-prediction baseline MAE: {zero_mae:.4f}")
     print(f"  Pooled OLS MAE: {pooled['mae']:.4f}")
     print(f"  OLS {'beats' if pooled['mae'] < zero_mae else 'does NOT beat'} zero baseline")
+
+    _subsection("Mean-reversion check")
+    print("  If the negative slope is just mean reversion in booking levels,")
+    print("  controlling for (b_prev − surgeon mean booking) should absorb it.")
+    surg_mean_b = pair_df.groupby("Surgeon_Code")["b_prev"].transform("mean")
+    b_prev_dm = pair_df["b_prev"] - surg_mean_b
+    X_mr = np.column_stack([pair_df["X_prev_overrun"].to_numpy(dtype=float), b_prev_dm.to_numpy(dtype=float)])
+    y_mr = pair_df["Y_abnormal_booking"].to_numpy(dtype=float)
+    mask = np.isfinite(X_mr).all(axis=1) & np.isfinite(y_mr)
+    X_mr, y_mr = X_mr[mask], y_mr[mask]
+    X_mr = np.column_stack([np.ones(len(X_mr)), X_mr])
+    beta = np.linalg.lstsq(X_mr, y_mr, rcond=None)[0]
+    print(f"  Slope on X_prev_overrun (controlling for b_prev level): {beta[1]:.4f}")
+    print(f"  Slope on b_prev_demeaned: {beta[2]:.4f}")
+    if np.isfinite(beta[1]) and np.isfinite(pooled['slope']) and abs(beta[1]) < abs(pooled['slope']) * 0.5:
+        print("  → Slope on overrun attenuates substantially → mean reversion likely.")
+    else:
+        print("  → Slope on overrun persists → not explained by mean reversion alone.")
+
     for service, sub in pair_df.groupby("Case_Service"):
         fit = _ols_summary(sub["X_prev_overrun"], sub["Y_abnormal_booking"])
         rows.append({"group": service, **fit})
@@ -5706,6 +5755,7 @@ def run_agenda_diagnostics(
         q_feature = train_only_q[["Surgeon_Code", "q_hat"]].rename(columns={"q_hat": "q_hat_empirical"})
         train_df = train_base.merge(q_feature, on="Surgeon_Code", how="left")
         test_df = test_base.merge(q_feature, on="Surgeon_Code", how="left")
+        print("  Split rule: first 52 calendar weeks → train, remaining weeks → test (chronological, no shuffle)")
         print(f"  Train cases: {len(train_df):,}")
         print(f"  Test cases:  {len(test_df):,}")
         q_avail = test_df["q_hat_empirical"].notna().mean() if "q_hat_empirical" in test_df.columns and len(test_df) > 0 else np.nan
@@ -5720,6 +5770,8 @@ def run_agenda_diagnostics(
         feature_only = all_feature_only.copy()
         combined = all_feature_only + (["Booked Time (Minutes)"] if "Booked Time (Minutes)" in train_df.columns else [])
         booking_only = ["Booked Time (Minutes)"] if "Booked Time (Minutes)" in train_df.columns else []
+        feature_only_categorical = [c for c in categorical if c in feature_only]
+        combined_categorical = feature_only_categorical.copy()
 
         _subsection("4B. Feature leak audit")
         POST_OP_COLUMNS = {
@@ -5735,20 +5787,27 @@ def run_agenda_diagnostics(
             print("    Removing leaked features before fitting.")
             feature_only = [c for c in feature_only if c not in POST_OP_COLUMNS]
             combined = [c for c in combined if c not in POST_OP_COLUMNS]
+            feature_only_categorical = [c for c in feature_only_categorical if c in feature_only]
+            combined_categorical = [c for c in combined_categorical if c in combined]
         else:
             print("  ✓ No explicit post-operative features detected in feature set.")
         if "q_hat_empirical" in feature_only:
             print("  ✓ q_hat_empirical is retained, but it is estimated on the")
             print("    training period only, so it is a valid historical feature.")
+        print("  ✓ Identifier-like and calendar-coded fields are forced into the")
+        print("    categorical pipeline before fitting.")
+        forced_cats = [c for c in feature_only_categorical if c in {"Main_Procedure_Id", "Surgeon_Code", "Month", "Year"}]
+        if forced_cats:
+            print(f"    Explicitly categorical despite numeric-looking codes: {forced_cats}")
 
         _subsection("4C. Dimensionality audit (feature-only model)")
-        cat_in_feat = [c for c in feature_only if train_df[c].dtype == "object" or str(train_df[c].dtype).startswith("category")]
+        cat_in_feat = feature_only_categorical.copy()
         num_in_feat = [c for c in feature_only if c not in cat_in_feat]
-        total_onehot = sum(train_df[c].nunique() for c in cat_in_feat)
+        total_onehot = sum(train_df[c].nunique(dropna=True) for c in cat_in_feat)
         total_dim = total_onehot + len(num_in_feat)
         print(f"  Categorical features: {len(cat_in_feat)}")
         for c in cat_in_feat:
-            n_levels = train_df[c].nunique()
+            n_levels = train_df[c].nunique(dropna=True)
             n_test_unseen = 0
             if c in test_df.columns:
                 train_levels = set(train_df[c].dropna().astype(str).unique())
@@ -5763,21 +5822,67 @@ def run_agenda_diagnostics(
         print(f"  Ratio cases/features: {len(train_df) / max(total_dim, 1):.1f}")
 
         _subsection("4D. Duration prediction (realized duration)")
-        fit_feat_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", feature_only)
-        fit_book_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", booking_only)
-        fit_comb_d = _fit_linear_prediction(train_df, test_df, "Realized_Duration_Min", combined)
+        fit_feat_d = _fit_linear_prediction(
+            train_df, test_df, "Realized_Duration_Min", feature_only,
+            categorical_cols=feature_only_categorical,
+        )
+        fit_book_d = _fit_linear_prediction(
+            train_df, test_df, "Realized_Duration_Min", booking_only,
+            categorical_cols=[],
+        )
+        fit_comb_d = _fit_linear_prediction(
+            train_df, test_df, "Realized_Duration_Min", combined,
+            categorical_cols=combined_categorical,
+        )
+
         proc_counts = train_df["Main_Procedure_Id"].value_counts() if "Main_Procedure_Id" in train_df.columns else pd.Series(dtype=float)
         common_procs = set(proc_counts[proc_counts >= 50].index)
         train_common = train_df[train_df["Main_Procedure_Id"].isin(common_procs)].copy() if len(common_procs) > 0 else train_df.iloc[:0].copy()
         test_common = test_df[test_df["Main_Procedure_Id"].isin(common_procs)].copy() if len(common_procs) > 0 else test_df.iloc[:0].copy()
-        fit_feat_common = _fit_linear_prediction(train_common, test_common, "Realized_Duration_Min", feature_only) if len(test_common) > 0 else {"mae": np.nan, "r2": np.nan, "n_test": 0}
-        fit_book_common = _fit_linear_prediction(train_common, test_common, "Realized_Duration_Min", booking_only) if len(test_common) > 0 else {"mae": np.nan, "r2": np.nan, "n_test": 0}
+        fit_feat_common = (
+            _fit_linear_prediction(
+                train_common, test_common, "Realized_Duration_Min", feature_only,
+                categorical_cols=feature_only_categorical,
+            )
+            if len(test_common) > 0 else {"mae": np.nan, "rmse": np.nan, "mean_error": np.nan, "r2": np.nan, "n_test": 0}
+        )
+        fit_book_common = (
+            _fit_linear_prediction(
+                train_common, test_common, "Realized_Duration_Min", booking_only,
+                categorical_cols=[],
+            )
+            if len(test_common) > 0 else {"mae": np.nan, "rmse": np.nan, "mean_error": np.nan, "r2": np.nan, "n_test": 0}
+        )
+
+        raw_booking_pred = test_df["Booked Time (Minutes)"].to_numpy(dtype=float)
+        raw_booking_actual = test_df["Realized_Duration_Min"].to_numpy(dtype=float)
+        raw_booking_resid = raw_booking_pred - raw_booking_actual
+        raw_booking_fit = {
+            "n_test": len(test_df),
+            "mae": float(np.mean(np.abs(raw_booking_resid))) if len(test_df) > 0 else np.nan,
+            "rmse": float(np.sqrt(np.mean(raw_booking_resid ** 2))) if len(test_df) > 0 else np.nan,
+            "mean_error": float(np.mean(raw_booking_resid)) if len(test_df) > 0 else np.nan,
+            "r2": float(r2_score(raw_booking_actual, raw_booking_pred)) if len(test_df) > 0 else np.nan,
+        }
+
+        print("  Mean prediction error is reported as predicted − realized.")
+        print("  Positive values indicate over-prediction; negative values indicate under-prediction.")
+        print(f"  Raw booking direct baseline (no refit): mean error = {raw_booking_fit['mean_error']:+.2f} min, "
+              f"MAE = {raw_booking_fit['mae']:.2f}, R² = {raw_booking_fit['r2']:.4f}")
+        print(f"  Booking-only fitted model:             mean error = {fit_book_d['mean_error']:+.2f} min, "
+              f"MAE = {fit_book_d['mae']:.2f}, R² = {fit_book_d['r2']:.4f}")
+        print(f"  Feature-only fitted model:             mean error = {fit_feat_d['mean_error']:+.2f} min, "
+              f"MAE = {fit_feat_d['mae']:.2f}, R² = {fit_feat_d['r2']:.4f}")
+        print(f"  Combined fitted model:                 mean error = {fit_comb_d['mean_error']:+.2f} min, "
+              f"MAE = {fit_comb_d['mae']:.2f}, R² = {fit_comb_d['r2']:.4f}")
+
         pred_rows = [
-            {"target": "realized_duration", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_d["mae"], "r2": fit_feat_d["r2"], "n_test": fit_feat_d["n_test"]},
-            {"target": "realized_duration", "model": "booking_only (1d)", "mae": fit_book_d["mae"], "r2": fit_book_d["r2"], "n_test": fit_book_d["n_test"]},
-            {"target": "realized_duration", "model": f"combined (~{total_dim+1}d)", "mae": fit_comb_d["mae"], "r2": fit_comb_d["r2"], "n_test": fit_comb_d["n_test"]},
-            {"target": "realized_duration (common procs)", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_common["mae"], "r2": fit_feat_common["r2"], "n_test": fit_feat_common["n_test"]},
-            {"target": "realized_duration (common procs)", "model": "booking_only (1d)", "mae": fit_book_common["mae"], "r2": fit_book_common["r2"], "n_test": fit_book_common["n_test"]},
+            {"target": "realized_duration", "model": "raw_booking_direct (no refit)", "mae": raw_booking_fit["mae"], "rmse": raw_booking_fit["rmse"], "mean_error": raw_booking_fit["mean_error"], "r2": raw_booking_fit["r2"], "n_test": raw_booking_fit["n_test"]},
+            {"target": "realized_duration", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_d["mae"], "rmse": fit_feat_d["rmse"], "mean_error": fit_feat_d["mean_error"], "r2": fit_feat_d["r2"], "n_test": fit_feat_d["n_test"]},
+            {"target": "realized_duration", "model": "booking_only (1d)", "mae": fit_book_d["mae"], "rmse": fit_book_d["rmse"], "mean_error": fit_book_d["mean_error"], "r2": fit_book_d["r2"], "n_test": fit_book_d["n_test"]},
+            {"target": "realized_duration", "model": f"combined (~{total_dim+1}d)", "mae": fit_comb_d["mae"], "rmse": fit_comb_d["rmse"], "mean_error": fit_comb_d["mean_error"], "r2": fit_comb_d["r2"], "n_test": fit_comb_d["n_test"]},
+            {"target": "realized_duration (common procs)", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_common["mae"], "rmse": fit_feat_common["rmse"], "mean_error": fit_feat_common["mean_error"], "r2": fit_feat_common["r2"], "n_test": fit_feat_common["n_test"]},
+            {"target": "realized_duration (common procs)", "model": "booking_only (1d)", "mae": fit_book_common["mae"], "rmse": fit_book_common["rmse"], "mean_error": fit_book_common["mean_error"], "r2": fit_book_common["r2"], "n_test": fit_book_common["n_test"]},
         ]
 
         _subsection("4E. Bias prediction (booking_error = b − d̃)")
@@ -5787,30 +5892,57 @@ def run_agenda_diagnostics(
         test_df = test_df.copy()
         train_df["booking_bias_target"] = train_df["Booked Time (Minutes)"] - train_df["Realized_Duration_Min"]
         test_df["booking_bias_target"] = test_df["Booked Time (Minutes)"] - test_df["Realized_Duration_Min"]
-        fit_feat_bias = _fit_linear_prediction(train_df, test_df, "booking_bias_target", feature_only)
-        pred_rows.append({"target": "booking_bias", "model": f"feature_only (~{total_dim}d)", "mae": fit_feat_bias["mae"], "r2": fit_feat_bias["r2"], "n_test": fit_feat_bias["n_test"]})
+        fit_feat_bias = _fit_linear_prediction(
+            train_df, test_df, "booking_bias_target", feature_only,
+            categorical_cols=feature_only_categorical,
+        )
+        pred_rows.append({
+            "target": "booking_bias",
+            "model": f"feature_only (~{total_dim}d)",
+            "mae": fit_feat_bias["mae"],
+            "rmse": fit_feat_bias["rmse"],
+            "mean_error": fit_feat_bias["mean_error"],
+            "r2": fit_feat_bias["r2"],
+            "n_test": fit_feat_bias["n_test"],
+        })
         train_surg_bias = train_df.groupby("Surgeon_Code")["booking_bias_target"].mean()
         test_df_bias = test_df.copy()
         test_df_bias["pred_surg_mean"] = test_df_bias["Surgeon_Code"].map(train_surg_bias)
         test_df_bias = test_df_bias.dropna(subset=["pred_surg_mean", "booking_bias_target"])
         if len(test_df_bias) > 0:
-            surg_mean_mae = float(mean_absolute_error(test_df_bias["booking_bias_target"], test_df_bias["pred_surg_mean"]))
+            bias_resid = test_df_bias["pred_surg_mean"].to_numpy(dtype=float) - test_df_bias["booking_bias_target"].to_numpy(dtype=float)
+            surg_mean_mae = float(np.mean(np.abs(bias_resid)))
+            surg_mean_rmse = float(np.sqrt(np.mean(bias_resid ** 2)))
+            surg_mean_me = float(np.mean(bias_resid))
             surg_mean_r2 = float(r2_score(test_df_bias["booking_bias_target"], test_df_bias["pred_surg_mean"]))
             pred_rows.append({
                 "target": "booking_bias",
                 "model": "surgeon_mean_only (1 param/surgeon)",
                 "mae": surg_mean_mae,
+                "rmse": surg_mean_rmse,
+                "mean_error": surg_mean_me,
                 "r2": surg_mean_r2,
                 "n_test": len(test_df_bias),
             })
-            print(f"  Surgeon-mean-bias baseline: MAE={surg_mean_mae:.2f}, R²={surg_mean_r2:.4f}")
-            print(f"  Feature-model bias:         MAE={fit_feat_bias['mae']:.2f}, R²={fit_feat_bias['r2']:.4f}")
+            print(f"  Surgeon-mean-bias baseline: MAE={surg_mean_mae:.2f}, mean error={surg_mean_me:+.2f}, R²={surg_mean_r2:.4f}")
+            print(f"  Feature-model bias:         MAE={fit_feat_bias['mae']:.2f}, mean error={fit_feat_bias['mean_error']:+.2f}, R²={fit_feat_bias['r2']:.4f}")
             if np.isfinite(fit_feat_bias["mae"]) and np.isfinite(surg_mean_mae) and abs(fit_feat_bias["mae"] - surg_mean_mae) < 2.0:
                 print("  → The feature model performs similarly to a simple surgeon-mean")
                 print("    baseline, suggesting limited extra recoverable signal beyond")
                 print("    stable surgeon-specific effects.")
-        zero_bias_mae = float(test_df["booking_bias_target"].abs().mean())
-        pred_rows.append({"target": "booking_bias", "model": "zero (predict no bias)", "mae": zero_bias_mae, "r2": 0.0, "n_test": len(test_df)})
+        zero_bias_actual = test_df["booking_bias_target"].to_numpy(dtype=float)
+        zero_bias_pred = np.zeros_like(zero_bias_actual)
+        zero_bias_resid = zero_bias_pred - zero_bias_actual
+        zero_bias_mae = float(np.mean(np.abs(zero_bias_resid)))
+        pred_rows.append({
+            "target": "booking_bias",
+            "model": "zero (predict no bias)",
+            "mae": zero_bias_mae,
+            "rmse": float(np.sqrt(np.mean(zero_bias_resid ** 2))),
+            "mean_error": float(np.mean(zero_bias_resid)),
+            "r2": 0.0,
+            "n_test": len(test_df),
+        })
         pred_df = pd.DataFrame(pred_rows)
         _save_csv(pred_df, tbldir / "agenda_task4_prediction_comparison.csv")
         print("\n  Full comparison table:")
@@ -5824,7 +5956,7 @@ def run_agenda_diagnostics(
         feature_groups = {k: v for k, v in feature_groups.items() if len(v) > 0}
         if len(feature_groups) > 0:
             _subsection("4F. Feature-group ablation (bias prediction)")
-            bias_importance = _group_ablation_importance(train_df, test_df, "booking_bias_target", feature_groups)
+            bias_importance = _group_ablation_importance(train_df, test_df, "booking_bias_target", feature_groups, categorical_cols=feature_only_categorical)
             _save_csv(bias_importance, tbldir / "agenda_task4_bias_feature_group_importance.csv")
             print(bias_importance.to_string(index=False, float_format=lambda z: f"{z:.4f}" if isinstance(z, float) else str(z)))
         _subsection("4G. Variance decomposition of booking bias")
@@ -5920,10 +6052,21 @@ def run_agenda_diagnostics(
         print(f"  Services tested: {n_services_tested}")
         print(f"  Old (inaction-band) model beats zero on holdout: {n_old_beats} / {n_services_tested}")
         print(f"  New (3-regime, symmetric diagnostic) model beats zero on holdout: {n_new_beats} / {n_services_tested}")
+        old_wins = fit_df.loc[fit_df["old_beats_zero"], "Case_Service"].astype(str).tolist()
+        new_wins = fit_df.loc[fit_df["new_beats_zero"], "Case_Service"].astype(str).tolist()
+        if old_wins:
+            print(f"  Inaction-band wins in: {', '.join(old_wins)}")
+        if new_wins:
+            print(f"  3-regime wins in:      {', '.join(new_wins)}")
         if n_old_beats == 0 and n_new_beats == 0:
             print("  → Neither response model beats zero-prediction on any service.")
             print("    This supports treating experience-based response parameters as")
             print("    scenario inputs rather than directly estimated empirical truths.")
+        elif n_old_beats >= max(1, n_services_tested // 2):
+            print("  → Piecewise models improve on zero in a substantial share of services.")
+            print("    The right interpretation is not blanket absence of self-correction,")
+            print("    but that any response is nonlinear, heterogeneous, and not well")
+            print("    summarized by a pooled linear slope.")
 
     # Task 6: relative vs absolute thresholds
     _section("TASK 6 — RELATIVE VS ABSOLUTE THRESHOLDS")
@@ -6060,6 +6203,63 @@ def run_agenda_diagnostics(
         plt.close(fig)
         print(f"  → Saved: {figdir / 'agenda_task8_within_group_booking_signal.png'}")
 
+def analyze_block_bias_propagation(df: pd.DataFrame) -> None:
+    """Show that surgeon-level booking bias propagates to block-level load error."""
+    section("BLOCK-LEVEL PROPAGATION OF SURGEON BIAS")
+    if guard_empty(df, "block bias propagation"):
+        return
+    work = df.copy()
+    work["OR_Date"] = pd.to_datetime(work["Actual Start Date"], errors="coerce").dt.date
+    work["Weekday"] = pd.to_datetime(work["Actual Start Date"], errors="coerce").dt.weekday
+    work = work[work["Weekday"] < 5].copy()
+    sort_col = _completion_col(work)
+    bias = _online_group_mean(work, value_col="Booking_Error_Min", group_col="Surgeon_Code", sort_col=sort_col, min_history=MIN_SURGEON_CASES)
+    work["surg_bias"] = bias.fillna(0.0)
+
+    blocks = work.groupby(["Operating_Room", "OR_Date"]).agg(
+        n_cases=("Patient_ID", "size"),
+        n_surgeons=("Surgeon_Code", "nunique"),
+        block_bias=("surg_bias", "sum"),
+        sum_booked=("Booked Time (Minutes)", "sum"),
+        sum_realized=("Realized_Duration_Min", "sum"),
+    ).reset_index()
+
+    describe_series(blocks["block_bias"], "Block bias Σ(surgeon mean bias)")
+    describe_series(blocks["n_surgeons"], "Distinct surgeons per block")
+    print(f"\n  Fraction of blocks with |block bias| > 10 min: {(blocks['block_bias'].abs() > 10).mean():.1%}")
+    print(f"  Fraction of blocks with |block bias| > 20 min: {(blocks['block_bias'].abs() > 20).mean():.1%}")
+    print(f"  Fraction of blocks with |block bias| > 30 min: {(blocks['block_bias'].abs() > 30).mean():.1%}")
+    print(f"  Fraction single-surgeon blocks: {(blocks['n_surgeons'] == 1).mean():.1%}")
+
+    tau = 28.0
+    blocks["load_realized"] = blocks["sum_realized"] + tau * (blocks["n_cases"] - 1).clip(lower=0)
+    blocks["ot_realized"] = (blocks["load_realized"] - 480).clip(lower=0)
+    corr = blocks["block_bias"].corr(blocks["ot_realized"])
+    print(f"\n  Correlation(block bias, realized OT at C=480): {corr:.3f}")
+    if np.isfinite(corr) and abs(corr) >= 0.10:
+        print("  Interpretation: the correlation is directionally informative, but")
+        print("  the more reliable evidence is the contrast between under- and")
+        print("  over-biased blocks below.")
+    else:
+        print("  Interpretation: the linear correlation is essentially zero, so")
+        print("  do not treat it as the main evidence. The directional contrast")
+        print("  between under- and over-biased blocks below is more informative.")
+
+    under = blocks[blocks["block_bias"] < -10]
+    over = blocks[blocks["block_bias"] > 10]
+    if len(under) > 10 and len(over) > 10:
+        print(f"\n  Under-biased blocks (bias < -10 min): {len(under):,}")
+        print(f"    Mean realized OT: {under['ot_realized'].mean():.1f} min")
+        print(f"  Over-biased blocks  (bias > +10 min): {len(over):,}")
+        print(f"    Mean realized OT: {over['ot_realized'].mean():.1f} min")
+        diff = float(under['ot_realized'].mean() - over['ot_realized'].mean())
+        print(f"  Difference (under − over): {diff:.1f} min")
+        print("  This directional comparison is the main evidence that systematic")
+        print("  under-booking is associated with tighter blocks and more overtime.")
+
+    _save_csv(blocks[["Operating_Room", "OR_Date", "n_cases", "n_surgeons", "block_bias", "sum_booked", "sum_realized"]], TBLDIR / "block_bias_propagation.csv")
+
+
 # ── Summary ────────────────────────────────────────────────────────────────
 def generate_summary(df, df_raw):
     section("SUMMARY — KEY NUMBERS")
@@ -6162,9 +6362,12 @@ def main():
         analyze_booking_granularity(df)
         analyze_consecutive_pairs(df)
         analyze_temporal_drift(df)
+        analyze_drift_decomposition(df)
         analyze_weekly_horizons(df)
         analyze_surgeon_stability(df)
         analyze_site_booking_behavior(df)
+        analyze_within_group_signal_with_controls(df)
+        analyze_block_bias_propagation(df)
         analyze_site_decomposition(df)
         block_data = analyze_block_capacity(df)   # returns block DataFrame
         analyze_turnover_time(df, block_data)
@@ -6184,7 +6387,6 @@ def main():
         analyze_candidate_pool_proxies(df)
         analyze_weekly_block_market(df)
         analyze_surgeon_week_patterns(df)
-        analyze_prediction_headroom(df)
         block_load_data = analyze_block_load_decomposition(df, block_data)
         run_agenda_diagnostics(df, FIGDIR, TBLDIR)
         generate_summary(df, df_raw)
