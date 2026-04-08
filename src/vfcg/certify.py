@@ -56,7 +56,18 @@ def certify(
         violation = master_pred - oracle_res.predicted_cost
         max_violation = max(max_violation, violation)
         realized_costs.append(master_real)
-        abs_error_total += float(np.sum(np.abs(realized - d_post)))
+        delta_rec = np.asarray(
+            recommendation_model.compute_corrections(
+                w=w,
+                X=wd.features,
+                bookings=wd.bookings,
+                L=wd.L_bounds,
+                U=wd.U_bounds,
+            ),
+            dtype=float,
+        )
+        d_rec = np.asarray(wd.bookings, dtype=float) + delta_rec
+        abs_error_total += float(np.sum(np.abs(realized - d_rec)))
         total_cases += int(wd.n_cases)
 
         if abs(master_pred - oracle_res.predicted_cost) <= tol and oracle_res.realized_cost < master_real - tol:
@@ -70,12 +81,10 @@ def certify(
     reconstructed_realized_objective = float(np.mean(realized_costs)) if realized_costs else 0.0
     reconstructed_credibility_mae = abs_error_total / max(1, total_cases)
     e_pred_max = config.vfcg.credibility_eta * _compute_mae_base(week_data_list)
-    if config.vfcg.credibility_mode == "elastic_penalty":
-        reconstructed_credibility_slack = max(0.0, reconstructed_credibility_mae - e_pred_max)
-        reconstructed_objective = reconstructed_realized_objective + float(config.vfcg.credibility_penalty_rho) * reconstructed_credibility_slack
-    else:
-        reconstructed_credibility_slack = 0.0
-        reconstructed_objective = reconstructed_realized_objective
+    reconstructed_credibility_slack = 0.0
+    reconstructed_objective = reconstructed_realized_objective + float(config.vfcg.l1_penalty_rho) * float(np.sum(np.abs(np.asarray(w, dtype=float))))
+    if str(config.vfcg.credibility_mode).strip().lower() in {"mae_penalty", "elastic_penalty"}:
+        reconstructed_objective = reconstructed_objective + float(config.vfcg.credibility_penalty_rho) * reconstructed_credibility_mae
 
     obj_match = abs(reconstructed_objective - master_objective) <= tol
     real_match = abs(reconstructed_realized_objective - master_realized_objective) <= tol

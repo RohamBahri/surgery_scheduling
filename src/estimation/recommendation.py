@@ -68,7 +68,12 @@ class RecommendationModel:
         self._tau_L, self._tau_U = plausibility_tails
         self._w_max = w_max
         self._feature_names: List[str] = []
+        self._procedure_levels: List[str] = []
         self._service_levels: List[str] = []
+        self._surgeon_levels: List[str] = []
+        self._week_levels: List[int] = []
+        self._month_levels: List[int] = []
+        self._year_levels: List[int] = []
         self._is_prepared = False
         self._display_grid_step: float = 5.0
         self._display_grid_residue: float = 0.0
@@ -82,25 +87,58 @@ class RecommendationModel:
         return list(self._feature_names)
 
     def prepare(self, df_train: pd.DataFrame) -> "RecommendationModel":
-        if Col.CASE_SERVICE in df_train.columns:
-            self._service_levels = sorted(df_train[Col.CASE_SERVICE].astype(str).unique().tolist())
+        work = df_train.copy()
+
+        if Col.PROCEDURE_ID in work.columns:
+            self._procedure_levels = self._sorted_str_levels(work[Col.PROCEDURE_ID])
+        else:
+            self._procedure_levels = []
+
+        if Col.CASE_SERVICE in work.columns:
+            self._service_levels = self._sorted_str_levels(work[Col.CASE_SERVICE])
         else:
             self._service_levels = []
 
-        if Col.BOOKED_MINUTES in df_train.columns:
-            bookings = pd.to_numeric(df_train[Col.BOOKED_MINUTES], errors="coerce").dropna().to_numpy(dtype=float)
+        if Col.SURGEON_CODE in work.columns:
+            self._surgeon_levels = self._sorted_str_levels(work[Col.SURGEON_CODE])
+        else:
+            self._surgeon_levels = []
+
+        if Col.WEEK_OF_YEAR in work.columns:
+            self._week_levels = self._sorted_int_levels(work[Col.WEEK_OF_YEAR])
+        else:
+            self._week_levels = []
+
+        if Col.MONTH in work.columns:
+            self._month_levels = self._sorted_int_levels(work[Col.MONTH])
+        else:
+            self._month_levels = []
+
+        if Col.YEAR in work.columns:
+            self._year_levels = self._sorted_int_levels(work[Col.YEAR])
+        else:
+            self._year_levels = []
+
+        if Col.BOOKED_MINUTES in work.columns:
+            bookings = pd.to_numeric(work[Col.BOOKED_MINUTES], errors="coerce").dropna().to_numpy(dtype=float)
             if bookings.size > 0:
                 residues = np.mod(bookings, self._display_grid_step)
                 self._display_grid_residue = self._normalize_residue(float(np.median(residues)))
 
-        train_cases = self._df_to_cases(df_train)
+        train_cases = self._df_to_cases(work)
         _ = self.build_features(train_cases)
         self._is_prepared = True
         return self
 
     def prepare_instance(self, instance: WeeklyInstance) -> WeekRecommendationData:
         if not self._is_prepared:
-            self._service_levels = sorted({c.service for c in instance.cases})
+            self._procedure_levels = self._sorted_str_values(c.procedure_id for c in instance.cases)
+            self._service_levels = self._sorted_str_values(c.service for c in instance.cases)
+            self._surgeon_levels = self._sorted_str_values(c.surgeon_code for c in instance.cases)
+            self._week_levels = self._sorted_int_values(c.week_of_year for c in instance.cases)
+            self._month_levels = self._sorted_int_values(c.month for c in instance.cases)
+            self._year_levels = self._sorted_int_values(c.year for c in instance.cases)
+
             bookings = np.array([c.booked_duration_min for c in instance.cases], dtype=float)
             if bookings.size > 0:
                 residues = np.mod(bookings, self._display_grid_step)
@@ -133,21 +171,70 @@ class RecommendationModel:
         return week_data
 
     def build_features(self, cases: Sequence[CaseRecord]) -> np.ndarray:
-        target_ratio = self._costs.overtime_per_minute / (self._costs.overtime_per_minute + self._costs.idle_per_minute)
+        target_ratio = self._costs.overtime_per_minute / (
+            self._costs.overtime_per_minute + self._costs.idle_per_minute
+        )
+
+        if not self._feature_names:
+            self._feature_names = (
+                ["bias", "misalignment_s"]
+                + [f"procedure::{p}" for p in self._procedure_levels[1:]]
+                + [f"service::{s}" for s in self._service_levels[1:]]
+                + [f"surgeon::{s}" for s in self._surgeon_levels[1:]]
+                + [f"week::{w}" for w in self._week_levels[1:]]
+                + [f"month::{m}" for m in self._month_levels[1:]]
+                + [f"year::{y}" for y in self._year_levels[1:]]
+            )
+
         rows: List[List[float]] = []
         for case in cases:
             q_hat = float(self._estimation.critical_ratios.get_ratio(case.surgeon_code))
             misalignment = q_hat - target_ratio
-            base = [1.0, q_hat, misalignment]
-            service_oh = [1.0 if case.service == service else 0.0 for service in self._service_levels]
-            rows.append(base + service_oh)
-
-        if not self._feature_names:
-            self._feature_names = ["bias", "q_hat_s", "misalignment_s"] + [f"service::{s}" for s in self._service_levels]
+            row = [1.0, misalignment]
+            row += self._drop_first_one_hot(str(case.procedure_id), self._procedure_levels)
+            row += self._drop_first_one_hot(str(case.service), self._service_levels)
+            row += self._drop_first_one_hot(str(case.surgeon_code), self._surgeon_levels)
+            row += self._drop_first_one_hot(int(case.week_of_year), self._week_levels)
+            row += self._drop_first_one_hot(int(case.month), self._month_levels)
+            row += self._drop_first_one_hot(int(case.year), self._year_levels)
+            rows.append(row)
 
         if not rows:
             return np.zeros((0, len(self._feature_names)), dtype=float)
         return np.array(rows, dtype=float)
+
+    def _sorted_str_levels(self, values: pd.Series) -> List[str]:
+        series = values.dropna().astype(str).str.strip()
+        series = series[series != ""]
+        return sorted(series.unique().tolist())
+
+    def _sorted_int_levels(self, values: pd.Series) -> List[int]:
+        series = pd.to_numeric(values, errors="coerce").dropna().astype(int)
+        return sorted(series.unique().tolist())
+
+    def _sorted_str_values(self, values: Sequence[object]) -> List[str]:
+        cleaned = []
+        for value in values:
+            if pd.isna(value):
+                continue
+            text = str(value).strip()
+            if text == "":
+                continue
+            cleaned.append(text)
+        return sorted(set(cleaned))
+
+    def _sorted_int_values(self, values: Sequence[object]) -> List[int]:
+        cleaned = []
+        for value in values:
+            if pd.isna(value):
+                continue
+            cleaned.append(int(value))
+        return sorted(set(cleaned))
+
+    def _drop_first_one_hot(self, value: object, levels: Sequence[object]) -> List[float]:
+        if len(levels) <= 1:
+            return []
+        return [1.0 if value == level else 0.0 for level in levels[1:]]
 
     def compute_plausibility_bounds(self, cases: Sequence[CaseRecord]) -> Tuple[np.ndarray, np.ndarray]:
         case_df = self._cases_to_quantile_df(cases)

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass
 class VFCGConfig:
-    w_max: float = 10.0
+    w_max: float = 100.0
     credibility_eta: float = 1.05
     plausibility_tau_L: float = 0.01
     plausibility_tau_U: float = 0.99
@@ -24,5 +24,6 @@ class VFCGConfig:
     initial_reference_include_q50: bool = True
     initial_reference_include_realized: bool = True
     max_initial_references_per_week: int | None = 12
-    credibility_mode: str = "hard"  # "hard" | "elastic_penalty"
-    credibility_penalty_rho: float = 0.0
+    credibility_mode: str = "mae_penalty"  # "hard" | "mae_penalty"
+    credibility_penalty_rho: float = 10.0
+    l1_penalty_rho: float = 1.0

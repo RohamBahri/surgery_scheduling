@@ -343,6 +343,10 @@ def solve_native_master(
     model.Params.Cuts = 2
 
     w = model.addVars(feat_dim, lb=-config.vfcg.w_max, ub=config.vfcg.w_max, name="w")
+    w_abs = model.addVars(feat_dim, lb=0.0, name="w_abs")
+    for j in range(feat_dim):
+        model.addConstr(w_abs[j] >= w[j], name=f"w_abs_pos_{j}")
+        model.addConstr(w_abs[j] >= -w[j], name=f"w_abs_neg_{j}")
 
     z_vars: dict[int, dict[tuple[int, object], gp.Var]] = {}
     r_vars: dict[int, dict[int, gp.Var]] = {}
@@ -413,7 +417,8 @@ def solve_native_master(
 
             e_plus = model.addVar(lb=0.0, name=f"e_plus_t{t}_i{i}")
             e_minus = model.addVar(lb=0.0, name=f"e_minus_t{t}_i{i}")
-            model.addConstr(float(wd.realized[i]) - dpost_t[i] == e_plus - e_minus, name=f"cred_err_t{t}_i{i}")
+            displayed_rec = float(wd.bookings[i]) + delta_rec
+            model.addConstr(float(wd.realized[i]) - displayed_rec == e_plus - e_minus, name=f"cred_err_t{t}_i{i}")
             abs_err_terms.append(e_plus + e_minus)
 
         for i in range(wd.n_cases):
@@ -521,23 +526,22 @@ def solve_native_master(
         if n_cases_total > 0
         else gp.LinExpr(0.0)
     )
-    credibility_slack_var: gp.Var | None = None
+    l1_penalty_expr = quicksum(w_abs[j] for j in range(feat_dim))
+
+    mode = str(config.vfcg.credibility_mode).strip().lower()
     if n_cases_total > 0:
-        if config.vfcg.credibility_mode == "hard":
+        if mode == "hard":
             model.addConstr(credibility_mae_expr <= e_pred_max + 1e-9, name="credibility")
-        elif config.vfcg.credibility_mode == "elastic_penalty":
-            credibility_slack_var = model.addVar(lb=0.0, name="credibility_slack")
-            model.addConstr(
-                credibility_mae_expr <= e_pred_max + credibility_slack_var + 1e-9,
-                name="credibility_elastic",
-            )
+        elif mode in {"mae_penalty", "elastic_penalty"}:
+            pass
         else:
             raise ValueError(f"Unknown credibility_mode={config.vfcg.credibility_mode!r}")
 
+    credibility_slack_var: gp.Var | None = None
     realized_obj = (1.0 / max(1, n_weeks)) * quicksum(realized_cost_exprs[t] for t in range(n_weeks))
-    full_obj = realized_obj
-    if credibility_slack_var is not None:
-        full_obj = full_obj + float(config.vfcg.credibility_penalty_rho) * credibility_slack_var
+    full_obj = realized_obj + float(config.vfcg.l1_penalty_rho) * l1_penalty_expr
+    if mode in {"mae_penalty", "elastic_penalty"}:
+        full_obj = full_obj + float(config.vfcg.credibility_penalty_rho) * credibility_mae_expr
     model.setObjective(full_obj, GRB.MINIMIZE)
 
     start_to_use = warm_start
@@ -636,15 +640,13 @@ def solve_native_master(
             float(np.mean(fallback_realized_costs)) if fallback_realized_costs else float("inf")
         )
         fallback_credibility_mae = abs_error_total / max(1, total_cases)
-        if config.vfcg.credibility_mode == "elastic_penalty":
-            fallback_credibility_slack = max(0.0, fallback_credibility_mae - e_pred_max)
+        fallback_credibility_slack = 0.0
+        fallback_objective = fallback_realized_objective
+        if str(config.vfcg.credibility_mode).strip().lower() in {"mae_penalty", "elastic_penalty"}:
             fallback_objective = (
-                fallback_realized_objective
-                + float(config.vfcg.credibility_penalty_rho) * fallback_credibility_slack
+                fallback_objective
+                + float(config.vfcg.credibility_penalty_rho) * fallback_credibility_mae
             )
-        else:
-            fallback_credibility_slack = 0.0
-            fallback_objective = fallback_realized_objective
 
         return NativeMasterResult(
             weights=weights,
