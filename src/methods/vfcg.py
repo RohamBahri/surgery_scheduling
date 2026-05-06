@@ -49,7 +49,6 @@ class VFCGMethod(Method):
             plausibility_tails=(self.config.vfcg.plausibility_tau_L, self.config.vfcg.plausibility_tau_U),
             w_max=self.config.vfcg.w_max,
         )
-        self._recommendation_model.prepare(df_train)
 
         # Explicit legacy-aligned training-week construction path.
         df_scoped, _ = apply_experiment_scope(df_train, self.config)
@@ -58,10 +57,21 @@ class VFCGMethod(Method):
 
         dt = pd.to_datetime(df_scoped[Col.ACTUAL_START], errors="coerce")
         week_starts = sorted((dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.normalize().dropna().unique())
+        selected_week_pairs = list(enumerate(week_starts))
+        if self.config.vfcg.max_training_weeks is not None:
+            k = int(self.config.vfcg.max_training_weeks)
+            selected_week_pairs = selected_week_pairs[-k:]
+
+        selected_week_starts = [pd.Timestamp(ws) for _, ws in selected_week_pairs]
+        if selected_week_starts:
+            actual_norm = (dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.normalize()
+            self._recommendation_model.prepare(df_scoped.loc[actual_norm.isin(selected_week_starts)].copy())
+        else:
+            self._recommendation_model.prepare(df_scoped.iloc[0:0].copy())
 
         week_data_list: list[WeekRecommendationData] = []
         week_indices: list[int] = []
-        for w_idx, ws in enumerate(week_starts):
+        for w_idx, ws in selected_week_pairs:
             instance = build_weekly_instance(
                 df_pool=df_scoped,
                 horizon_start=pd.Timestamp(ws),
@@ -74,11 +84,6 @@ class VFCGMethod(Method):
                 continue
             week_data_list.append(self._recommendation_model.prepare_instance(instance))
             week_indices.append(w_idx)
-
-        if self.config.vfcg.max_training_weeks is not None:
-            k = int(self.config.vfcg.max_training_weeks)
-            week_data_list = week_data_list[-k:]
-            week_indices = week_indices[-k:]
 
         self._training_weeks = week_indices
 
@@ -109,6 +114,8 @@ class VFCGMethod(Method):
             self._training_summary = {
                 "selected_training_weeks": [],
                 "learned_weights": w0.tolist(),
+                "feature_dim": int(self._recommendation_model.feature_dim),
+                "feature_names": list(self._recommendation_model.feature_names),
                 "master_objective": None,
                 "master_bound": None,
                 "training_objective": None,
@@ -133,6 +140,8 @@ class VFCGMethod(Method):
         self._training_summary = {
             "selected_training_weeks": week_indices,
             "learned_weights": self._vfcg_result.w_optimal.tolist(),
+            "feature_dim": int(self._recommendation_model.feature_dim),
+            "feature_names": list(self._recommendation_model.feature_names),
             "master_objective": float(self._vfcg_result.objective),
             "master_realized_objective": float(self._vfcg_result.realized_objective),
             "master_bound": float(self._vfcg_result.certification.master_bound),

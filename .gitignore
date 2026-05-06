@@ -6,6 +6,7 @@
 /data/raw/
 /data/interim/
 /data/private/
+*figures/
 
 # logs and debug
 *.log
@@ -23,6 +24,8 @@ venv/
 .ipynb_checkpoints/
 *.patch
 *.egg-info/
+*.egg
+*.bak
 
 # temporary files
-tmp_*.*
+tmp*.*

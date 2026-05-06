@@ -58,6 +58,7 @@ MIN_SURGEON_CASES  = 30
 MIN_PROCEDURE_CASES = 20
 MIN_SERVICE_CASES  = 50
 MIN_TYPE_CASES     = 50       # paper's n_min for surgeon-type groups
+MAX_PLANNING_CASE_MINUTES = 480
 
 # Consecutive-pair gap thresholds (days)
 MAX_GAP_DAYS_LIST = [30, 60, 90]
@@ -405,12 +406,12 @@ def add_derived_columns(df):
         df["Booking_Error_Room"] = (
             df["Booked Time (Minutes)"] - df["Room_Time_Min"])
 
-    # Default booking error: use room time if available, else surgical time
+    # Default realized duration is room occupancy time.  The common cohort
+    # requires room timestamps, so there is no surgical-duration fallback.
     if "Room_Time_Min" in df.columns:
-        df["Realized_Duration_Min"] = df["Room_Time_Min"].fillna(
-            df["Surgical_Duration_Min"])
+        df["Realized_Duration_Min"] = df["Room_Time_Min"]
     else:
-        df["Realized_Duration_Min"] = df["Surgical_Duration_Min"]
+        df["Realized_Duration_Min"] = np.nan
     df["Booking_Error_Min"] = (
         df["Booked Time (Minutes)"] - df["Realized_Duration_Min"])
 
@@ -421,12 +422,15 @@ def add_derived_columns(df):
     df["Week_Start"] = (
         dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.normalize()
 
-    # OR-room flag: starts with "OR" but NOT emergency-designated rooms
-    room_str = df["Operating_Room"].fillna("").astype(str).str.upper()
-    starts_or = room_str.str.startswith("OR")
-    is_emerg_room = room_str.isin(
-        [r.upper() for r in EMERGENCY_ROOM_PATTERNS])
-    df["Is_OR_Room"] = starts_or & ~is_emerg_room
+    # OR-room flag: exact OR\d+ after removing whitespace, e.g. "OR 1" -> "OR1"
+    room_str = (
+        df["Operating_Room"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.replace(r"\s+", "", regex=True)
+    )
+    df["Is_OR_Room"] = room_str.str.fullmatch(r"OR\d+")
 
     # Cancellation flag (union of non-empty reason and cancel date)
     reason_flag = pd.Series(False, index=df.index)
@@ -452,20 +456,20 @@ def preprocess(df):
     """Apply the cleaning pipeline for elective completed OR cases.
 
     Steps:
-      1. Keep OR-room cases (excluding emergency-designated rooms).
+      1. Keep exact OR-room cases (normalized room name matches OR\\d+).
       2. Exclude cancelled cases.
       3. Exclude emergency patients.
-      4. Require actual start and stop dates.
-      5. Require positive and finite realized durations (< 24 h).
-      6. Require positive booked duration.
-      7. Drop cases with impossible timestamps (Leave Room < Enter Room).
+      4. Require all four room/procedure timestamps.
+      5. Require positive booked, room, and surgical durations.
+      6. Exclude booked, room, or surgical durations above 480 minutes.
+      7. Require ordered timestamps: Enter ≤ Start ≤ Stop ≤ Leave.
     """
     section("PREPROCESSING / CLEANING PIPELINE")
     n0 = len(df)
 
     df_c = df[df["Is_OR_Room"]].copy()
     n1 = len(df_c)
-    print(f"  [1] Keep OR-room cases (excl. emergency rooms): "
+    print(f"  [1] Keep exact OR\\d+ rooms:                     "
           f"{n0:,} → {n1:,}  (dropped {n0 - n1:,})")
 
     df_c = df_c[~df_c["Is_Cancelled"]].copy()
@@ -487,35 +491,46 @@ def preprocess(df):
         print(f"  [3] Exclude emergency patients:                 "
               f"skipped (Patient_Type not available)")
 
-    df_c = df_c.dropna(subset=["Actual Start Date", "Actual Stop Date"]).copy()
+    timestamp_cols = ["Enter Room_DT", "Actual Start_DT",
+                      "Actual Stop_DT", "Leave Room_DT"]
+    df_c = df_c.dropna(subset=timestamp_cols).copy()
     n4 = len(df_c)
-    print(f"  [4] Require Actual Start & Stop Date:            "
+    print(f"  [4] Require all four timestamps:                 "
           f"{n3:,} → {n4:,}  (dropped {n3 - n4:,})")
 
-    valid_dur = ((df_c["Realized_Duration_Min"] > 0)
-                 & (df_c["Realized_Duration_Min"] < 1440))
+    valid_dur = (
+        (df_c["Booked Time (Minutes)"] > 0)
+        & (df_c["Room_Time_Min"] > 0)
+        & (df_c["Surgical_Duration_Min"] > 0)
+    )
     df_c = df_c[valid_dur].copy()
     n5 = len(df_c)
-    print(f"  [5] Valid realized duration (0, 1440 min):       "
+    print(f"  [5] Positive booked/room/surgical durations:     "
           f"{n4:,} → {n5:,}  (dropped {n4 - n5:,})")
 
-    df_c = df_c[df_c["Booked Time (Minutes)"] > 0].copy()
+    within_planning = (
+        (df_c["Booked Time (Minutes)"] <= MAX_PLANNING_CASE_MINUTES)
+        & (df_c["Room_Time_Min"] <= MAX_PLANNING_CASE_MINUTES)
+        & (df_c["Surgical_Duration_Min"] <= MAX_PLANNING_CASE_MINUTES)
+    )
+    df_c = df_c[within_planning].copy()
     n6 = len(df_c)
-    print(f"  [6] Positive booked duration:                    "
+    print(f"  [6] Exclude durations > {MAX_PLANNING_CASE_MINUTES} min:                  "
           f"{n5:,} → {n6:,}  (dropped {n5 - n6:,})")
 
-    # Drop impossible room timestamps
-    n_bad_room = 0
-    if "Enter Room_DT" in df_c.columns and "Leave Room_DT" in df_c.columns:
-        bad = (df_c["Leave Room_DT"] < df_c["Enter Room_DT"])
-        bad = bad.fillna(False)
-        n_bad_room = bad.sum()
-        df_c = df_c[~bad].copy()
+    ordered = (
+        (df_c["Enter Room_DT"] <= df_c["Actual Start_DT"])
+        & (df_c["Actual Start_DT"] <= df_c["Actual Stop_DT"])
+        & (df_c["Actual Stop_DT"] <= df_c["Leave Room_DT"])
+    )
+    n_bad_order = int((~ordered).sum())
+    df_c = df_c[ordered].copy()
     n7 = len(df_c)
-    print(f"  [7] Drop impossible room timestamps:             "
-          f"{n6:,} → {n7:,}  (dropped {n_bad_room:,})")
+    print(f"  [7] Require ordered timestamps:                  "
+          f"{n6:,} → {n7:,}  (dropped {n_bad_order:,})")
 
     # Recompute booking error on final cohort
+    df_c["Realized_Duration_Min"] = df_c["Room_Time_Min"]
     df_c["Booking_Error_Min"] = (
         df_c["Booked Time (Minutes)"] - df_c["Realized_Duration_Min"])
     df_c["Booking_Error_Surgical"] = (
@@ -528,10 +543,10 @@ def preprocess(df):
 
     # Outlier diagnostics
     subsection("Outlier diagnostics (on cleaned data)")
-    rd = df_c["Realized_Duration_Min"]
-    for thresh in [480, 600, 720]:
-        n_above = (rd > thresh).sum()
-        print(f"  Realized duration > {thresh} min ({thresh // 60}h): "
+    for col in ["Booked Time (Minutes)", "Room_Time_Min",
+                "Surgical_Duration_Min"]:
+        n_above = (df_c[col] > MAX_PLANNING_CASE_MINUTES).sum()
+        print(f"  {col} > {MAX_PLANNING_CASE_MINUTES} min: "
               f"{pct(n_above, len(df_c))}")
     be = df_c["Booking_Error_Min"]
     print(f"  |Booking error| > 240 min (4h): "

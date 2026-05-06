@@ -125,13 +125,9 @@ class FeatureEncoder:
 
     @staticmethod
     def extract_target(df: pd.DataFrame) -> np.ndarray:
-        """Return the target vector (procedure duration) as a 1-D array.
-
-        Durations are clipped at ``Domain.MIN_PROCEDURE_DURATION`` from
-        below so that no target value is unreasonably small.
-        """
+        """Return realized room time as a 1-D target vector."""
         y = df[TARGET_COLUMN].values.astype(float)
-        return np.clip(y, Domain.MIN_PROCEDURE_DURATION, None)
+        return y
 
     # ── Introspection ────────────────────────────────────────────────────
 

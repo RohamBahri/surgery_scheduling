@@ -54,7 +54,7 @@ class SolverConfig:
     time_limit_seconds: int = 600
     mip_gap: float = 0.05
     threads: int = 0
-    verbose: bool = False
+    verbose: bool = True
 
 
 @dataclass
