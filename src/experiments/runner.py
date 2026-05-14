@@ -5,7 +5,6 @@ import logging
 import time
 from dataclasses import asdict
 from datetime import timedelta
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -18,7 +17,6 @@ from src.data.loader import load_data
 from src.data.scope import apply_experiment_scope
 from src.data.splits import split_warmup_pool
 from src.methods.registry import MethodRegistry
-from src.planning.audit import audit_surgeon_feasibility
 from src.planning.evaluation import evaluate
 from src.planning.instance import build_weekly_instance
 from src.validation import validate_week

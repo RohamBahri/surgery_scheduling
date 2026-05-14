@@ -260,7 +260,7 @@ def test_vfcg_method_end_to_end_fit_then_plan_smoke(monkeypatch) -> None:
 
 
 def test_runner_registration_includes_vfcg_booked_oracle(monkeypatch) -> None:
-    from src.cli import run_experiment as cli_mod
+    from scripts import run_experiment as cli_mod
 
     class _DummyMethod:
         def __init__(self, name):

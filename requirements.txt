@@ -3,3 +3,4 @@ numpy>=1.21
 scikit-learn>=1.0
 gurobipy>=9.0
 openpyxl>=3.1
+linearmodels>=7.0

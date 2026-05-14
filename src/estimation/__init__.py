@@ -1,3 +1,10 @@
+"""Estimation result container.
+
+The implementation lives in the sibling modules:
+``quantile_model``, ``inverse``, ``response``, ``profiles``, ``bootstrap``,
+``recommendation``, and ``orchestrator``.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,3 +25,6 @@ class EstimationResult:
     response_estimator: "ResponseEstimator"
     response_profiler: "ResponseProfiler | None"
     bootstrap: "BootstrapResult | None" = None
+
+
+__all__ = ["EstimationResult"]

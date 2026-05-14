@@ -1,5 +1,17 @@
-"""Exact VFCG stack (piece 1 scaffolding)."""
+"""Exact VFCG training stack.
 
-from src.vfcg.config import VFCGConfig
+Heavy solver modules are intentionally imported from their concrete files
+(``solver.py``, ``master.py``, ``oracle.py``) to keep this package entry point
+lightweight.
+"""
 
-__all__ = ["VFCGConfig"]
+from src.core.config import VFCGConfig
+from src.vfcg.types import CertificationResult, OracleResult, VFCGIteration, VFCGResult
+
+__all__ = [
+    "CertificationResult",
+    "OracleResult",
+    "VFCGConfig",
+    "VFCGIteration",
+    "VFCGResult",
+]

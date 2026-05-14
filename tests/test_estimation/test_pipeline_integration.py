@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 from src.core.config import Config
-from src.diagnostics.estimation_report import (
+from scripts.estimation_report import (
     export_critical_ratio_distribution,
     export_profile_summary,
     export_quantile_model_quality,

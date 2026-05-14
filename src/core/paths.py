@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-@dataclass(frozen=True)
-class ArtifactConfig:
-    root: Path = Path("artifacts")
+from src.core.config import ArtifactConfig
 
 
 class ArtifactRun:
