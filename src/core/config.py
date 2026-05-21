@@ -47,7 +47,7 @@ class EligibilityConfig:
 class CostConfig:
     overtime_per_minute: float = 15.0
     idle_per_minute: float = 10.0
-    deferral_per_case: float = 2000.0
+    deferral_per_case: float = 1e6
     max_overtime_minutes: float = 240.0
 
 
@@ -138,8 +138,8 @@ class VFCGConfig:
     initial_reference_include_realized: bool = True
     max_initial_references_per_week: int | None = 12
     credibility_mode: str = "mae_penalty"  # "hard" | "mae_penalty"
-    credibility_penalty_rho: float = 10.0
-    l1_penalty_rho: float = 1.0
+    credibility_penalty_rho: float = 100.0
+    l1_penalty_rho: float = 0.001
 
 
 @dataclass
