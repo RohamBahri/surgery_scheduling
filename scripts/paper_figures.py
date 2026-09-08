@@ -1,7 +1,7 @@
 """Generate paper-ready figures from the UHN surgery scheduling data.
 
 Figure 1:
-    Histogram of booking deviation, defined as booked time minus realized room
+    Histogram of booking deviation, defined as realized room time minus booked
     time.  The caption is set in LaTeX, not on the figure.
 
 Figure 2:
@@ -39,7 +39,9 @@ from scripts.booking_realized_time_analysis import (
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/paper_figures")
 DEFAULT_FIGURE1_PATH = DEFAULT_OUTPUT_DIR / "figure1_booking_deviation_hist.pdf"
+DEFAULT_FIGURE1_TRIMMED_PATH = DEFAULT_OUTPUT_DIR / "figure1_booking_deviation_hist_abs_le_240.pdf"
 DEFAULT_FIGURE2_PATH = DEFAULT_OUTPUT_DIR / "figure2_oracle_statusquo_minutes.pdf"
+DEFAULT_FIGURE1_TRIMMED_ABS_LIMIT = 240.0
 
 WEEK_COLUMN = "week"
 PAIRED_WEEKLY_COLUMNS = (
@@ -78,14 +80,14 @@ def load_deviations(
     *,
     max_case_minutes: float = DEFAULT_MAX_PLANNING_CASE_MINUTES,
 ) -> np.ndarray:
-    """Return booked minus realized room time under the common filters."""
+    """Return realized room time minus booked time under the common filters."""
     rows, _ = load_filtered_analysis_rows(
         data_path,
         sheet,
         allow_order_violations=False,
         max_case_minutes=max_case_minutes,
     )
-    return np.asarray([row.room_difference for row in rows], dtype=float)
+    return np.asarray([row.room_minutes - row.booked_minutes for row in rows], dtype=float)
 
 
 def plot_booking_deviation(
@@ -95,16 +97,19 @@ def plot_booking_deviation(
     threshold: float = 30,
     x_clip: float = 480,
     bin_width: float = 5,
+    figure_label: str = "Figure 1",
 ) -> None:
-    """Histogram of booked minus realized room time."""
+    """Histogram of realized room time minus booked time."""
     diffs = np.asarray(diffs, dtype=float)
     diffs = diffs[np.isfinite(diffs)]
     n = len(diffs)
     if n == 0:
         raise ValueError("No finite booking deviations available for plotting.")
 
+    mean_error = np.mean(diffs)
     mae = np.mean(np.abs(diffs))
     within = np.mean(np.abs(diffs) <= threshold) * 100
+    overbooked = np.mean(diffs < 0) * 100
     diffs_display = np.clip(diffs, -x_clip, x_clip)
 
     output_path = Path(output_path)
@@ -112,7 +117,7 @@ def plot_booking_deviation(
 
     fig, ax = plt.subplots(figsize=(4.5, 3), constrained_layout=True)
 
-    ax.axvspan(-threshold, threshold, color="0.85", alpha=0.5, zorder=0)
+    ax.axvspan(-threshold, threshold, color="#f28e76", alpha=0.28, zorder=0)
     bins = np.arange(-x_clip, x_clip + bin_width, bin_width)
     ax.hist(
         diffs_display,
@@ -122,25 +127,26 @@ def plot_booking_deviation(
         linewidth=0.3,
         zorder=1,
     )
-    ax.axvline(0, color="black", linewidth=0.7, linestyle="--", zorder=2)
+    ax.axvline(0, color="#009e73", linewidth=1.25, linestyle="-", zorder=2)
 
-    ax.set_xlabel(r"Booked - realized room time (minutes)")
+    ax.set_xlabel(r"Realized room time - booked time (minutes)")
     ax.set_ylabel("Number of cases")
     ax.set_xlim(-x_clip, x_clip)
     ax.set_xticks(np.arange(-x_clip, x_clip + 1, 60))
 
     annotation = (
-        f"n = {n:,}\n"
+        f"N = {n:,}\n"
+        f"Mean = {mean_error:.0f} min\n"
         f"MAE = {mae:.0f} min\n"
     )
     ax.text(
-        0.97,
+        0.03,
         0.97,
         annotation,
         transform=ax.transAxes,
         fontsize=8,
         verticalalignment="top",
-        horizontalalignment="right",
+        horizontalalignment="left",
         bbox=dict(
             boxstyle="round,pad=0.3",
             facecolor="white",
@@ -151,6 +157,11 @@ def plot_booking_deviation(
 
     fig.savefig(output_path, format="pdf")
     plt.close(fig)
+    print(f"{figure_label} summary:")
+    print(f"  N: {n:,}")
+    print(f"  Mean realized - booked error: {mean_error:.1f} min")
+    print(f"  Percentage overbooked (booked > realized): {overbooked:.1f}%")
+    print(f"  Percentage in shaded band (|error| <= {threshold:g} min): {within:.1f}%")
     print(f"Saved {output_path}")
 
 
@@ -237,9 +248,9 @@ def load_paired_weekly_minutes(csv_path: Path) -> dict[str, np.ndarray]:
     return paired_minutes
 
 
-def _paired_axis_upper(x: np.ndarray, y: np.ndarray) -> float:
-    data_min = min(float(np.min(x)), float(np.min(y)))
-    data_max = max(float(np.max(x)), float(np.max(y)))
+def _minute_axis_upper(*series: np.ndarray) -> float:
+    data_min = min(float(np.min(values)) for values in series)
+    data_max = max(float(np.max(values)) for values in series)
     if data_min < 0:
         raise ValueError("Physical minute values must be nonnegative.")
     if data_max == 0:
@@ -253,10 +264,10 @@ def _plot_weekly_minutes_panel(
     x: np.ndarray,
     y: np.ndarray,
     *,
-    title: str,
+    panel_label: str,
     ylabel: str,
+    y_upper: float,
 ) -> None:
-    max_axis = _paired_axis_upper(x, y)
     week_min = float(np.min(weeks))
     week_max = float(np.max(weeks))
     week_ticks = [week_min]
@@ -278,75 +289,102 @@ def _plot_weekly_minutes_panel(
     )
     ax.scatter(
         weeks,
-        y,
-        s=11,
-        color="#222222",
-        alpha=0.9,
-        edgecolors="none",
-        linewidths=0,
-        label="Status quo",
-        zorder=2,
-    )
-    ax.scatter(
-        weeks,
         x,
         s=11,
-        color="#8a8178",
+        color="#3e7cb1",
         alpha=0.9,
         edgecolors="none",
         linewidths=0,
         label="Oracle",
+        zorder=2,
+    )
+    ax.scatter(
+        weeks,
+        y,
+        s=11,
+        color="#c46a3a",
+        alpha=0.9,
+        edgecolors="none",
+        linewidths=0,
+        label="Status quo",
         zorder=3,
     )
     ax.set_xlim(week_min - 1, week_max + 1)
     ax.set_xticks(week_ticks)
-    ax.set_ylim(0, max_axis)
-    ax.set_title(title, fontsize=9, pad=6)
-    ax.set_xlabel("Week")
+    ax.set_ylim(0, y_upper)
+    ax.set_xlabel("Week", labelpad=3)
     ax.set_ylabel(ylabel)
-    ax.grid(True, color="0.9", linewidth=0.5)
+    ax.yaxis.grid(True, color="0.9", linewidth=0.5)
+    ax.xaxis.grid(False)
     ax.tick_params(axis="both", which="major", labelsize=8)
+    ax.text(
+        0.5,
+        -0.34,
+        panel_label,
+        transform=ax.transAxes,
+        fontsize=9,
+        fontweight="bold",
+        horizontalalignment="center",
+        verticalalignment="top",
+    )
 
 
 def plot_weekly_oracle_statusquo_minutes(
     paired_minutes: dict[str, np.ndarray],
     output_path: Path | str,
 ) -> None:
-    """Two-panel weekly physical-minutes profile against the oracle."""
+    """Side-by-side weekly physical-minutes profile against the oracle."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 1, figsize=(5.25, 3.8), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(7.0, 2.8),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
     weeks = paired_minutes[WEEK_COLUMN]
+    y_upper = _minute_axis_upper(
+        paired_minutes["realized_overtime_minutes__Oracle"],
+        paired_minutes["realized_overtime_minutes__StatusQuo"],
+        paired_minutes["realized_idle_minutes__Oracle"],
+        paired_minutes["realized_idle_minutes__StatusQuo"],
+    )
 
     _plot_weekly_minutes_panel(
         axes[0],
         weeks,
         paired_minutes["realized_overtime_minutes__Oracle"],
         paired_minutes["realized_overtime_minutes__StatusQuo"],
-        title="(a) Overtime",
-        ylabel="Overtime (min/week)",
+        panel_label="(a) Overtime",
+        ylabel="Minutes per week",
+        y_upper=y_upper,
     )
     _plot_weekly_minutes_panel(
         axes[1],
         weeks,
         paired_minutes["realized_idle_minutes__Oracle"],
         paired_minutes["realized_idle_minutes__StatusQuo"],
-        title="(b) Idle time",
-        ylabel="Idle time (min/week)",
+        panel_label="(b) Idle time",
+        ylabel="",
+        y_upper=y_upper,
     )
 
-    axes[0].set_xlabel("")
-    axes[0].legend(
-        loc="upper left",
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.14),
         ncol=2,
         frameon=False,
         fontsize=8,
         handletextpad=0.4,
-        columnspacing=1.2,
+        columnspacing=1.4,
     )
-    fig.align_ylabels(axes)
-    fig.savefig(output_path, format="pdf")
+    fig.savefig(output_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {output_path}")
 
@@ -356,6 +394,12 @@ def main() -> int:
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA, help="Path to the .xlsx data file.")
     parser.add_argument("--sheet", default=None, help="Workbook sheet name. Defaults to the first sheet.")
     parser.add_argument("--output", type=Path, default=DEFAULT_FIGURE1_PATH, help="Output path for Figure 1.")
+    parser.add_argument(
+        "--trimmed-output",
+        type=Path,
+        default=DEFAULT_FIGURE1_TRIMMED_PATH,
+        help="Output path for the Figure 1 version filtered to bounded absolute errors.",
+    )
     parser.add_argument(
         "--paired-weekly-data",
         type=Path,
@@ -381,6 +425,12 @@ def main() -> int:
     parser.add_argument("--x-clip", type=float, default=480, help="Displayed x-axis clipping limit in minutes.")
     parser.add_argument("--bin-width", type=float, default=5, help="Histogram bin width in minutes.")
     parser.add_argument(
+        "--trimmed-abs-limit",
+        type=float,
+        default=DEFAULT_FIGURE1_TRIMMED_ABS_LIMIT,
+        help="Absolute realized-booked error limit for the second Figure 1 version.",
+    )
+    parser.add_argument(
         "--max-case-minutes",
         type=float,
         default=DEFAULT_MAX_PLANNING_CASE_MINUTES,
@@ -400,6 +450,21 @@ def main() -> int:
             threshold=args.threshold,
             x_clip=args.x_clip,
             bin_width=args.bin_width,
+        )
+        finite_diffs = diffs[np.isfinite(diffs)]
+        trimmed_diffs = finite_diffs[np.abs(finite_diffs) <= args.trimmed_abs_limit]
+        removed = len(finite_diffs) - len(trimmed_diffs)
+        print(
+            f"Figure 1 trimmed version removes {removed:,} cases with "
+            f"|realized - booked error| > {args.trimmed_abs_limit:g} min."
+        )
+        plot_booking_deviation(
+            trimmed_diffs,
+            args.trimmed_output,
+            threshold=args.threshold,
+            x_clip=min(args.x_clip, args.trimmed_abs_limit),
+            bin_width=args.bin_width,
+            figure_label=f"Figure 1 (|error| <= {args.trimmed_abs_limit:g} min)",
         )
 
     if args.figure in {"all", "weekly-minutes"}:
