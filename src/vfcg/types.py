@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.core.column import ScheduleColumn
+from src.solvers.result import SolveDiagnostics
 
 
 @dataclass
@@ -16,6 +17,7 @@ class OracleResult:
     realized_cost: float
     status: str
     solve_time: float
+    diagnostics: SolveDiagnostics | None = None
 
 
 @dataclass

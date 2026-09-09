@@ -13,6 +13,7 @@ from gurobipy import GRB, LinExpr, quicksum
 from src.core.column import ScheduleColumn, extract_column_from_model
 from src.core.config import CostConfig, SolverConfig
 from src.core.types import BlockCalendar, BlockId, CaseRecord, ScheduleAssignment, ScheduleResult
+from src.solvers.result import PricingResult, SolveDiagnostics, diagnostics_from_model, status_name
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,7 @@ class WeeklyModelArtifacts:
 
 
 def _status_name(status: int) -> str:
-    mapping = {
-        GRB.OPTIMAL: "OPTIMAL",
-        GRB.TIME_LIMIT: "TIME_LIMIT",
-        GRB.INFEASIBLE: "INFEASIBLE",
-        GRB.INTERRUPTED: "INTERRUPTED",
-        GRB.SUBOPTIMAL: "SUBOPTIMAL",
-    }
-    return mapping.get(status, str(status))
+    return status_name(status)
 
 
 def _build_weekly_schedule_model(
@@ -154,7 +148,7 @@ def _build_weekly_schedule_model(
     )
 
 
-def solve_pricing(
+def solve_pricing_detailed(
     n_cases: int,
     durations: np.ndarray,
     calendar: BlockCalendar,
@@ -163,9 +157,11 @@ def solve_pricing(
     case_eligible_blocks: Dict[int, List[BlockId]],
     turnover: float,
     model_name: str = "Pricing",
-) -> Tuple[Optional[ScheduleColumn], float]:
+) -> PricingResult:
     if n_cases == 0 or not calendar.block_ids:
-        return None, float("inf")
+        return PricingResult(None, SolveDiagnostics(
+            "Empty", None, None, float("inf"), float("inf"), 0.0, 0, False,
+        ))
 
     dummy_cases = [
         CaseRecord(
@@ -198,11 +194,33 @@ def solve_pricing(
     artifacts.model.setObjective(artifacts.predicted_total_cost, GRB.MINIMIZE)
     artifacts.model.optimize()
 
-    if artifacts.model.SolCount == 0:
-        return None, float("inf")
+    try:
+        diagnostics = diagnostics_from_model(artifacts.model)
+        col = None
+        if diagnostics.sol_count:
+            col = extract_column_from_model(artifacts.model, n_cases, calendar, artifacts.x, artifacts.v, artifacts.y, artifacts.r)
+        return PricingResult(col, diagnostics)
+    finally:
+        artifacts.model.dispose()
 
-    col = extract_column_from_model(artifacts.model, n_cases, calendar, artifacts.x, artifacts.v, artifacts.y, artifacts.r)
-    return col, float(artifacts.model.ObjVal)
+
+def solve_pricing(
+    n_cases: int,
+    durations: np.ndarray,
+    calendar: BlockCalendar,
+    costs: CostConfig,
+    solver_cfg: SolverConfig,
+    case_eligible_blocks: Dict[int, List[BlockId]],
+    turnover: float,
+    model_name: str = "Pricing",
+) -> Tuple[Optional[ScheduleColumn], float]:
+    """Legacy tuple API. Use solve_pricing_detailed for status and bounds."""
+    result = solve_pricing_detailed(
+        n_cases, durations, calendar, costs, solver_cfg, case_eligible_blocks,
+        turnover, model_name,
+    )
+    value = result.diagnostics.obj_val
+    return result.column, value if value is not None else float("inf")
 
 
 def solve_weekly_optimistic(
@@ -278,7 +296,9 @@ def solve_weekly_optimistic(
     predicted_cost = float(col.compute_cost(np.asarray(planning_durations, dtype=float), costs, turnover))
     realized_cost = float(col.compute_cost(np.asarray(realized_durations, dtype=float), costs, turnover))
 
-    return col, predicted_cost, realized_cost, _status_name(pass_b.model.Status), time.perf_counter() - t0
+    # An optimal second pass cannot certify a time-limited first pass.
+    status = pass_b.model.Status if pass_a.model.Status == GRB.OPTIMAL else pass_a.model.Status
+    return col, predicted_cost, realized_cost, _status_name(status), time.perf_counter() - t0
 
 
 def solve_deterministic(
@@ -298,7 +318,7 @@ def solve_deterministic(
     if n_cases == 0 or not all_block_ids:
         return ScheduleResult(assignments=[ScheduleAssignment(case_id=c.case_id) for c in cases], solver_status="Empty")
 
-    column, obj = solve_pricing(
+    detailed = solve_pricing_detailed(
         n_cases=n_cases,
         durations=durations,
         calendar=calendar,
@@ -309,22 +329,18 @@ def solve_deterministic(
         model_name=model_name,
     )
 
+    column = detailed.column
     if column is None:
-        return ScheduleResult(
+        result = ScheduleResult(
             assignments=[ScheduleAssignment(case_id=c.case_id) for c in cases],
-            solver_status="INFEASIBLE",
-            diagnostics={
-                "forced_defer_count": forced_defer,
-                "turnover_used": turnover,
-                "opened_blocks_count": 0,
-                "candidate_blocks_count": len(all_block_ids),
-            },
         )
-
-    result = column.to_schedule_result(cases)
-    result.objective_value = obj
-    result.solver_status = "OPTIMAL"
+    else:
+        result = column.to_schedule_result(cases)
+    result.objective_value = detailed.diagnostics.obj_val
+    result.solver_status = detailed.diagnostics.status
+    result.solve_time_seconds = detailed.diagnostics.runtime_seconds
     result.diagnostics = {
+        **detailed.diagnostics.as_dict(),
         "forced_defer_count": forced_defer,
         "turnover_used": turnover,
         "opened_blocks_count": len(result.opened_blocks),
@@ -335,9 +351,11 @@ def solve_deterministic(
 
 
 def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
+    model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.TimeLimit = cfg.time_limit_seconds
     model.Params.MIPGap = cfg.mip_gap
+    if cfg.mip_gap_abs is not None:
+        model.Params.MIPGapAbs = cfg.mip_gap_abs
     model.Params.Threads = cfg.threads
-    model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.MIPFocus = 1
     model.Params.Symmetry = 2

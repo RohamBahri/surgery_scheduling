@@ -11,6 +11,9 @@ class Col:
     PATIENT_ID = "patient_id"
     PATIENT_TYPE = "patient_type"
     CASE_SERVICE = "case_service"
+    CASE_SERVICE_RAW = "case_service_raw"
+    SURGEON_CODE_RAW = "surgeon_code_raw"
+    PROCEDURE_ID_RAW = "procedure_id_raw"
     MAIN_PROCEDURE = "main_procedure"
     PROCEDURE_ID = "main_procedure_id"
     OPERATING_ROOM = "operating_room"
@@ -142,6 +145,7 @@ class WeeklyInstance:
     cases: List[CaseRecord]
     calendar: BlockCalendar
     case_eligible_blocks: Dict[int, List[BlockId]] = field(default_factory=dict)
+    eligibility_diagnostics: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def num_cases(self) -> int:

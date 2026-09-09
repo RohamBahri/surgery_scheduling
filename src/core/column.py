@@ -111,7 +111,8 @@ class ScheduleColumn:
                     )
                 )
 
-        return ScheduleResult(assignments=assignments, opened_blocks=set(self.v_open), solver_status="OPTIMAL")
+        # A stored schedule carries feasibility, not an optimization certificate.
+        return ScheduleResult(assignments=assignments, opened_blocks=set(self.v_open), solver_status="FEASIBLE")
 
 
 def extract_column_from_model(
