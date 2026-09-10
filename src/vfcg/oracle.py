@@ -8,7 +8,7 @@ import numpy as np
 from src.core.config import CapacityConfig, CostConfig, SolverConfig
 from src.core.types import CaseRecord
 from src.estimation.recommendation import RecommendationModel, WeekRecommendationData
-from src.solvers.deterministic import solve_pricing
+from src.solvers.deterministic import solve_pricing_detailed
 from src.vfcg.types import OracleResult
 
 
@@ -53,7 +53,7 @@ class ExactFollowerOracle:
         t0 = time.perf_counter()
 
         d_post = np.asarray(recommendation_model.compute_post_review(w, week_data), dtype=float)
-        col, predicted_cost = solve_pricing(
+        result = solve_pricing_detailed(
             n_cases=week_data.n_cases,
             durations=d_post,
             calendar=week_data.calendar,
@@ -63,6 +63,7 @@ class ExactFollowerOracle:
             turnover=turnover,
             model_name=f"vfcg_oracle_w{week_data.week_index}",
         )
+        col = result.column
         if col is None:
             raise RuntimeError(
                 f"Exact follower oracle failed to produce a predicted-optimal schedule "
@@ -74,8 +75,9 @@ class ExactFollowerOracle:
 
         return OracleResult(
             schedule=col,
-            predicted_cost=float(predicted_cost),
+            predicted_cost=float(result.diagnostics.obj_val),
             realized_cost=realized_cost,
-            status="OPTIMAL",
+            status=result.diagnostics.status,
             solve_time=float(time.perf_counter() - t0),
+            diagnostics=result.diagnostics,
         )

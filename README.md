@@ -3,8 +3,15 @@
 This repository contains the current experiment stack for incentive-aware OR scheduling.
 
 ## Current status
+
+The fixed-capacity, day-flexible weekly planner is available for a training-only
+audit. See [the audit guide](docs/weekly_planner_audit.md) for the quick command,
+frozen assumptions, outputs, and current validation limitations.
+`run_final_vf_experiment.py` is pre-planner-audit and must not be treated as the
+final paper pipeline until the audit is resolved.
+
 - Implemented: rolling-horizon evaluation with `Booked` and `Oracle` methods plus estimation and diagnostics pipelines.
-- The production learning method is now the exact VFCG stack under `src/vfcg/` with the compact weekly MIP as its only follower oracle.
+- The legacy learning method is the VFCG stack under `src/vfcg/` with the compact weekly MIP as its follower oracle.
 - The CLI and experiment runner include VFCG training diagnostics and certification outputs.
 
 ## Setup

@@ -57,6 +57,8 @@ class SolverConfig:
     mip_gap: float = 0.05
     threads: int = 0
     verbose: bool = True
+    mip_gap_abs: float | None = None
+    seed: int | None = None
 
 
 @dataclass

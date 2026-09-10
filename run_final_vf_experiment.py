@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+PRE-PLANNER-AUDIT VF EXPERIMENT: this must not be treated as the final paper
+pipeline until the fixed-capacity weekly planner audit has been resolved.
+
 FINAL full-scale experiment for the surgeon-in-the-loop OR planning paper.
 
 This script is intentionally self-contained at the experiment level. It imports
