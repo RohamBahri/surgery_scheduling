@@ -100,15 +100,19 @@ def schedule_metrics(
 
 
 def interchangeable_block_groups(instance: WeeklyInstance) -> list[list[BlockId]]:
+    """Exchange blocks with identical roles in the fixed assignment model.
+
+    Weekday and room labels do not enter its costs or constraints. Any future
+    day-dependent constraints/costs must also be respected by this key. Fixed-day
+    eligibility alone is already reflected in the complete eligible-case sets.
+    """
     cases = {bid: [] for bid in instance.calendar.block_ids}
     for i in range(instance.num_cases):
         for bid in set(instance.case_eligible_blocks.get(i, [])):
             cases[bid].append(i)
     groups = defaultdict(list)
     for b in instance.calendar.candidates:
-        groups[(b.site, b.day_index, b.capacity_minutes, tuple(cases[b.id]))].append(
-            b.id
-        )
+        groups[(b.site, b.capacity_minutes, tuple(cases[b.id]))].append(b.id)
     return [sorted(bids) for bids in groups.values() if len(bids) > 1]
 
 
@@ -124,7 +128,8 @@ class FixedCapacityResult:
     def _shift(self, value: float | None, target: str) -> float | None:
         if value is None:
             return None
-        if target == self.objective_mode:
+        native_scale = "psi" if self.objective_mode == "psi" else "phi"
+        if target == native_scale:
             return value
         return value + self.K if target == "phi" else value - self.K
 
@@ -166,8 +171,8 @@ def solve_fixed_capacity_assignment(
     """
     if backend != "gurobi":
         raise ValueError(f"Unsupported backend: {backend}")
-    if objective_mode not in {"phi", "psi"}:
-        raise ValueError("objective_mode must be 'phi' or 'psi'")
+    if objective_mode not in {"phi", "psi_shifted", "psi"}:
+        raise ValueError("objective_mode must be 'phi', 'psi_shifted', or 'psi'")
     d = np.asarray(durations, dtype=float)
     if d.shape != (instance.num_cases,) or not np.all(np.isfinite(d)) or np.any(d < 0):
         raise ValueError(
@@ -273,6 +278,10 @@ def solve_fixed_capacity_assignment(
             ) * gp.quicksum(ots) + costs.idle_per_minute * turnover * gp.quicksum(
                 u.values()
             )
+            # The reduced models differ ONLY by an objective constant. In
+            # particular psi_shifted must not create the direct Phi idle terms.
+            if objective_mode == "psi_shifted":
+                objective += k
         model.setObjective(objective, GRB.MINIMIZE)
         if warm_start is not None:
             if isinstance(warm_start, ScheduleColumn):

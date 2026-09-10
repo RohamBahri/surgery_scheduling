@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 from datetime import date, datetime
-from itertools import product
+from itertools import permutations, product
 from types import SimpleNamespace
 
 import numpy as np
@@ -25,7 +25,11 @@ from src.planning.eligibility import (
     resolve_eligibility,
 )
 from src.planning.instance import build_weekly_instance_with_calendar
-from src.planning.retrospective import historical_baseline, turnover_audit
+from src.planning.retrospective import (
+    historical_baseline,
+    reassignment_metrics,
+    turnover_audit,
+)
 from src.planning.roster import build_fixed_roster
 from src.solvers.deterministic import (
     solve_deterministic,
@@ -47,9 +51,9 @@ EXACT = SolverConfig(
 )
 
 
-def make_instance(durations=(100, 200), capacities=(480, 480)):
+def make_instance(durations=(100, 200), capacities=(480, 480), days=None):
     blocks = [
-        CandidateBlock(0, "TGH", f"OR{j}", cap, 0, True)
+        CandidateBlock(days[j] if days else 0, "TGH", f"OR{j}", cap, 0, True)
         for j, cap in enumerate(capacities)
     ]
     cases = [
@@ -107,7 +111,7 @@ def test_one_case_has_zero_turnover():
 @pytest.mark.parametrize("tau", [0, 20, 30, 40])
 @pytest.mark.parametrize("durations", [(55, 65, 25, 45), (101, 107, 70, 40)])
 def test_phi_psi_and_symmetry_match_exhaustive_optimum(tau, durations):
-    inst = make_instance(durations, (100, 100, 90))
+    inst = make_instance(durations, (100, 100, 90), days=(0, 4, 0))
     # The third block has different capacity/eligibility and cannot be exchanged.
     inst.case_eligible_blocks[0] = inst.calendar.block_ids[:2]
     bids = inst.calendar.block_ids
@@ -128,7 +132,7 @@ def test_phi_psi_and_symmetry_match_exhaustive_optimum(tau, durations):
             total
         )
     optimum = min(scores)
-    for mode, symmetry in product(("phi", "psi"), (False, True)):
+    for mode, symmetry in product(("phi", "psi_shifted", "psi"), (False, True)):
         result = solve_fixed_capacity_assignment(
             inst, durations, COSTS, tau, EXACT, mode, symmetry_breaking=symmetry
         )
@@ -142,14 +146,23 @@ def test_phi_psi_and_symmetry_match_exhaustive_optimum(tau, durations):
 
 
 def test_different_eligibility_is_not_symmetric():
-    inst = make_instance()
+    inst = make_instance(days=(0, 4))
     assert len(interchangeable_block_groups(inst)) == 1
     inst.case_eligible_blocks[0] = inst.calendar.block_ids[:1]
     assert interchangeable_block_groups(inst) == []
 
 
+def test_fixed_day_eligibility_prevents_cross_day_symmetry():
+    inst = make_instance(days=(0, 4))
+    bids = inst.calendar.block_ids
+    inst.case_eligible_blocks = {0: [bids[0]], 1: [bids[1]]}
+    assert interchangeable_block_groups(inst) == []
+    result = solve_fixed_capacity_assignment(inst, [100, 200], COSTS, 30, EXACT)
+    assert set(result.column.z_assign) == {(0, bids[0]), (1, bids[1])}
+
+
 def test_warm_start_is_relabelled_safely():
-    inst = make_instance((100, 200, 60))
+    inst = make_instance((100, 200, 60), days=(0, 4))
     bids = inst.calendar.block_ids
     warm = column_from_assignment(inst, {0: bids[1], 1: bids[0], 2: bids[1]})
     r = solve_fixed_capacity_assignment(
@@ -173,7 +186,7 @@ def test_empty_roster_site_and_no_deferral():
 
 def test_empty_week_keeps_fixed_idle_capacity():
     inst = make_instance(())
-    for mode in ("phi", "psi"):
+    for mode in ("phi", "psi_shifted", "psi"):
         r = solve_fixed_capacity_assignment(inst, [], COSTS, 30, EXACT, mode)
         assert r.phi_ub == pytest.approx(9600)
         assert r.column.y_used == frozenset()
@@ -220,7 +233,11 @@ def training_frame():
 def test_observed_roster_and_median_rounding_and_external_calendar():
     df, cfg = training_frame(), Config()
     observed = build_fixed_roster(
-        df, pd.Timestamp("2024-01-01"), cfg, "observed_activity_proxy"
+        df,
+        pd.Timestamp("2024-01-01"),
+        cfg,
+        "observed_activity_proxy",
+        allow_retrospective=True,
     )
     assert {(b.day_index, b.room) for b in observed.calendar.candidates} == {
         (0, "OR1"),
@@ -252,7 +269,15 @@ def test_observed_roster_and_median_rounding_and_external_calendar():
     assert len(base["missing_historical_blocks"]) == 1
     with pytest.raises(ValueError, match="training week"):
         build_fixed_roster(
-            df, pd.Timestamp("2024-02-05"), cfg, "observed_activity_proxy"
+            df,
+            pd.Timestamp("2024-02-05"),
+            cfg,
+            "observed_activity_proxy",
+            allow_retrospective=True,
+        )
+    with pytest.raises(ValueError, match="allow_retrospective=True"):
+        build_fixed_roster(
+            df, pd.Timestamp("2024-01-01"), cfg, "observed_activity_proxy"
         )
 
 
@@ -374,7 +399,11 @@ def test_real_time_limit_without_incumbent_preserves_termination():
 
 
 def test_audit_pair_and_calibration_with_real_small_solves():
-    from scripts.run_weekly_planner_audit import calibration_row, run_solve, scale_pair
+    from scripts.run_weekly_planner_audit import (
+        calibration_row,
+        run_solve,
+        scale_comparison,
+    )
 
     inst = make_instance()
     rows, errors = [], []
@@ -385,10 +414,17 @@ def test_audit_pair_and_calibration_with_real_small_solves():
     psi, psi_row = run_solve(
         inst, [100, 200], Config(), EXACT, "psi", 30, key, rows, errors
     )
-    scale = scale_pair(key, phi_row, psi_row)
+    shifted, shifted_row = run_solve(
+        inst, [100, 200], Config(), EXACT, "psi_shifted", 30, key, rows, errors
+    )
+    scale = scale_comparison(
+        key, {"phi": phi_row, "psi_shifted": shifted_row, "psi": psi_row}
+    )
     assert not errors
     assert scale["phi_obj_val"] == pytest.approx(scale["K_plus_psi"])
     assert scale["identity_error"] < 1e-6
+    assert scale["psi_shifted_psi_ub"] == pytest.approx(scale["psi_obj_val"])
+    assert scale["psi_shifted_obj_val"] == pytest.approx(scale["phi_obj_val"])
     baseline = historical_baseline(inst, COSTS, 30)
     calibration = calibration_row(
         key, inst, baseline, {"booked": [phi, psi], "realized": [phi, psi]}, COSTS
@@ -403,3 +439,185 @@ def test_no_hidden_hard_overtime_limit():
     result = solve_fixed_capacity_assignment(inst, [800], COSTS, 30, EXACT)
     assert result.metrics["overtime_minutes"] == 700
     assert result.phi_ub == pytest.approx(10500)
+
+
+@pytest.mark.parametrize("durations", [(100, 200), (900, 1000)])
+def test_reduced_models_differ_only_in_objective_constant(monkeypatch, durations):
+    import gurobipy as gp
+
+    snapshots = []
+    optimize = gp.Model.optimize
+
+    def inspect_then_optimize(model, *args, **kwargs):
+        model.update()
+        variables, constraints = model.getVars(), model.getConstrs()
+        snapshots.append(
+            {
+                "A": model.getA().toarray(),
+                "variables": [
+                    (v.VarName, v.VType, v.LB, v.UB, v.Obj) for v in variables
+                ],
+                "constraints": [(c.ConstrName, c.Sense, c.RHS) for c in constraints],
+                "constant": model.ObjCon,
+                "params": [
+                    getattr(model.Params, p)
+                    for p in ("TimeLimit", "MIPGap", "MIPGapAbs", "Threads", "Seed")
+                ],
+            }
+        )
+        return optimize(model, *args, **kwargs)
+
+    monkeypatch.setattr(gp.Model, "optimize", inspect_then_optimize)
+    inst = make_instance(durations, days=(0, 4))
+    results = [
+        solve_fixed_capacity_assignment(
+            inst, durations, COSTS, 30, replace(EXACT, seed=17), mode
+        )
+        for mode in ("psi", "psi_shifted")
+    ]
+    a, b = snapshots
+    np.testing.assert_array_equal(a["A"], b["A"])
+    for key in ("variables", "constraints", "params"):
+        assert a[key] == b[key]
+    assert a["params"] == [10, 0, 0, 1, 17]
+    assert b["constant"] - a["constant"] == results[0].K
+    assert results[0].phi_ub == pytest.approx(results[1].phi_ub)
+    assert results[0].psi_lb == pytest.approx(results[1].psi_lb)
+
+
+@pytest.mark.parametrize("mode", ["phi", "psi_shifted", "psi"])
+@pytest.mark.parametrize("k", [-500, 0, 6000])
+@pytest.mark.parametrize("sol_count", [0, 1])
+def test_bound_translation_for_all_modes_and_constant_signs(mode, k, sol_count):
+    offset = 0 if mode == "psi" else k
+    diag = diagnostics_from_model(
+        SimpleNamespace(
+            Status=9,
+            ObjVal=200 + offset,
+            ObjBound=150 + offset,
+            Runtime=1,
+            SolCount=sol_count,
+        )
+    )
+    result = FixedCapacityResult(None, diag, mode, k, None, 0)
+    assert result.psi_lb == 150 and result.phi_lb == 150 + k
+    assert result.psi_ub == (200 if sol_count else None)
+    assert result.phi_ub == (200 + k if sol_count else None)
+    assert diag.absolute_gap == (50 if sol_count else float("inf"))
+
+
+def test_reassignment_invariant_to_block_labels_and_sensitive_to_partition():
+    inst = make_instance((100, 100, 100, 100), days=(0, 4))
+    a, b = inst.calendar.block_ids
+    historical = {0: a, 1: a, 2: b, 3: b}
+    swapped = {0: b, 1: b, 2: a, 3: a}
+    assert reassignment_metrics(inst, swapped, historical) == {
+        "fraction_reassigned_raw": 1,
+        "fraction_reassigned_modulo_symmetry": 0,
+    }
+    split = {0: a, 1: b, 2: a, 3: b}
+    assert (
+        reassignment_metrics(inst, split, historical)[
+            "fraction_reassigned_modulo_symmetry"
+        ]
+        == 0.5
+    )
+    # Different eligibility blocks cannot be relabelled, even across weekdays.
+    inst.case_eligible_blocks[0] = [b]
+    assert (
+        reassignment_metrics(inst, swapped, historical)[
+            "fraction_reassigned_modulo_symmetry"
+        ]
+        == 1
+    )
+
+
+def test_reassignment_matches_exhaustive_bijections_with_missing_history():
+    inst = make_instance((10, 20, 30), (100, 100, 100), days=(0, 1, 4))
+    bids = inst.calendar.block_ids
+    missing = bids[0]._replace(room="absent")
+    historical = {0: bids[2], 1: bids[2], 2: missing}
+    for choices in product(bids, repeat=3):
+        assignment = dict(enumerate(choices))
+        best = (
+            min(
+                sum(
+                    dict(zip(bids, p))[assignment[i]] != historical[i]
+                    for i in historical
+                )
+                for p in permutations(bids)
+            )
+            / 3
+        )
+        assert reassignment_metrics(inst, assignment, historical)[
+            "fraction_reassigned_modulo_symmetry"
+        ] == pytest.approx(best)
+
+
+def test_crossfit_excludes_evaluated_week_without_changing_final_rule():
+    from scripts.run_weekly_planner_audit import (
+        eligibility_crossfit_rows,
+        summarize_crossfit,
+    )
+    from src.planning.roster import week_starts
+
+    df = training_frame()
+    extra = df.iloc[[0]].copy()
+    extra[Col.ACTUAL_START] += pd.Timedelta(days=14)
+    extra[Col.CASE_UID] = 5
+    df = pd.concat([df, extra], ignore_index=True)
+    starts = sorted(week_starts(df).unique())
+    history = fit_service_room_history(df)
+    original = dict(history.weeks_by_pair)
+    rows = eligibility_crossfit_rows(
+        df, [pd.Timestamp(w) for w in starts], Config(), history
+    )
+    assert len(rows) == 3 * 3 * 4
+    assert history.weeks_by_pair == original
+    for row in rows:
+        assert row["in_sample_training_weeks"] == 3
+        assert row["loo_training_weeks"] == 2
+        assert not row["roster_refitted"]
+        if row["threshold_weeks"] == 3:
+            assert row["in_sample_primary_coverage"] == 1
+            assert row["loo_primary_coverage"] == 0
+            assert row["delta_fallback_rate"] == 1
+    for row in summarize_crossfit(rows):
+        assert row["n_weeks"] == 3 and row["n_cases"] == 5
+        if row["threshold_weeks"] == 3:
+            assert row["delta_fallback_rate"] == 1
+
+
+def test_proxy_comparison_uses_paired_intervals_and_reports_missing_solves():
+    from scripts.run_weekly_planner_audit import summarize_proxy_comparison
+
+    rows = [
+        {
+            "week_start": "w1",
+            "roster": "regular_template",
+            "durations": "booked",
+            "K": 10000,
+            "psi_psi_ub": 120,
+            "psi_psi_lb": 100,
+        },
+        {
+            "week_start": "w1",
+            "roster": "observed_activity_proxy",
+            "durations": "booked",
+            "K": 5000,
+            "psi_psi_ub": 110,
+            "psi_psi_lb": 90,
+        },
+    ]
+    row = summarize_proxy_comparison(rows)[0]
+    assert row["status"] == "AVAILABLE"
+    assert row["mean_K_difference_a_minus_b"] == 5000
+    assert row["mean_psi_ub_difference_a_minus_b"] == 10
+    assert row["mean_optimal_psi_difference_lb"] == -10
+    assert row["mean_optimal_psi_difference_ub"] == 30
+    rows.append({**rows[0], "week_start": "w2", "psi_psi_ub": None})
+    rows.append({**rows[1], "week_start": "w2"})
+    row = summarize_proxy_comparison(rows)[0]
+    assert row["n_common_weeks"] == 2 and row["n_paired_finite_intervals"] == 1
+    assert row["status"] == "UNAVAILABLE"
+    assert row["mean_psi_ub_difference_a_minus_b"] is None

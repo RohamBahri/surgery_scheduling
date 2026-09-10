@@ -51,10 +51,18 @@ def build_fixed_roster(
     horizon_start: pd.Timestamp,
     config: Config,
     source: str = "regular_template",
+    *,
+    allow_retrospective: bool = False,
 ) -> RosterBuild:
+    """Build fixed capacity; observed activity requires an explicit audit opt-in."""
     start = pd.Timestamp(horizon_start).normalize()
     if source not in ROSTER_SOURCES:
         raise ValueError(f"Unknown roster source: {source}")
+    if source == "observed_activity_proxy" and not allow_retrospective:
+        raise ValueError(
+            "observed_activity_proxy is retrospective-only; "
+            "pass allow_retrospective=True for retrospective calibration"
+        )
     if config.data.horizon_days != 7 or start.weekday() != 0:
         raise ValueError(
             "Fixed weekly rosters require a Monday start and seven-day horizon"

@@ -356,6 +356,8 @@ def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
     model.Params.MIPGap = cfg.mip_gap
     if cfg.mip_gap_abs is not None:
         model.Params.MIPGapAbs = cfg.mip_gap_abs
+    if cfg.seed is not None:
+        model.Params.Seed = cfg.seed
     model.Params.Threads = cfg.threads
     model.Params.MIPFocus = 1
     model.Params.Symmetry = 2

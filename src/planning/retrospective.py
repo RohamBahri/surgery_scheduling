@@ -6,7 +6,43 @@ import numpy as np
 import pandas as pd
 
 from src.core.types import BlockId, Col, WeeklyInstance
-from src.solvers.fixed_capacity import column_from_assignment, schedule_metrics
+from src.solvers.fixed_capacity import (
+    column_from_assignment,
+    interchangeable_block_groups,
+    schedule_metrics,
+)
+
+
+def reassignment_metrics(instance: WeeklyInstance, assignment, historical) -> dict:
+    """Literal moves and minimum moves under valid model block permutations.
+
+    Maximum-overlap matching within each interchangeable group avoids arbitrary
+    canonical labels, even when case partitions differ. Missing historical
+    blocks remain unmatched. The adjusted metric describes model equivalence,
+    not clinical interchangeability of actual days/rooms.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    column_from_assignment(instance, assignment)
+    if set(historical) != set(range(instance.num_cases)):
+        raise ValueError("Historical assignment must cover every case")
+    n = instance.num_cases
+    raw_matches = sum(assignment[i] == historical[i] for i in historical)
+    adjusted_matches = raw_matches
+    for group in interchangeable_block_groups(instance):
+        index = {bid: j for j, bid in enumerate(group)}
+        overlap = np.zeros((len(group), len(group)), dtype=int)
+        for i, bid in assignment.items():
+            if bid in index and historical[i] in index:
+                overlap[index[bid], index[historical[i]]] += 1
+        left, right = linear_sum_assignment(-overlap)
+        adjusted_matches += int(overlap[left, right].sum() - np.trace(overlap))
+    return {
+        "fraction_reassigned_raw": (n - raw_matches) / n if n else 0.0,
+        "fraction_reassigned_modulo_symmetry": (
+            (n - adjusted_matches) / n if n else 0.0
+        ),
+    }
 
 
 def historical_assignment(instance: WeeklyInstance) -> dict[int, BlockId]:
