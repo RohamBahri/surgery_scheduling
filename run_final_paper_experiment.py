@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Final paper experiment using the audited fixed-capacity weekly planner.
+"""Final two-site paper experiment using the audited fixed-capacity planner.
 
-This driver deliberately reuses the validated RA/OS/VF learning machinery in
-``run_final_vf_experiment.py`` while replacing the pre-audit planning layer.
-The scientific primary specification is frozen to:
+The primary experiment pools the two largest cleaned UHN sites, TGH and TWH,
+for learning while preserving physically separate site capacity.  Every weekly
+instance contains both sites; same-site eligibility forbids cross-site
+assignment, so the weekly objective is exactly the sum of the TGH and TWH
+planning costs under one shared recommendation policy.
 
-* TGH, Monday-Friday, 72 training weeks / 22 final holdout weeks;
+Frozen scientific specification
+--------------------------------
+* TGH + TWH, Monday-Friday, 72 training weeks / 22 final holdout weeks;
+* one shared case-level policy learned from both sites;
+* training-only pooled feature vocabulary with the original 111-feature budget;
 * regular_template fixed capacity fitted on the 72 training weeks only;
 * 480 minute blocks, zero activation cost, no deferral;
 * raw-service/same-site eligibility observed in >=3 training weeks;
@@ -15,25 +21,26 @@ The scientific primary specification is frozen to:
 * symmetric primary response alpha=.8, h=30;
 * Booked, Naive, RA, OS, VF, and Oracle evaluation.
 
-The old experiment file is retained as a reproducibility record of the
-pre-planner-audit pipeline. Do not run it for paper results; run this file.
+The two sites were selected from cleaned pre-holdout weekday data only.  The
+code verifies that TWH and TGH are the two largest sites before continuing.
+The feature vocabulary is also selected using the 72 training weeks only.
 
 Recommended macOS run
 ---------------------
+First run ``run_final_paper_training.py`` and review the training artifacts.
+Only then run this file once to consume the final holdout.
+
 caffeinate -i python run_final_paper_experiment.py \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifact-root artifacts/final_paper_experiment \
   --cores 15 \
   --max-wall-minutes 720
-
-The underlying experiment materializes the final holdout only after every
-training policy has been frozen and written to disk.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,36 +49,60 @@ from scipy import sparse
 import run_final_vf_experiment as base
 from src.core.column import ScheduleColumn
 from src.core.config import Config, CostConfig, SolverConfig
-from src.core.types import BlockId, Col, WeeklyInstance
+from src.core.types import BlockId, Col, Domain, WeeklyInstance
 from src.data.loader import load_data as canonical_load_data
 from src.planning.eligibility import fit_service_room_history
 from src.planning.instance import build_weekly_instance_with_calendar
 from src.planning.roster import build_fixed_roster
-from src.solvers.fixed_capacity import (
-    interchangeable_block_groups,
-    schedule_metrics,
-    solve_fixed_capacity_assignment,
-)
+from src.solvers.fixed_capacity import schedule_metrics, solve_fixed_capacity_assignment
 
-SCRIPT_VERSION = "final_paper_experiment_2026_09_23_v1"
+SCRIPT_VERSION = "final_paper_experiment_2026_09_23_two_site_v2"
 HOLDOUT_BOUNDARY = pd.Timestamp("2013-01-28")
+PRIMARY_SITES = ("TGH", "TWH")
+EXPECTED_SITE_RANKING = ("TWH", "TGH")
 PRIMARY_ROSTER = "regular_template"
 PRIMARY_ELIGIBILITY_WEEKS = 3
 PRIMARY_TURNOVER = 30.0
 PRIMARY_MIN_ACTIVATION_RATE = 0.25
 PRIMARY_OBJECTIVE = "psi"
+EXPECTED_TRAIN_CASES = 20519
+EXPECTED_HOLDOUT_CASES = 6561
+EXPECTED_TRAIN_SITE_COUNTS = {"TWH": 11295, "TGH": 9224}
+
+# Keep the feature-family sizes from the approved 111-dimensional TGH model,
+# but reselect represented levels by pooled two-site TRAINING frequency only.
+# For service/surgeon/procedure, a family budget B means B-1 explicit dummies
+# plus one __OTHER__ bucket. Site uses one TGH-vs-TWH dummy and no OTHER bucket
+# because the experiment scope is frozen to exactly these two sites.
+FEATURE_FAMILY_BUDGETS = {
+    "service": 12,
+    "surgeon": 62,
+    "procedure": 30,
+    "site": 1,
+}
+BASE_FEATURE_NAMES = (
+    "bias",
+    "booked_z",
+    "sin_week",
+    "cos_week",
+    "sin_month",
+    "cos_month",
+)
 
 
 @dataclass
 class FinalSettings(base.Settings):
     """Paper-frozen settings; computational budgets remain CLI configurable."""
 
+    site: str = "TGH+TWH"  # legacy scalar field; planning_sites is set below.
+    expected_train_cases: int = EXPECTED_TRAIN_CASES
+    expected_holdout_cases: int = EXPECTED_HOLDOUT_CASES
     opening: float = 0.0
     turnover: float = PRIMARY_TURNOVER
 
     def validate(self) -> None:
-        if self.site.upper() != "TGH":
-            raise ValueError("Final experiment is frozen to TGH.")
+        if self.site.upper() != "TGH+TWH":
+            raise ValueError("Final experiment is frozen to pooled TGH+TWH.")
         if self.train_weeks != 72 or self.holdout_weeks != 22:
             raise ValueError("Final split is frozen to 72 train / 22 holdout weeks.")
         if abs(self.alpha - 0.8) > 1e-12 or abs(self.h - 30.0) > 1e-12:
@@ -93,18 +124,171 @@ class PlanningContext:
     week_starts: tuple[pd.Timestamp, ...]
 
 
+class FinalFeatureEncoder:
+    """Leakage-safe pooled TGH/TWH case-local feature encoder.
+
+    The total dimension remains 111 so the statistical capacity and L1 scaling
+    are comparable with the previously approved experiment.  Which categorical
+    levels receive their own coefficient is re-estimated from the pooled 72-week
+    training sample only.  All omitted or future unseen levels map to OTHER.
+    """
+
+    PREFIX_TO_COLUMN = {
+        "service": Col.CASE_SERVICE,
+        "surgeon": Col.SURGEON_CODE,
+        "procedure": Col.PROCEDURE_ID,
+        "site": Col.SITE,
+    }
+
+    def __init__(self) -> None:
+        self.feature_names: list[str] = list(BASE_FEATURE_NAMES)
+        self.booked_mean = 0.0
+        self.booked_std = 1.0
+        self.references: dict[str, str] = {}
+        self.selected_levels: dict[str, list[str]] = {}
+        self.explicit_levels: dict[str, list[str]] = {}
+        self.fitted = False
+
+    @staticmethod
+    def canon(x: object) -> str:
+        if pd.isna(x):
+            return Domain.OTHER
+        value = str(x).strip()
+        return value if value and value.lower() not in {"nan", "none", "<na>"} else Domain.OTHER
+
+    @staticmethod
+    def _rank_levels(values: pd.Series) -> list[str]:
+        counts = values.value_counts(dropna=False)
+        return sorted((str(v) for v in counts.index), key=lambda v: (-int(counts.loc[v]), v))
+
+    def fit(self, frame: pd.DataFrame) -> "FinalFeatureEncoder":
+        b = pd.to_numeric(frame[Col.BOOKED_MINUTES], errors="coerce").to_numpy(float)
+        self.booked_mean = float(np.nanmean(b))
+        self.booked_std = float(np.nanstd(b))
+        if not np.isfinite(self.booked_std) or self.booked_std <= 1e-12:
+            self.booked_std = 1.0
+
+        names = list(BASE_FEATURE_NAMES)
+        for prefix, column in self.PREFIX_TO_COLUMN.items():
+            values = frame[column].map(self.canon)
+            ranked = self._rank_levels(values)
+            if prefix == "site":
+                if set(ranked) != set(PRIMARY_SITES):
+                    raise RuntimeError(f"Training feature scope has sites {ranked}, expected {PRIMARY_SITES}")
+                reference = ranked[0]
+                explicit = [v for v in ranked if v != reference]
+                if len(explicit) != FEATURE_FAMILY_BUDGETS[prefix]:
+                    raise AssertionError("Two-site feature budget changed")
+                selected = list(ranked)
+                names.extend(f"site_{v}" for v in explicit)
+            else:
+                budget = FEATURE_FAMILY_BUDGETS[prefix]
+                if len(ranked) < budget:
+                    raise RuntimeError(
+                        f"Only {len(ranked)} training levels for {prefix}; need at least {budget}"
+                    )
+                selected = ranked[:budget]
+                reference = selected[0]
+                explicit = [v for v in selected if v != reference]
+                names.extend(f"{prefix}_{v}" for v in explicit)
+                names.append(f"{prefix}___OTHER__")
+            self.references[prefix] = reference
+            self.selected_levels[prefix] = selected
+            self.explicit_levels[prefix] = explicit
+
+        if len(names) != 111:
+            raise AssertionError(f"Pooled feature schema has p={len(names)}, expected 111")
+        self.feature_names = names
+        self.fitted = True
+        return self
+
+    def transform_frame(self, frame: pd.DataFrame) -> sparse.csr_matrix:
+        if not self.fitted:
+            raise RuntimeError("feature encoder not fitted")
+        n = len(frame)
+        booked = pd.to_numeric(frame[Col.BOOKED_MINUTES], errors="coerce").fillna(self.booked_mean).to_numpy(float)
+        week = pd.to_numeric(frame[Col.WEEK_OF_YEAR], errors="coerce").fillna(1).to_numpy(float)
+        month = pd.to_numeric(frame[Col.MONTH], errors="coerce").fillna(1).to_numpy(float)
+        cols: list[np.ndarray] = [
+            np.ones(n),
+            (booked - self.booked_mean) / self.booked_std,
+            np.sin(2 * np.pi * week / 52.0),
+            np.cos(2 * np.pi * week / 52.0),
+            np.sin(2 * np.pi * month / 12.0),
+            np.cos(2 * np.pi * month / 12.0),
+        ]
+        names = list(BASE_FEATURE_NAMES)
+        for prefix, column in self.PREFIX_TO_COLUMN.items():
+            vals = frame[column].map(self.canon).to_numpy(object)
+            for level in self.explicit_levels[prefix]:
+                cols.append((vals == level).astype(float))
+                names.append(f"{prefix}_{level}")
+            if prefix != "site":
+                selected = np.asarray(self.selected_levels[prefix], dtype=object)
+                cols.append((~np.isin(vals, selected)).astype(float))
+                names.append(f"{prefix}___OTHER__")
+        if names != self.feature_names:
+            raise AssertionError("Pooled feature schema reconstruction failed")
+        return sparse.csr_matrix(np.column_stack(cols), dtype=float)
+
+    def transform_cases(self, cases: Sequence[Any]) -> sparse.csr_matrix:
+        frame = pd.DataFrame(
+            {
+                Col.BOOKED_MINUTES: [float(c.booked_duration_min) for c in cases],
+                Col.CASE_SERVICE: [str(c.service) for c in cases],
+                Col.SURGEON_CODE: [str(c.surgeon_code) for c in cases],
+                Col.PROCEDURE_ID: [str(c.procedure_id) for c in cases],
+                Col.SITE: [str(c.site) for c in cases],
+                Col.WEEK_OF_YEAR: [int(c.week_of_year) for c in cases],
+                Col.MONTH: [int(c.month) for c in cases],
+            }
+        )
+        return self.transform_frame(frame)
+
+    def manifest(self) -> dict[str, Any]:
+        return {
+            "feature_names": self.feature_names,
+            "booked_mean": self.booked_mean,
+            "booked_std": self.booked_std,
+            "references": self.references,
+            "selected_levels": self.selected_levels,
+            "feature_family_budgets": FEATURE_FAMILY_BUDGETS,
+            "selection_rule": "training-only frequency ranking; count descending, lexical tie break",
+            "sites": list(PRIMARY_SITES),
+            "p": len(self.feature_names),
+        }
+
+
 def final_load_data(config: Config, *args, **kwargs):
-    """Prevent cleaning/imputation from using the final holdout period."""
+    """Leakage-safe cleaning, site selection audit, and raw modeling labels."""
 
     kwargs["site_history_end"] = HOLDOUT_BOUNDARY
-    return canonical_load_data(config, *args, **kwargs)
+    frame = canonical_load_data(config, *args, **kwargs)
+
+    dt = pd.to_datetime(frame[Col.ACTUAL_START], errors="coerce")
+    pre = frame[(dt < HOLDOUT_BOUNDARY) & dt.dt.weekday.isin(range(5))].copy()
+    counts = pre[Col.SITE].value_counts()
+    ranking = tuple(str(x) for x in counts.index[:2])
+    if ranking != EXPECTED_SITE_RANKING:
+        raise RuntimeError(
+            f"Two largest pre-holdout weekday sites changed: {ranking}; expected {EXPECTED_SITE_RANKING}"
+        )
+    base.LOG.info("[SITES] cleaned pre-holdout weekday counts=%s; primary=%s", counts.to_dict(), PRIMARY_SITES)
+
+    # The canonical loader keeps these raw structural labels before its legacy
+    # full-sample rare-category pooling.  Restore them here so the final feature
+    # vocabulary is learned exclusively from the 72 training weeks.
+    frame[Col.CASE_SERVICE] = frame[Col.CASE_SERVICE_RAW]
+    frame[Col.SURGEON_CODE] = frame[Col.SURGEON_CODE_RAW]
+    frame[Col.PROCEDURE_ID] = frame[Col.PROCEDURE_ID_RAW]
+    return frame
 
 
 def final_build_config(s: FinalSettings) -> Config:
     cfg = Config()
     cfg.data.excel_file_path = s.data
     cfg.data.horizon_days = 7
-    cfg.scope.planning_sites = (s.site.upper(),)
+    cfg.scope.planning_sites = PRIMARY_SITES
     cfg.scope.planning_weekdays = (0, 1, 2, 3, 4)
     cfg.capacity.block_capacity_minutes = s.capacity
     cfg.capacity.activation_cost_per_block = 0.0
@@ -119,7 +303,7 @@ def final_build_config(s: FinalSettings) -> Config:
 
 
 def final_build_candidate_pools(df_preholdout: pd.DataFrame, config: Config) -> PlanningContext:
-    """Return the exact 72-week training cohort, not legacy candidate pools."""
+    """Return the exact pooled 72-week training cohort."""
 
     work = df_preholdout.copy()
     starts = base.week_start_series(work)
@@ -129,9 +313,20 @@ def final_build_candidate_pools(df_preholdout: pd.DataFrame, config: Config) -> 
         raise RuntimeError(f"Only {len(eligible)} pre-holdout eligible weeks; expected at least 72")
     selected = tuple(pd.Timestamp(x) for x in eligible.index[-72:])
     train = work[starts.isin(selected)].copy()
-    if len(train) != 9289:
-        raise RuntimeError(f"Fixed planning history changed: {len(train)} cases != 9289")
-    return PlanningContext(train=train, history=fit_service_room_history(train), week_starts=selected)
+    if len(train) != EXPECTED_TRAIN_CASES:
+        raise RuntimeError(
+            f"Fixed two-site planning history changed: {len(train)} cases != {EXPECTED_TRAIN_CASES}"
+        )
+    site_counts = train[Col.SITE].value_counts().to_dict()
+    if site_counts != EXPECTED_TRAIN_SITE_COUNTS:
+        raise RuntimeError(
+            f"Two-site training composition changed: {site_counts} != {EXPECTED_TRAIN_SITE_COUNTS}"
+        )
+    return PlanningContext(
+        train=train,
+        history=fit_service_room_history(train),
+        week_starts=selected,
+    )
 
 
 def final_build_eligibility_maps(df_preholdout: pd.DataFrame, config: Config):
@@ -155,6 +350,9 @@ def final_build_bundles(
     for j, start in enumerate(starts):
         start = pd.Timestamp(start).normalize()
         roster = build_fixed_roster(candidate_pools.train, start, cfg, PRIMARY_ROSTER)
+        roster_sites = {b.site for b in roster.calendar.candidates}
+        if roster_sites != set(PRIMARY_SITES):
+            raise RuntimeError(f"Roster sites changed at {start.date()}: {roster_sites}")
         inst = build_weekly_instance_with_calendar(
             df_scoped,
             start,
@@ -169,6 +367,9 @@ def final_build_bundles(
         missing = [i for i in range(inst.num_cases) if not inst.case_eligible_blocks.get(i)]
         if missing:
             raise RuntimeError(f"Week {start.date()} has {len(missing)} cases without fixed-roster eligibility")
+        for i, case in enumerate(inst.cases):
+            if any(bid.site != case.site for bid in inst.case_eligible_blocks[i]):
+                raise AssertionError(f"Cross-site eligibility detected for case {case.case_id}")
         out.append(base.WeekBundle(offset + j, start, inst))
     return out
 
@@ -237,8 +438,6 @@ def final_solve_week(
     psi_lb = float(result.psi_lb)
     native_gap = base.rel_gap(psi_ub, psi_lb)
     exact = bool(result.diagnostics.proven_optimal and abs(psi_ub - psi_lb) <= 1e-6)
-    # PlanResult objective/bound remain on the actual paper cost scale Phi.
-    # gap is the native Psi gap because Psi is the solved objective.
     return base.PlanResult(
         week=week.position,
         column=result.column,
@@ -253,7 +452,7 @@ def final_solve_week(
 
 
 class FinalConvexPDCASubproblem:
-    """The old pDCA majorizer with fixed-schedule turnover included in kappa."""
+    """The pDCA majorizer with fixed-schedule turnover included in kappa."""
 
     def __init__(self, spec: base.FixedSpec, s: FinalSettings, name: str):
         self.spec = spec
@@ -339,7 +538,7 @@ class FinalConvexPDCASubproblem:
 
 
 def final_solver_audit(weeks: Sequence[base.WeekBundle], s: FinalSettings) -> list[dict[str, Any]]:
-    """Audit direct Phi against reduced Psi on two training weeks."""
+    """Audit direct Phi against reduced Psi on two pooled training weeks."""
 
     rows = []
     for w in weeks[: min(2, len(weeks))]:
@@ -370,6 +569,7 @@ def final_solver_audit(weeks: Sequence[base.WeekBundle], s: FinalSettings) -> li
         rows.append(
             {
                 "week": w.position,
+                "sites": "+".join(PRIMARY_SITES),
                 "psi_schedule_phi": psi_cost,
                 "phi_schedule_phi": phi_cost,
                 "psi_phi_lb": psi.phi_lb,
@@ -388,6 +588,7 @@ def install_final_adapter() -> None:
 
     base.SCRIPT_VERSION = SCRIPT_VERSION
     base.Settings = FinalSettings
+    base.FrozenFeatureEncoder = FinalFeatureEncoder
     base.load_data = final_load_data
     base.build_config = final_build_config
     base.build_candidate_pools = final_build_candidate_pools
