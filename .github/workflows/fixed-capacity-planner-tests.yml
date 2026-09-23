@@ -1,0 +1,23 @@
+name: fixed-capacity-planner-tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-capacity-planner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Run mathematical planner and audit regressions
+        # All optimization fixtures fit the bundled restricted Gurobi license.
+        run: python -m pytest tests/test_planning/test_fixed_capacity.py -q

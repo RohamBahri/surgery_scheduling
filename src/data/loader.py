@@ -25,7 +25,7 @@ _EXCEL_COLUMNS = [
 ]
 
 
-def load_data(config: Config) -> pd.DataFrame:
+def load_data(config: Config, *, site_history_end: str | None = None) -> pd.DataFrame:
     path = config.data.excel_file_path
     logger.info("Loading data from %s", path)
     try:
@@ -122,20 +122,31 @@ def load_data(config: Config) -> pd.DataFrame:
     )
 
     df[Col.SITE] = df.get(Col.SITE, "").fillna("").astype(str).str.strip().str.upper()
+    # The audit may restrict site imputation to pre-holdout observations.
+    site_history = df if site_history_end is None else df[df[Col.ACTUAL_START] < pd.Timestamp(site_history_end)]
     room_site_nuniq = (
-        df[df[Col.SITE] != ""]
+        site_history[site_history[Col.SITE] != ""]
         .groupby(Col.OPERATING_ROOM)[Col.SITE]
         .nunique()
     )
     unambiguous_rooms = set(room_site_nuniq[room_site_nuniq == 1].index)
     room_site_lookup = (
-        df[(df[Col.OPERATING_ROOM].isin(unambiguous_rooms)) & (df[Col.SITE] != "")]
+        site_history[(site_history[Col.OPERATING_ROOM].isin(unambiguous_rooms)) & (site_history[Col.SITE] != "")]
         .groupby(Col.OPERATING_ROOM)[Col.SITE]
         .first()
         .to_dict()
     )
     missing_site = df[Col.SITE] == ""
     df.loc[missing_site, Col.SITE] = df.loc[missing_site, Col.OPERATING_ROOM].map(room_site_lookup).fillna("")
+
+    # Structural labels must survive global feature-category pooling. Existing
+    # estimation fields below deliberately keep their legacy behavior.
+    for source, target, default in (
+        (Col.CASE_SERVICE, Col.CASE_SERVICE_RAW, Domain.UNKNOWN),
+        (Col.SURGEON_CODE, Col.SURGEON_CODE_RAW, Domain.OTHER),
+        (Col.PROCEDURE_ID, Col.PROCEDURE_ID_RAW, Domain.OTHER),
+    ):
+        df[target] = df[source].map(lambda value: _canonicalize_id_value(value, default))
 
     df[Col.PROCEDURE_ID] = _recode_rare(df[Col.PROCEDURE_ID], config.data.min_samples_procedure)
     df[Col.SURGEON_CODE] = _recode_rare(df[Col.SURGEON_CODE], config.data.min_samples_surgeon)
