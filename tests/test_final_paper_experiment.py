@@ -27,6 +27,26 @@ def _case(case_id: int, duration: float = 100.0, site: str = "TGH") -> CaseRecor
     )
 
 
+def _two_site_week() -> tuple[base.WeekBundle, np.ndarray]:
+    tgh = CandidateBlock(0, "TGH", "OR1", 200.0, 0.0, True)
+    twh = CandidateBlock(0, "TWH", "OR2", 200.0, 0.0, True)
+    cases = [
+        _case(1, 100.0, "TGH"),
+        _case(2, 100.0, "TGH"),
+        _case(3, 80.0, "TWH"),
+        _case(4, 90.0, "TWH"),
+    ]
+    inst = WeeklyInstance(
+        week_index=0,
+        start_date=date(2012, 1, 2),
+        end_date=date(2012, 1, 8),
+        cases=cases,
+        calendar=BlockCalendar([tgh, twh]),
+        case_eligible_blocks={0: [tgh.id], 1: [tgh.id], 2: [twh.id], 3: [twh.id]},
+    )
+    return base.WeekBundle(0, np.datetime64("2012-01-02"), inst), np.array([100.0, 100.0, 80.0, 90.0])
+
+
 def test_final_config_is_two_site_fixed_capacity_primary_specification() -> None:
     s = final.FinalSettings(data="dummy.xlsx", artifact_root="artifacts/test")
     s.validate()
@@ -79,9 +99,6 @@ def test_final_week_solver_uses_fixed_capacity_and_turnover() -> None:
     )
     week = base.WeekBundle(0, np.datetime64("2012-01-02"), inst)
     s = final.FinalSettings(data="dummy.xlsx", artifact_root="artifacts/test", verbose=False)
-
-    # A single-site unit instance is solved directly because the production
-    # decomposer intentionally requires both primary sites to be present.
     cfg = final.SolverConfig(
         time_limit_seconds=30,
         mip_gap=0.0,
@@ -102,30 +119,13 @@ def test_final_week_solver_uses_fixed_capacity_and_turnover() -> None:
     assert result.column is not None
     assert result.column.z_defer == frozenset()
     assert result.column.v_open == frozenset({block.id})
-    # Load = 100 + 100 + one 30-minute transition = 230; overtime = 30.
     assert abs(float(result.phi_ub) - 450.0) <= 1e-6
 
 
 def test_two_site_decomposition_matches_monolithic_objective() -> None:
-    tgh = CandidateBlock(0, "TGH", "OR1", 200.0, 0.0, True)
-    twh = CandidateBlock(0, "TWH", "OR2", 200.0, 0.0, True)
-    cases = [
-        _case(1, 100.0, "TGH"),
-        _case(2, 100.0, "TGH"),
-        _case(3, 80.0, "TWH"),
-        _case(4, 90.0, "TWH"),
-    ]
-    inst = WeeklyInstance(
-        week_index=0,
-        start_date=date(2012, 1, 2),
-        end_date=date(2012, 1, 8),
-        cases=cases,
-        calendar=BlockCalendar([tgh, twh]),
-        case_eligible_blocks={0: [tgh.id], 1: [tgh.id], 2: [twh.id], 3: [twh.id]},
-    )
-    week = base.WeekBundle(0, np.datetime64("2012-01-02"), inst)
+    week, durations = _two_site_week()
+    inst = week.instance
     s = final.FinalSettings(data="dummy.xlsx", artifact_root="artifacts/test", verbose=False)
-    durations = np.array([100.0, 100.0, 80.0, 90.0])
 
     decomposed = final.final_solve_week(
         week,
@@ -155,7 +155,48 @@ def test_two_site_decomposition_matches_monolithic_objective() -> None:
     assert monolithic.column is not None
     assert abs(decomposed.objective - float(monolithic.phi_ub)) <= 1e-6
     assert abs(decomposed.bound - float(monolithic.phi_lb)) <= 1e-6
-    assert all(bid.site == cases[i].site for (i, bid), v in decomposed.column.z_assign.items() if v > 0.5)
+    assert all(
+        bid.site == inst.cases[i].site
+        for (i, bid), v in decomposed.column.z_assign.items()
+        if v > 0.5
+    )
+
+
+def test_site_local_warm_start_is_accepted_by_phi_audit() -> None:
+    """Regression for the 2026-09-23 audit crash.
+
+    The first site solve returns local case indices. Passing that column to the
+    second site solve must be recognized as a site-local warm start rather than
+    incorrectly interpreted as a pooled two-site column.
+    """
+
+    week, durations = _two_site_week()
+    s = final.FinalSettings(data="dummy.xlsx", artifact_root="artifacts/test", verbose=False)
+    _, _, psi = final._solve_site_assignment(
+        week,
+        durations,
+        s,
+        "TGH",
+        time_limit=30,
+        mip_gap=0.0,
+        threads=1,
+        warm=None,
+        objective_mode="psi",
+    )
+    assert psi.column is not None
+    _, _, phi = final._solve_site_assignment(
+        week,
+        durations,
+        s,
+        "TGH",
+        time_limit=30,
+        mip_gap=0.0,
+        threads=1,
+        warm=psi.column,
+        objective_mode="phi",
+    )
+    assert phi.column is not None
+    assert abs(float(phi.phi_ub) - float(psi.phi_ub)) <= 1e-6
 
 
 def test_recommendation_safety_keeps_short_case_positive() -> None:
@@ -169,9 +210,6 @@ def test_recommendation_safety_keeps_short_case_positive() -> None:
         case_ids=np.array([1, 2]),
         week_slices={0: np.array([0, 1])},
     )
-    # Raw policy would request -25 minutes for both cases. The 14-minute case
-    # must be clipped before behavioral response so its planning duration stays
-    # strictly positive.
     delta, _, planning = final.final_correction_and_planning(np.array([-25.0]), a, s)
     assert delta[0] >= final.MIN_RECOMMENDED_DURATION - 14.0 - 1e-12
     assert planning[0] > 0.0
