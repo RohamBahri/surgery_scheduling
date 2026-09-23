@@ -2,10 +2,15 @@
 """Final two-site paper experiment using the audited fixed-capacity planner.
 
 The primary experiment pools the two largest cleaned UHN sites, TGH and TWH,
-for learning while preserving physically separate site capacity.  Every weekly
-instance contains both sites; same-site eligibility forbids cross-site
-assignment, so the weekly objective is exactly the sum of the TGH and TWH
-planning costs under one shared recommendation policy.
+for learning while preserving physically separate site capacity.  The learned
+recommendation policy is shared across sites, but every downstream weekly
+planning call is solved as two independent site MILPs and recombined exactly:
+
+    Q_t(w) = Q_{t,TGH}(w) + Q_{t,TWH}(w).
+
+Because there are no cross-site assignment edges or coupling constraints, this
+is mathematically identical to the monolithic two-site MIP and much easier to
+solve.
 
 Frozen scientific specification
 --------------------------------
@@ -17,11 +22,15 @@ Frozen scientific specification
 * raw-service/same-site eligibility observed in >=3 training weeks;
 * 30 minute occupation-based turnover;
 * overtime = 15/minute, idle = 10/minute;
-* reduced Psi weekly MILP, with Phi recovered exactly by Phi = K + Psi;
+* reduced Psi site MILPs, with Phi recovered exactly by Phi = K + Psi;
 * symmetric primary response alpha=.8, h=30;
+* displayed recommendations are clipped to the configured display cap and to
+  a minimum recommended duration of 1 minute; all training optimizers enforce
+  the same restriction explicitly, so clipping is inactive on fitted training
+  policies and only acts as a deployment safety guard out of sample;
 * Booked, Naive, RA, OS, VF, and Oracle evaluation.
 
-The two sites were selected from cleaned pre-holdout weekday data only.  The
+The two sites are selected from cleaned pre-holdout weekday data only.  The
 code verifies that TWH and TGH are the two largest sites before continuing.
 The feature vocabulary is also selected using the 72 training weeks only.
 
@@ -49,14 +58,14 @@ from scipy import sparse
 import run_final_vf_experiment as base
 from src.core.column import ScheduleColumn
 from src.core.config import Config, CostConfig, SolverConfig
-from src.core.types import BlockId, Col, Domain, WeeklyInstance
+from src.core.types import BlockCalendar, BlockId, Col, Domain, WeeklyInstance
 from src.data.loader import load_data as canonical_load_data
 from src.planning.eligibility import fit_service_room_history
 from src.planning.instance import build_weekly_instance_with_calendar
 from src.planning.roster import build_fixed_roster
 from src.solvers.fixed_capacity import schedule_metrics, solve_fixed_capacity_assignment
 
-SCRIPT_VERSION = "final_paper_experiment_2026_09_23_two_site_v2"
+SCRIPT_VERSION = "final_paper_experiment_2026_09_23_two_site_v3"
 HOLDOUT_BOUNDARY = pd.Timestamp("2013-01-28")
 PRIMARY_SITES = ("TGH", "TWH")
 EXPECTED_SITE_RANKING = ("TWH", "TGH")
@@ -65,6 +74,9 @@ PRIMARY_ELIGIBILITY_WEEKS = 3
 PRIMARY_TURNOVER = 30.0
 PRIMARY_MIN_ACTIVATION_RATE = 0.25
 PRIMARY_OBJECTIVE = "psi"
+PRIMARY_ORACLE_GAP = 1e-3
+PRIMARY_ORACLE_RETRY_TOL = 1e-3
+MIN_RECOMMENDED_DURATION = 1.0
 EXPECTED_TRAIN_CASES = 20519
 EXPECTED_HOLDOUT_CASES = 6561
 EXPECTED_TRAIN_SITE_COUNTS = {"TWH": 11295, "TGH": 9224}
@@ -99,6 +111,11 @@ class FinalSettings(base.Settings):
     expected_holdout_cases: int = EXPECTED_HOLDOUT_CASES
     opening: float = 0.0
     turnover: float = PRIMARY_TURNOVER
+    # A 0.1% certified oracle gap is the paper-readiness threshold already used
+    # by the experiment. Requiring 1e-6 caused scientifically unnecessary
+    # 30-minute retries even when valid tight bounds were available.
+    oracle_gap: float = PRIMARY_ORACLE_GAP
+    oracle_numeric_tol: float = PRIMARY_ORACLE_RETRY_TOL
 
     def validate(self) -> None:
         if self.site.upper() != "TGH+TWH":
@@ -111,6 +128,10 @@ class FinalSettings(base.Settings):
             raise ValueError("Primary paper turnover is frozen to 30 minutes.")
         if abs(self.opening) > 1e-12:
             raise ValueError("Fixed capacity has zero block activation cost.")
+        if abs(self.oracle_gap - PRIMARY_ORACLE_GAP) > 1e-12:
+            raise ValueError("Primary oracle target is frozen to a 0.1% native Psi gap.")
+        if abs(self.oracle_numeric_tol - PRIMARY_ORACLE_RETRY_TOL) > 1e-12:
+            raise ValueError("Primary oracle retry tolerance is frozen to 0.1%.")
         if self.cores <= 0:
             raise ValueError("cores must be positive")
         if self.max_wall_minutes <= self.final_reserve_minutes:
@@ -124,13 +145,20 @@ class PlanningContext:
     week_starts: tuple[pd.Timestamp, ...]
 
 
+@dataclass(frozen=True)
+class SiteView:
+    site: str
+    global_indices: np.ndarray
+    instance: WeeklyInstance
+
+
 class FinalFeatureEncoder:
     """Leakage-safe pooled TGH/TWH case-local feature encoder.
 
     The total dimension remains 111 so the statistical capacity and L1 scaling
-    are comparable with the previously approved experiment.  Which categorical
+    are comparable with the previously approved experiment. Which categorical
     levels receive their own coefficient is re-estimated from the pooled 72-week
-    training sample only.  All omitted or future unseen levels map to OTHER.
+    training sample only. All omitted or future unseen levels map to OTHER.
     """
 
     PREFIX_TO_COLUMN = {
@@ -256,6 +284,8 @@ class FinalFeatureEncoder:
             "selection_rule": "training-only frequency ranking; count descending, lexical tie break",
             "sites": list(PRIMARY_SITES),
             "p": len(self.feature_names),
+            "minimum_recommended_duration": MIN_RECOMMENDED_DURATION,
+            "out_of_sample_display_rule": "clip Xw to [-display_cap, display_cap] and enforce booked + displayed_correction >= minimum_recommended_duration",
         }
 
 
@@ -276,7 +306,7 @@ def final_load_data(config: Config, *args, **kwargs):
     base.LOG.info("[SITES] cleaned pre-holdout weekday counts=%s; primary=%s", counts.to_dict(), PRIMARY_SITES)
 
     # The canonical loader keeps these raw structural labels before its legacy
-    # full-sample rare-category pooling.  Restore them here so the final feature
+    # full-sample rare-category pooling. Restore them here so the final feature
     # vocabulary is learned exclusively from the 72 training weeks.
     frame[Col.CASE_SERVICE] = frame[Col.CASE_SERVICE_RAW]
     frame[Col.SURGEON_CODE] = frame[Col.SURGEON_CODE_RAW]
@@ -382,6 +412,208 @@ def final_cost_cfg(s: FinalSettings) -> CostConfig:
     )
 
 
+# =============================================================================
+# Recommendation safety: exact on training, deterministic guard out of sample
+# =============================================================================
+
+def _display_lower_bound(booked: np.ndarray, s: FinalSettings) -> np.ndarray:
+    b = np.asarray(booked, float)
+    return np.maximum(-float(s.display_cap), MIN_RECOMMENDED_DURATION - b)
+
+
+def final_correction_and_planning(
+    w: np.ndarray, a: base.Arrays, s: FinalSettings
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    raw = np.asarray(a.X @ np.asarray(w, float), float).reshape(-1)
+    # Training optimizers explicitly enforce these same bounds. Clipping matters
+    # only if a future covariate combination extrapolates outside the fitted
+    # display domain.
+    delta = np.minimum(raw, float(s.display_cap))
+    delta = np.maximum(delta, _display_lower_bound(a.booked, s))
+    correction = base.response_value(delta, s)
+    planning = np.asarray(a.booked, float) + correction
+    if np.any(planning <= 0):
+        raise AssertionError("Recommendation safety guard produced a nonpositive planning duration")
+    return delta, correction, planning
+
+
+def final_train_naive(a: base.Arrays, s: FinalSettings, lam: float) -> np.ndarray:
+    """Naive LAD baseline with the same training recommendation domain as RA/OS/VF."""
+
+    n, p = a.X.shape
+    X = a.X.tocsr()
+    m = base.gp.Model("naive_lad_safe")
+    m.Params.OutputFlag = 1 if s.verbose else 0
+    m.Params.Threads = s.cores
+    m.Params.TimeLimit = 900
+    w = m.addVars(p, lb=-s.coefficient_bound, ub=s.coefficient_bound, name="w")
+    absr = m.addVars(n, lb=0.0, name="absr")
+    absw = m.addVars(range(1, p), lb=0.0, name="absw")
+    lower = _display_lower_bound(a.booked, s)
+    for i in range(n):
+        row = X.getrow(i)
+        expr = base.gp.LinExpr(row.data.tolist(), [w[int(j)] for j in row.indices])
+        m.addConstr(absr[i] >= float(a.error[i]) - expr)
+        m.addConstr(absr[i] >= -float(a.error[i]) + expr)
+        m.addConstr(expr <= s.display_cap)
+        m.addConstr(expr >= float(lower[i]))
+    for j in range(1, p):
+        m.addConstr(absw[j] >= w[j])
+        m.addConstr(absw[j] >= -w[j])
+    obj = (
+        base.quicksum(absr[i] for i in range(n)) / a.n_weeks
+        + lam * base.quicksum(absw[j] for j in range(1, p))
+    )
+    m.setObjective(obj, base.GRB.MINIMIZE)
+    m.optimize()
+    if m.SolCount <= 0:
+        raise RuntimeError("safe naive LAD failed")
+    out = np.array([w[j].X for j in range(p)], float)
+    m.dispose()
+    # This must be inactive under the fitted-training constraints.
+    raw = np.asarray(a.X @ out, float).reshape(-1)
+    if np.any(raw < lower - 1e-7) or np.any(raw > s.display_cap + 1e-7):
+        raise AssertionError("Naive solution violates recommendation safety constraints")
+    return out
+
+
+# =============================================================================
+# Exact site decomposition of every weekly planning call
+# =============================================================================
+
+def _site_view(week: base.WeekBundle, site: str) -> SiteView:
+    inst = week.instance
+    global_indices = np.asarray(
+        [i for i, case in enumerate(inst.cases) if str(case.site) == site], dtype=int
+    )
+    site_blocks = [b for b in inst.calendar.candidates if str(b.site) == site]
+    if not site_blocks:
+        raise RuntimeError(f"Week {week.position} has no fixed roster blocks for {site}")
+    block_ids = {b.id for b in site_blocks}
+    local_eligibility: dict[int, list[BlockId]] = {}
+    local_diagnostics: dict[int, dict[str, Any]] = {}
+    for local_i, global_i in enumerate(global_indices.tolist()):
+        bids = [
+            bid for bid in inst.case_eligible_blocks.get(global_i, [])
+            if bid in block_ids and bid.site == site
+        ]
+        if not bids:
+            raise RuntimeError(
+                f"Week {week.position} site {site}: pooled case {global_i} has no local eligible block"
+            )
+        local_eligibility[local_i] = bids
+        if global_i in inst.eligibility_diagnostics:
+            local_diagnostics[local_i] = dict(inst.eligibility_diagnostics[global_i])
+    sub = WeeklyInstance(
+        week_index=inst.week_index,
+        start_date=inst.start_date,
+        end_date=inst.end_date,
+        cases=[inst.cases[int(i)] for i in global_indices],
+        calendar=BlockCalendar(site_blocks),
+        case_eligible_blocks=local_eligibility,
+        eligibility_diagnostics=local_diagnostics,
+    )
+    return SiteView(site=site, global_indices=global_indices, instance=sub)
+
+
+def _localize_warm(warm: ScheduleColumn | None, view: SiteView) -> ScheduleColumn | None:
+    if warm is None:
+        return None
+    global_to_local = {int(g): i for i, g in enumerate(view.global_indices.tolist())}
+    z_assign = {
+        (global_to_local[int(i)], bid): float(value)
+        for (i, bid), value in warm.z_assign.items()
+        if int(i) in global_to_local and bid.site == view.site and value > 0.5
+    }
+    assigned = {i for i, _ in z_assign}
+    if assigned != set(range(view.instance.num_cases)):
+        raise ValueError(f"Warm start is incomplete for site {view.site}")
+    blocks = frozenset(view.instance.calendar.block_ids)
+    y_used = frozenset(bid for _, bid in z_assign)
+    return ScheduleColumn(
+        z_assign=z_assign,
+        z_defer=frozenset(),
+        v_open=blocks,
+        y_used=y_used,
+        n_cases=view.instance.num_cases,
+        block_capacities={b.id: float(b.capacity_minutes) for b in view.instance.calendar.candidates},
+        block_activation_costs={b.id: 0.0 for b in view.instance.calendar.candidates},
+    )
+
+
+def _solve_site_assignment(
+    week: base.WeekBundle,
+    durations: np.ndarray,
+    s: FinalSettings,
+    site: str,
+    *,
+    time_limit: int,
+    mip_gap: float,
+    threads: int,
+    warm: ScheduleColumn | None,
+    objective_mode: str = PRIMARY_OBJECTIVE,
+):
+    view = _site_view(week, site)
+    local_durations = np.asarray(durations, float)[view.global_indices]
+    solver_cfg = SolverConfig(
+        time_limit_seconds=max(1, int(time_limit)),
+        mip_gap=max(0.0, float(mip_gap)),
+        threads=max(1, int(threads)),
+        verbose=bool(s.verbose),
+        mip_gap_abs=1e-10,
+        seed=int(s.random_seed),
+    )
+    result = solve_fixed_capacity_assignment(
+        view.instance,
+        local_durations,
+        final_cost_cfg(s),
+        PRIMARY_TURNOVER,
+        solver_cfg,
+        objective_mode=objective_mode,
+        warm_start=_localize_warm(warm, view),
+        symmetry_breaking=True,
+    )
+    return view, local_durations, result
+
+
+def _merge_site_columns(
+    pooled_instance: WeeklyInstance,
+    parts: Sequence[tuple[SiteView, ScheduleColumn]],
+) -> ScheduleColumn:
+    z_assign: dict[tuple[int, BlockId], float] = {}
+    v_open: set[BlockId] = set()
+    y_used: set[BlockId] = set()
+    capacities: dict[BlockId, float] = {}
+    activation: dict[BlockId, float] = {}
+    covered_cases: set[int] = set()
+    for view, column in parts:
+        if column.n_cases != len(view.global_indices):
+            raise AssertionError("Site column/local case mapping mismatch")
+        for (local_i, bid), value in column.z_assign.items():
+            global_i = int(view.global_indices[int(local_i)])
+            z_assign[global_i, bid] = float(value)
+            if value > 0.5:
+                covered_cases.add(global_i)
+        v_open.update(column.v_open)
+        y_used.update(column.y_used)
+        capacities.update(column.block_capacities)
+        activation.update(column.block_activation_costs)
+    if covered_cases != set(range(pooled_instance.num_cases)):
+        missing = sorted(set(range(pooled_instance.num_cases)) - covered_cases)
+        raise AssertionError(f"Merged site schedules do not cover all pooled cases: {missing[:10]}")
+    if v_open != set(pooled_instance.calendar.block_ids):
+        raise AssertionError("Merged site schedules do not preserve all pooled fixed capacity")
+    return ScheduleColumn(
+        z_assign=z_assign,
+        z_defer=frozenset(),
+        v_open=frozenset(v_open),
+        y_used=frozenset(y_used),
+        n_cases=pooled_instance.num_cases,
+        block_capacities=capacities,
+        block_activation_costs=activation,
+    )
+
+
 def fixed_signature(col: ScheduleColumn, inst: WeeklyInstance) -> str:
     """Canonicalize schedules under exactly the fixed planner's block symmetry."""
 
@@ -413,38 +645,69 @@ def final_solve_week(
     deterministic_tiebreak: bool = False,
     tiebreak_seconds: int | None = None,
 ) -> base.PlanResult:
-    cfg = SolverConfig(
-        time_limit_seconds=max(1, int(time_limit)),
-        mip_gap=max(0.0, float(mip_gap)),
-        threads=max(1, int(threads)),
-        verbose=bool(s.verbose),
-        mip_gap_abs=1e-10,
-        seed=int(s.random_seed),
-    )
+    """Solve the exact pooled week as independent TGH and TWH MILPs.
+
+    ``deterministic_tiebreak`` is intentionally ignored, as in the audited
+    fixed-capacity adapter: library signatures quotient out exactly valid block
+    symmetries and optimization certificates are preserved without a second MIP.
+    """
+
+    del deterministic_tiebreak, tiebreak_seconds
+    d = np.asarray(durations, float)
+    if d.shape != (week.instance.num_cases,):
+        raise ValueError("duration length mismatch")
     t0 = base.time.perf_counter()
-    result = solve_fixed_capacity_assignment(
-        week.instance,
-        np.asarray(durations, float),
-        final_cost_cfg(s),
-        PRIMARY_TURNOVER,
-        cfg,
-        objective_mode=PRIMARY_OBJECTIVE,
-        warm_start=warm,
-        symmetry_breaking=True,
-    )
-    if result.column is None or result.phi_ub is None or result.phi_lb is None:
-        raise RuntimeError(f"Week {week.position} {label}: fixed planner returned no incumbent/bound")
-    psi_ub = float(result.psi_ub)
-    psi_lb = float(result.psi_lb)
+    site_parts: list[tuple[SiteView, ScheduleColumn]] = []
+    phi_ub = phi_lb = psi_ub = psi_lb = 0.0
+    statuses: list[str] = []
+    all_proven_optimal = True
+    for site in PRIMARY_SITES:
+        view, _, result = _solve_site_assignment(
+            week,
+            d,
+            s,
+            site,
+            time_limit=time_limit,
+            mip_gap=mip_gap,
+            threads=threads,
+            warm=warm,
+            objective_mode=PRIMARY_OBJECTIVE,
+        )
+        if (
+            result.column is None
+            or result.phi_ub is None
+            or result.phi_lb is None
+            or result.psi_ub is None
+            or result.psi_lb is None
+        ):
+            raise RuntimeError(
+                f"Week {week.position} {label} site {site}: fixed planner returned no incumbent/bound"
+            )
+        site_parts.append((view, result.column))
+        phi_ub += float(result.phi_ub)
+        phi_lb += float(result.phi_lb)
+        psi_ub += float(result.psi_ub)
+        psi_lb += float(result.psi_lb)
+        statuses.append(f"{site}:{result.diagnostics.status}")
+        all_proven_optimal = all_proven_optimal and bool(result.diagnostics.proven_optimal)
+
+    column = _merge_site_columns(week.instance, site_parts)
+    combined_metrics = schedule_metrics(column, d, final_cost_cfg(s), PRIMARY_TURNOVER)
+    if abs(float(combined_metrics["phi"]) - phi_ub) > 1e-5:
+        raise AssertionError(
+            f"Week {week.position}: decomposed Phi mismatch "
+            f"{combined_metrics['phi']} != {phi_ub}"
+        )
     native_gap = base.rel_gap(psi_ub, psi_lb)
-    exact = bool(result.diagnostics.proven_optimal and abs(psi_ub - psi_lb) <= 1e-6)
+    exact = bool(all_proven_optimal and abs(psi_ub - psi_lb) <= 1e-6)
+    status = "OPTIMAL" if all_proven_optimal else "|".join(statuses)
     return base.PlanResult(
         week=week.position,
-        column=result.column,
-        objective=float(result.phi_ub),
-        bound=float(result.phi_lb),
+        column=column,
+        objective=float(phi_ub),
+        bound=float(phi_lb),
         gap=float(native_gap),
-        status=result.diagnostics.status,
+        status=status,
         solve_seconds=base.time.perf_counter() - t0,
         exact=exact,
         tiebreak_used=False,
@@ -452,7 +715,7 @@ def final_solve_week(
 
 
 class FinalConvexPDCASubproblem:
-    """The pDCA majorizer with fixed-schedule turnover included in kappa."""
+    """The pDCA majorizer with turnover and recommendation-safety constraints."""
 
     def __init__(self, spec: base.FixedSpec, s: FinalSettings, name: str):
         self.spec = spec
@@ -474,13 +737,14 @@ class FinalConvexPDCASubproblem:
         R = m.addVars(n, lb=0, name="R")
         q = 1 - s.alpha
         eps = s.h / q
+        lower = _display_lower_bound(a.booked, s)
         self.P, self.N, self.delta = {}, {}, {}
         for i in range(n):
             row = X.getrow(i)
             de = base.gp.LinExpr(row.data.tolist(), [self.w[int(j)] for j in row.indices])
             self.delta[i] = de
             m.addConstr(de <= s.display_cap)
-            m.addConstr(de >= -s.display_cap)
+            m.addConstr(de >= float(lower[i]))
             m.addConstr(ph[i] >= de + s.h)
             m.addConstr(pe[i] >= de - eps)
             m.addConstr(ne[i] >= de + eps)
@@ -538,48 +802,60 @@ class FinalConvexPDCASubproblem:
 
 
 def final_solver_audit(weeks: Sequence[base.WeekBundle], s: FinalSettings) -> list[dict[str, Any]]:
-    """Audit direct Phi against reduced Psi on two pooled training weeks."""
+    """Audit direct Phi against reduced Psi separately at each physical site."""
 
     rows = []
-    for w in weeks[: min(2, len(weeks))]:
-        d = np.asarray(w.instance.booked_durations(), float)
-        settings = SolverConfig(
-            time_limit_seconds=60,
-            mip_gap=0.01,
-            threads=1,
-            verbose=False,
-            mip_gap_abs=1e-10,
-            seed=s.random_seed,
-        )
-        psi = solve_fixed_capacity_assignment(
-            w.instance, d, final_cost_cfg(s), PRIMARY_TURNOVER, settings, "psi"
-        )
-        phi = solve_fixed_capacity_assignment(
-            w.instance, d, final_cost_cfg(s), PRIMARY_TURNOVER, settings, "phi"
-        )
-        if psi.column is None or phi.column is None:
-            rows.append({"week": w.position, "passed": False, "reason": "missing incumbent"})
-            continue
-        psi_cost = schedule_metrics(psi.column, d, final_cost_cfg(s), PRIMARY_TURNOVER)["phi"]
-        phi_cost = schedule_metrics(phi.column, d, final_cost_cfg(s), PRIMARY_TURNOVER)["phi"]
-        intervals_overlap = not (
-            float(psi.phi_ub) < float(phi.phi_lb) - 1e-6
-            or float(phi.phi_ub) < float(psi.phi_lb) - 1e-6
-        )
-        rows.append(
-            {
-                "week": w.position,
-                "sites": "+".join(PRIMARY_SITES),
-                "psi_schedule_phi": psi_cost,
-                "phi_schedule_phi": phi_cost,
-                "psi_phi_lb": psi.phi_lb,
-                "psi_phi_ub": psi.phi_ub,
-                "phi_lb": phi.phi_lb,
-                "phi_ub": phi.phi_ub,
-                "identity_error": psi.metrics["identity_error"],
-                "passed": bool(intervals_overlap and psi.metrics["identity_error"] <= 1e-6),
-            }
-        )
+    for week in weeks[: min(2, len(weeks))]:
+        d = np.asarray(week.instance.booked_durations(), float)
+        for site in PRIMARY_SITES:
+            view, local_d, psi = _solve_site_assignment(
+                week,
+                d,
+                s,
+                site,
+                time_limit=60,
+                mip_gap=0.01,
+                threads=1,
+                warm=None,
+                objective_mode="psi",
+            )
+            _, _, phi = _solve_site_assignment(
+                week,
+                d,
+                s,
+                site,
+                time_limit=60,
+                mip_gap=0.01,
+                threads=1,
+                warm=psi.column,
+                objective_mode="phi",
+            )
+            if psi.column is None or phi.column is None:
+                rows.append(
+                    {"week": week.position, "site": site, "passed": False, "reason": "missing incumbent"}
+                )
+                continue
+            psi_cost = schedule_metrics(psi.column, local_d, final_cost_cfg(s), PRIMARY_TURNOVER)["phi"]
+            phi_cost = schedule_metrics(phi.column, local_d, final_cost_cfg(s), PRIMARY_TURNOVER)["phi"]
+            intervals_overlap = not (
+                float(psi.phi_ub) < float(phi.phi_lb) - 1e-6
+                or float(phi.phi_ub) < float(psi.phi_lb) - 1e-6
+            )
+            rows.append(
+                {
+                    "week": week.position,
+                    "site": site,
+                    "n_cases": view.instance.num_cases,
+                    "psi_schedule_phi": psi_cost,
+                    "phi_schedule_phi": phi_cost,
+                    "psi_phi_lb": psi.phi_lb,
+                    "psi_phi_ub": psi.phi_ub,
+                    "phi_lb": phi.phi_lb,
+                    "phi_ub": phi.phi_ub,
+                    "identity_error": psi.metrics["identity_error"],
+                    "passed": bool(intervals_overlap and psi.metrics["identity_error"] <= 1e-6),
+                }
+            )
     return rows
 
 
@@ -597,6 +873,8 @@ def install_final_adapter() -> None:
     base.solve_week = final_solve_week
     base._cost_cfg = final_cost_cfg
     base.canonical_schedule_signature = fixed_signature
+    base.correction_and_planning = final_correction_and_planning
+    base.train_naive = final_train_naive
     base.ConvexPDCASubproblem = FinalConvexPDCASubproblem
     base.stable_solver_audit = final_solver_audit
 
