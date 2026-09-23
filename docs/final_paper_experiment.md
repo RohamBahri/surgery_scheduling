@@ -28,7 +28,7 @@ They identify different pieces of the method rather than three redundant competi
 
 The paper should therefore present VF as the full method and RA/OS as structural ablations. Removing them would make it difficult to determine whether any improvement comes from response-awareness, fixed-schedule operational structure, or schedule switching.
 
-## Main run on macOS
+## Staged run on macOS
 
 From the repository root:
 
@@ -38,7 +38,29 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
 python -m pytest tests/test_planning/test_fixed_capacity.py tests/test_final_paper_experiment.py -q
+```
 
+### Stage 1: training only
+
+Run this first:
+
+```bash
+caffeinate -i python run_final_paper_training.py \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --artifact-root artifacts/final_paper_training \
+  --cores 15 \
+  --max-wall-minutes 720
+```
+
+A successful training-only run ends with `TRAINING_FREEZE.json` and `RUN_STATUS.json` containing `TRAINING_COMPLETE_HOLDOUT_LOCKED`. It does not run the holdout oracle or evaluate any learned policy on the 22 final weeks.
+
+Review the training artifacts and numerical diagnostics before proceeding.
+
+### Stage 2: final holdout
+
+Only after the Stage-1 artifacts are accepted, run the complete frozen experiment once:
+
+```bash
 caffeinate -i python run_final_paper_experiment.py \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifact-root artifacts/final_paper_experiment \
@@ -46,7 +68,7 @@ caffeinate -i python run_final_paper_experiment.py \
   --max-wall-minutes 720
 ```
 
-The experiment writes the training policies before the holdout is materialized. The final holdout should be consumed only after the training diagnostics and numerical quality are accepted.
+The full experiment repeats the frozen training pipeline and only then evaluates the final holdout. The Stage-1 results are a gate, not input to a differently configured Stage-2 model.
 
 ## Paper outputs
 
