@@ -1,13 +1,14 @@
 from datetime import date, datetime
 
 import numpy as np
+import pandas as pd
 
 import run_final_paper_experiment as final
 import run_final_vf_experiment as base
-from src.core.types import BlockCalendar, CandidateBlock, CaseRecord, WeeklyInstance
+from src.core.types import BlockCalendar, CandidateBlock, CaseRecord, Col, WeeklyInstance
 
 
-def _case(case_id: int, duration: float = 100.0) -> CaseRecord:
+def _case(case_id: int, duration: float = 100.0, site: str = "TGH") -> CaseRecord:
     return CaseRecord(
         case_id=case_id,
         procedure_id="P",
@@ -21,20 +22,45 @@ def _case(case_id: int, duration: float = 100.0) -> CaseRecord:
         week_of_year=1,
         month=1,
         year=2012,
-        site="TGH",
+        site=site,
     )
 
 
-def test_final_config_is_fixed_capacity_primary_specification() -> None:
+def test_final_config_is_two_site_fixed_capacity_primary_specification() -> None:
     s = final.FinalSettings(data="dummy.xlsx", artifact_root="artifacts/test")
     s.validate()
     cfg = final.final_build_config(s)
+    assert cfg.scope.planning_sites == ("TGH", "TWH")
     assert cfg.capacity.activation_cost_per_block == 0.0
     assert cfg.capacity.turnover_minutes == 30.0
     assert cfg.capacity.eligibility_min_weeks == 3
     assert cfg.capacity.min_activation_rate == 0.25
     assert cfg.costs.overtime_per_minute == 15.0
     assert cfg.costs.idle_per_minute == 10.0
+    assert s.expected_train_cases == 20519
+    assert s.expected_holdout_cases == 6561
+
+
+def test_pooled_feature_encoder_keeps_111_dimensions_and_site_signal() -> None:
+    n = 160
+    frame = pd.DataFrame(
+        {
+            Col.BOOKED_MINUTES: np.linspace(60.0, 240.0, n),
+            Col.WEEK_OF_YEAR: (np.arange(n) % 52) + 1,
+            Col.MONTH: (np.arange(n) % 12) + 1,
+            Col.SITE: np.where(np.arange(n) % 2 == 0, "TGH", "TWH"),
+            Col.CASE_SERVICE: [f"Svc{i % 20}" for i in range(n)],
+            Col.SURGEON_CODE: [f"S{i % 80}" for i in range(n)],
+            Col.PROCEDURE_ID: [f"P{i % 40}" for i in range(n)],
+        }
+    )
+    enc = final.FinalFeatureEncoder().fit(frame)
+    X = enc.transform_frame(frame)
+    assert X.shape == (n, 111)
+    assert len(enc.feature_names) == 111
+    site_names = [name for name in enc.feature_names if name.startswith("site_")]
+    assert len(site_names) == 1
+    assert set(enc.selected_levels["site"]) == {"TGH", "TWH"}
 
 
 def test_final_week_solver_uses_fixed_capacity_and_turnover() -> None:
@@ -65,9 +91,10 @@ def test_final_week_solver_uses_fixed_capacity_and_turnover() -> None:
     assert result.exact
 
 
-def test_adapter_installs_final_planning_layer() -> None:
+def test_adapter_installs_two_site_planning_and_feature_layers() -> None:
     final.install_final_adapter()
     assert base.Settings is final.FinalSettings
+    assert base.FrozenFeatureEncoder is final.FinalFeatureEncoder
     assert base.solve_week is final.final_solve_week
     assert base.build_bundles is final.final_build_bundles
     assert base._cost_cfg is final.final_cost_cfg
