@@ -137,9 +137,10 @@ def test_sos2_knots_consistent_with_profiler() -> None:
     np.testing.assert_allclose(first.knot_y, py)
 
 
-def test_feature_includes_q_hat() -> None:
+def test_feature_includes_critical_ratio_misalignment() -> None:
     model = _model()
     week = model.prepare_instance(_instance())
-    assert "q_hat_s" in model.feature_names
-    q_idx = model.feature_names.index("q_hat_s")
-    np.testing.assert_allclose(week.features[:, q_idx], np.array([0.7, 0.3]))
+    assert "misalignment_s" in model.feature_names
+    idx = model.feature_names.index("misalignment_s")
+    # Target operational critical ratio = 15 / (15 + 10) = 0.6.
+    np.testing.assert_allclose(week.features[:, idx], np.array([0.1, -0.3]))
