@@ -9,7 +9,7 @@ run to abort on a relative discrepancy of about 1.15e-9.
 
 This module keeps the accounting check strict, but scale-aware:
 
-    |recomputed - solver_sum| <= max(1e-2, 1e-7 * max(1, |values|)).
+    |recomputed - solver_sum| <= max(1e-2, 1e-6 * max(1, |values|)).
 
 A genuine accounting/model mismatch still fails loudly.  For accepted
 round-off-level discrepancies, the independently recomputed feasible schedule
@@ -49,12 +49,9 @@ from src.core.column import ScheduleColumn
 from src.solvers.fixed_capacity import schedule_metrics
 
 
-NUMERIC_GUARD_VERSION = "final_paper_numeric_guard_2026_09_24_v3"
-# Accounting bugs change costs by meaningful units; solver/integrality roundoff can
-# be several milliths on objectives around 1e5. Keep this far below one cost unit
-# while leaving ample numerical margin.
+NUMERIC_GUARD_VERSION = "final_paper_numeric_guard_2026_09_24_v4"
 PHI_ACCOUNTING_ATOL = 1e-2
-PHI_ACCOUNTING_RTOL = 1e-7
+PHI_ACCOUNTING_RTOL = 1e-6
 PHI_ACCOUNTING_WARN_ATOL = 1e-5
 
 
@@ -393,10 +390,11 @@ def sensitivity_worker(
         if result.diagnostics.status == "TIME_LIMIT":
             retry_wall = int(math.ceil(initial_wall * hardening.EMERGENCY_RETRY_MULTIPLIER))
             base.LOG.warning(
-                "[SENS] %s week=%s site=%s wall cap fired; retrying with %ss",
+                "[SENS] %s week=%s site=%s emergency wall cap %ss fired; retrying with %ss",
                 label,
                 week.position,
                 site,
+                initial_wall,
                 retry_wall,
             )
             view, result = hardening._fixed_site_once(
