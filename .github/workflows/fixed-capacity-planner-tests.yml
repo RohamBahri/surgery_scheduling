@@ -44,4 +44,5 @@ jobs:
           tests/test_final_paper_finalization_fixes.py
           tests/test_final_paper_numeric_guard.py
           tests/test_final_paper_release_guard.py
+          tests/test_final_paper_wrapper_guards.py
           -q
