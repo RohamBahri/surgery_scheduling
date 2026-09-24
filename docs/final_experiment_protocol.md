@@ -25,6 +25,8 @@ do not execute them directly for the final paper run.
 - VF library: per-site TGH/TWH surfaces with implicit Cartesian-product combination.
 - Stage 1 is rejected if VF never attempts outer iteration 1. `VF_STATUS.json` records attempted iterations and termination reason.
 - Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; the emergency wall cap is several times the work limit and is retried once if it fires first.
+- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-5, 1e-8*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. This specifically covers the observed 2026-09-24 round-off discrepancy (`1.78e-4` on a `1.55e5` objective) without masking material accounting errors.
+- The supported RA exposure cross-fit leaves scikit-learn's L2 penalty at its default instead of passing the deprecated `penalty="l2"` argument.
 - Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. They are deployment-robustness checks, not retrained alternative specifications.
 
 ## Required run order
@@ -52,8 +54,20 @@ python -m pytest \
   tests/test_final_paper_runtime_fixes.py \
   tests/test_final_paper_scientific_fixes.py \
   tests/test_final_paper_finalization_fixes.py \
+  tests/test_final_paper_numeric_guard.py \
   -q
 ```
+
+On the local Mac/scikit-learn version, also turn the warning discussed in the
+audit into an error for the dedicated regression test:
+
+```bash
+python -W error::FutureWarning -m pytest tests/test_final_paper_numeric_guard.py -q
+```
+
+The regression suite contains the exact Phi values from the eight-hour failed
+run and requires that this solver-scale discrepancy pass while a materially
+larger discrepancy still fails.
 
 ### 3. Real-data preflight
 
@@ -93,7 +107,7 @@ Use a fresh artifact directory:
 ```bash
 caffeinate -i python run_final_paper.py train \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --artifact-root artifacts/final_paper_training_frozen_v3 \
+  --artifact-root artifacts/final_paper_training_frozen_v4 \
   --cores 15 \
   --max-wall-minutes 720
 ```
@@ -108,7 +122,7 @@ Before consuming the holdout, review at least:
 - `TRAIN_LIBRARY_SURFACES.csv` and saturation status;
 - `REGULARIZATION.json`;
 - `TIE_SEED_AUDIT.csv` (a coarse training diagnostic only, not a deployment tie-equivalence proof);
-- `FINALIZATION_FIXES.json`.
+- `FINALIZATION_FIXES.json` and `NUMERIC_GUARD.json`.
 
 Do **not** run Stage 2 until the Stage-1 diagnostics have been reviewed.
 
@@ -118,7 +132,7 @@ Stage 2 requires the exact Git commit recorded in `TRAINING_FREEZE.json` and a
 clean tracked tree. If `main` has moved, create a worktree at the frozen SHA:
 
 ```bash
-FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v3/TRAINING_FREEZE.json"))["git_head"])')
+FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v4/TRAINING_FREEZE.json"))["git_head"])')
 git worktree add ../surgery_final_eval "$FROZEN_SHA"
 cd ../surgery_final_eval
 source "/Users/roham/Desktop/Surgery project/code/.venv/bin/activate"
@@ -129,8 +143,8 @@ Run the primary evaluator once:
 ```bash
 caffeinate -i python run_final_paper.py evaluate \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v3" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v3" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v4" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v4" \
   --cores 15
 ```
 
@@ -146,9 +160,9 @@ After successful primary Stage 2, from the same frozen worktree:
 ```bash
 caffeinate -i python run_final_paper.py sensitivities \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v3" \
-  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v3" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v3" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v4" \
+  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v4" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v4" \
   --cores 15
 ```
 
