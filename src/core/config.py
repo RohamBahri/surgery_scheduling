@@ -59,6 +59,11 @@ class SolverConfig:
     verbose: bool = True
     mip_gap_abs: float | None = None
     seed: int | None = None
+    # Optional deterministic Gurobi effort limit.  WorkLimit is reproducible for
+    # a fixed model/parameterization, unlike a wall-clock TimeLimit.  The final
+    # holdout policy planner uses this while retaining TimeLimit only as an
+    # emergency fail-safe.
+    work_limit: float | None = None
 
 
 @dataclass
