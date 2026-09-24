@@ -77,8 +77,9 @@ def test_safe_saturation_box_respects_short_case_duration_floor() -> None:
 
 
 def test_oracle_retry_merge_keeps_gap_on_native_psi_scale(monkeypatch) -> None:
-    # Choose capacity so K = idle * (capacity - duration - tau*n) = 1,000,000.
-    block = CandidateBlock(0, "TGH", "OR1", 100100.0, 0.0, True)
+    # With tau=30, n=1 and d=100, capacity 100130 gives
+    # K = idle * (capacity - duration - tau*n) = 1,000,000.
+    block = CandidateBlock(0, "TGH", "OR1", 100130.0, 0.0, True)
     inst = WeeklyInstance(
         week_index=0,
         start_date=date(2012, 1, 2),
