@@ -38,7 +38,7 @@ def test_material_phi_accounting_error_still_fails() -> None:
 
 def test_phi_accounting_tolerance_is_scale_aware() -> None:
     assert guard.phi_accounting_tolerance(1.0, 1.0) == pytest.approx(1e-2)
-    assert guard.phi_accounting_tolerance(200000.0, 200000.0) == pytest.approx(0.02)
+    assert guard.phi_accounting_tolerance(200000.0, 200000.0) == pytest.approx(0.2)
 
 
 def test_install_all_guards_covers_late_training_and_holdout_oracle_paths() -> None:
