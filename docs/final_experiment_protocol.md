@@ -25,7 +25,7 @@ do not execute them directly for the final paper run.
 - VF library: per-site TGH/TWH surfaces with implicit Cartesian-product combination.
 - Stage 1 is rejected if VF never attempts outer iteration 1. `VF_STATUS.json` records attempted iterations and termination reason.
 - Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; the emergency wall cap is several times the work limit and is retried once if it fires first.
-- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-2, 1e-7*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. The reviewed wrapper installs this guard on **all** runtime, deterministic-evaluation and sensitivity worker paths, including the late Stage-1 seed audit and the Stage-2 realized oracle.
+- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-2, 1e-6*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. The reviewed wrapper installs this guard on **all** runtime, deterministic-evaluation and sensitivity worker paths, including the late Stage-1 seed audit and the Stage-2 realized oracle. This tolerance remains far below the cost change from a one-minute idle/overtime accounting error, while leaving ample margin for solver feasibility round-off.
 - The supported RA exposure cross-fit leaves scikit-learn's L2 penalty at its default instead of passing the deprecated `penalty="l2"` argument.
 - Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. If BOOKED has zero regret in a scenario, percentage gap-closed is reported as undefined (`NaN`), not 100%.
 - Optional response sensitivities solve BOOKED once at the **same reduced sensitivity planner budget** used by the learned policies and reuse that solve across the three response scenarios.
@@ -57,6 +57,7 @@ python -m pytest \
   tests/test_final_paper_finalization_fixes.py \
   tests/test_final_paper_numeric_guard.py \
   tests/test_final_paper_release_guard.py \
+  tests/test_final_paper_wrapper_guards.py \
   -q
 ```
 
@@ -69,8 +70,9 @@ python -W error::FutureWarning -m pytest tests/test_final_paper_numeric_guard.py
 
 The regression suite contains the exact Phi values from the eight-hour failed
 run and requires that this solver-scale discrepancy pass while a materially
-larger accounting discrepancy still fails. It also verifies that both the late
-Stage-1 deterministic seed audit and the Stage-2 oracle use guarded workers.
+larger accounting discrepancy still fails. It also verifies the wrapper installs
+the guarded runtime worker for the Stage-2 oracle and the guarded deterministic
+worker for the late Stage-1 seed audit before either stage main function starts.
 
 ### 3. Real-data preflight
 
@@ -81,7 +83,9 @@ python run_final_paper.py preflight \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx
 ```
 
-Then the short solver/license check:
+Then the short solver/license check. This now explicitly exercises **both** the
+runtime worker used by the Stage-2 oracle and the deterministic worker used by
+the late Stage-1 seed audit, on training data only:
 
 ```bash
 python run_final_paper.py preflight \
