@@ -32,6 +32,7 @@ jobs:
           final_paper_required_sensitivities.py
           final_paper_finalization_fixes.py
           final_paper_numeric_guard.py
+          final_paper_release_guard.py
       - name: Run mathematical planner and final-driver regressions
         # All optimization fixtures fit the bundled restricted Gurobi license.
         run: >-
@@ -42,4 +43,5 @@ jobs:
           tests/test_final_paper_scientific_fixes.py
           tests/test_final_paper_finalization_fixes.py
           tests/test_final_paper_numeric_guard.py
+          tests/test_final_paper_release_guard.py
           -q
