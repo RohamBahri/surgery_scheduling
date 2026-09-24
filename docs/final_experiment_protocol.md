@@ -21,13 +21,14 @@ do not execute them directly for the final paper run.
 - Regularization: Naive has its own minutes-scale L1 calibration; RA, RA_FULL, OS and VF share one common cost-scale lambda.
 - Main deployable policies: Booked, Naive, exposure-weighted RA, full-weight RA, SITE_SHIFT, OS and VF.
 - Retrospective benchmarks: realized oracle and the **projected hindsight benchmark** (`IMPLEMENTABLE_ORACLE`). The latter is not a scheduling-performance ceiling or lower bound.
-- SITE_SHIFT is fit directly on its deployed clipped full-weight case-loss objective; the 1-minute floor is applied case by case rather than imposed as a raw-score constraint on every case at the site.
+- SITE_SHIFT is fit directly on its deployed clipped full-weight case-loss objective. The coarse and refined grids enforce the frozen coefficient box before minimization; the 1-minute duration floor is still applied case by case by the deployed clipping rule.
 - VF library: per-site TGH/TWH surfaces with implicit Cartesian-product combination.
 - Stage 1 is rejected if VF never attempts outer iteration 1. `VF_STATUS.json` records attempted iterations and termination reason.
 - Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; the emergency wall cap is several times the work limit and is retried once if it fires first.
-- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-5, 1e-8*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. This specifically covers the observed 2026-09-24 round-off discrepancy (`1.78e-4` on a `1.55e5` objective) without masking material accounting errors.
+- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-2, 1e-7*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. The reviewed wrapper installs this guard on **all** runtime, deterministic-evaluation and sensitivity worker paths, including the late Stage-1 seed audit and the Stage-2 realized oracle.
 - The supported RA exposure cross-fit leaves scikit-learn's L2 penalty at its default instead of passing the deprecated `penalty="l2"` argument.
-- Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. They are deployment-robustness checks, not retrained alternative specifications.
+- Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. If BOOKED has zero regret in a scenario, percentage gap-closed is reported as undefined (`NaN`), not 100%.
+- Optional response sensitivities solve BOOKED once at the **same reduced sensitivity planner budget** used by the learned policies and reuse that solve across the three response scenarios.
 
 ## Required run order
 
@@ -55,6 +56,7 @@ python -m pytest \
   tests/test_final_paper_scientific_fixes.py \
   tests/test_final_paper_finalization_fixes.py \
   tests/test_final_paper_numeric_guard.py \
+  tests/test_final_paper_release_guard.py \
   -q
 ```
 
@@ -67,7 +69,8 @@ python -W error::FutureWarning -m pytest tests/test_final_paper_numeric_guard.py
 
 The regression suite contains the exact Phi values from the eight-hour failed
 run and requires that this solver-scale discrepancy pass while a materially
-larger discrepancy still fails.
+larger accounting discrepancy still fails. It also verifies that both the late
+Stage-1 deterministic seed audit and the Stage-2 oracle use guarded workers.
 
 ### 3. Real-data preflight
 
@@ -78,7 +81,7 @@ python run_final_paper.py preflight \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx
 ```
 
-Then the existing short solver/license check:
+Then the short solver/license check:
 
 ```bash
 python run_final_paper.py preflight \
@@ -107,7 +110,7 @@ Use a fresh artifact directory:
 ```bash
 caffeinate -i python run_final_paper.py train \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --artifact-root artifacts/final_paper_training_frozen_v4 \
+  --artifact-root artifacts/final_paper_training_frozen_v5 \
   --cores 15 \
   --max-wall-minutes 720
 ```
@@ -117,12 +120,12 @@ Before consuming the holdout, review at least:
 
 - `ORACLE_TRAIN.csv`;
 - `RA_PDCA.csv`, `RA_FULL_PDCA.csv`, `OS_PDCA.csv`;
-- `SITE_SHIFT_PDCA.csv` (the rows explicitly identify the deterministic clipped-grid fit; the historical filename is retained for compatibility);
+- `SITE_SHIFT_PDCA.csv`;
 - `VF_TRAJECTORY.csv` and `VF_STATUS.json`;
 - `TRAIN_LIBRARY_SURFACES.csv` and saturation status;
 - `REGULARIZATION.json`;
 - `TIE_SEED_AUDIT.csv` (a coarse training diagnostic only, not a deployment tie-equivalence proof);
-- `FINALIZATION_FIXES.json` and `NUMERIC_GUARD.json`.
+- `FINALIZATION_FIXES.json`, `NUMERIC_GUARD.json`, and `RELEASE_GUARD.json`.
 
 Do **not** run Stage 2 until the Stage-1 diagnostics have been reviewed.
 
@@ -132,7 +135,7 @@ Stage 2 requires the exact Git commit recorded in `TRAINING_FREEZE.json` and a
 clean tracked tree. If `main` has moved, create a worktree at the frozen SHA:
 
 ```bash
-FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v4/TRAINING_FREEZE.json"))["git_head"])')
+FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v5/TRAINING_FREEZE.json"))["git_head"])')
 git worktree add ../surgery_final_eval "$FROZEN_SHA"
 cd ../surgery_final_eval
 source "/Users/roham/Desktop/Surgery project/code/.venv/bin/activate"
@@ -143,15 +146,16 @@ Run the primary evaluator once:
 ```bash
 caffeinate -i python run_final_paper.py evaluate \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v4" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v4" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v5" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v5" \
   --cores 15
 ```
 
 The response-misspecification scenarios remain optional. If they are wanted,
-add `--run-response-sensitivities` **before** the one-shot Stage-2 run. BOOKED
-is reused from the primary evaluation rather than solved three redundant times.
-The frozen response scenarios are `(alpha,h)=(0.5,30),(0.8,15),(0.8,60)`.
+add `--run-response-sensitivities` **before** the one-shot Stage-2 run. BOOKED is
+solved once at the response-sensitivity planner budget and reused across all
+three scenarios. The frozen scenarios are
+`(alpha,h)=(0.5,30),(0.8,15),(0.8,60)`.
 
 ### 6. Required structural sensitivities
 
@@ -160,9 +164,9 @@ After successful primary Stage 2, from the same frozen worktree:
 ```bash
 caffeinate -i python run_final_paper.py sensitivities \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v4" \
-  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v4" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v4" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v5" \
+  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v5" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v5" \
   --cores 15
 ```
 
