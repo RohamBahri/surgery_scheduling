@@ -62,6 +62,7 @@ def _train(argv: list[str]) -> None:
         raise SystemExit("train requires --artifact-root")
     _dispatch_main(training, argv)
     hardening.stamp_training_bundle(Path(root_arg))
+    numeric_guard.stamp_training_bundle(Path(root_arg))
     print(
         json.dumps(
             {
@@ -83,6 +84,7 @@ def _evaluate(argv: list[str]) -> None:
     if not train_arg or not eval_arg:
         raise SystemExit("evaluate requires --training-artifact-root and --artifact-root")
     hardening.verify_training_finalization(Path(train_arg))
+    numeric_guard.verify_training_bundle(Path(train_arg))
     hardening.install_evaluation_fixes(evaluation)
     numeric_guard.install_evaluation_guard()
     _dispatch_main(evaluation, argv)
@@ -108,6 +110,7 @@ def _sensitivities(argv: list[str]) -> None:
     if not train_arg or not root_arg:
         raise SystemExit("sensitivities requires --training-artifact-root and --artifact-root")
     hardening.verify_training_finalization(Path(train_arg))
+    numeric_guard.verify_training_bundle(Path(train_arg))
     hardening.install_sensitivity_fixes(runner)
     numeric_guard.install_sensitivity_guard()
     _dispatch_main(runner, argv)
