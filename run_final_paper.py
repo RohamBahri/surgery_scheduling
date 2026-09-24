@@ -54,6 +54,19 @@ def _dispatch_main(module, argv: list[str]) -> None:
         sys.argv = old
 
 
+def _rewrite_frozen_next_step(root: Path) -> None:
+    """Ensure the frozen bundle never instructs users to bypass the wrapper."""
+
+    path = Path(root) / "TRAINING_FREEZE.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["next_step"] = (
+        "Review all Stage-1 diagnostics. Then run Stage 2 exactly once with "
+        "`python run_final_paper.py evaluate ...` from a clean git worktree at "
+        "the frozen commit. Do not execute run_final_paper_evaluation.py directly."
+    )
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _train(argv: list[str]) -> None:
     import run_final_paper_training as training
 
@@ -68,6 +81,7 @@ def _train(argv: list[str]) -> None:
     hardening.stamp_training_bundle(Path(root_arg))
     numeric_guard.stamp_training_bundle(Path(root_arg))
     release_guard.stamp_training_bundle(Path(root_arg))
+    _rewrite_frozen_next_step(Path(root_arg))
     print(
         json.dumps(
             {
@@ -142,8 +156,8 @@ def _sensitivities(argv: list[str]) -> None:
 def _preflight(argv: list[str]) -> None:
     import run_final_paper_preflight as preflight
 
-    # The preflight solver check should exercise the same all-path numerical
-    # worker installation and tightened integrality tolerance used by Stage 1/2.
+    # The solver check exercises the same all-path numerical worker installation
+    # used by the expensive training and evaluation stages.
     release_guard.install_reviewed_guards()
     _dispatch_main(preflight, argv)
 
