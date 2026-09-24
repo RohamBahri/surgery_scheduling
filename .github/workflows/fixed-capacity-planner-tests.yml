@@ -26,6 +26,7 @@ jobs:
           run_final_paper_evaluation.py
           run_final_paper_preflight.py
           run_final_paper_required_sensitivities.py
+          run_final_paper_deterministic_calibration.py
           final_paper_runtime_fixes.py
           final_paper_scientific_fixes.py
           final_paper_required_sensitivities.py
