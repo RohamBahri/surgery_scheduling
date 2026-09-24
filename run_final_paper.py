@@ -19,9 +19,9 @@ Existing structural/solver preflight::
 
     python run_final_paper.py preflight [arguments accepted by run_final_paper_preflight.py]
 
-This wrapper installs the final review hardening before dispatching to the
-existing stage modules.  Do not execute the legacy experiment scripts directly
-for the final paper run.
+This wrapper installs the final review hardening and the scale-aware numerical
+accounting guard before dispatching to the existing stage modules.  Do not
+execute the legacy experiment scripts directly for the final paper run.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import final_paper_finalization_fixes as hardening
+import final_paper_numeric_guard as numeric_guard
 
 
 def _arg_value(argv: list[str], name: str) -> str | None:
@@ -55,6 +56,7 @@ def _train(argv: list[str]) -> None:
     import run_final_paper_training as training
 
     hardening.install_training_fixes(training)
+    numeric_guard.install_training_guard()
     root_arg = _arg_value(argv, "--artifact-root")
     if not root_arg:
         raise SystemExit("train requires --artifact-root")
@@ -65,6 +67,7 @@ def _train(argv: list[str]) -> None:
             {
                 "status": "TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED",
                 "finalization_fixes_version": hardening.FINALIZATION_FIXES_VERSION,
+                "numeric_guard_version": numeric_guard.NUMERIC_GUARD_VERSION,
                 "artifact_root": str(Path(root_arg).resolve()),
             },
             indent=2,
@@ -81,6 +84,7 @@ def _evaluate(argv: list[str]) -> None:
         raise SystemExit("evaluate requires --training-artifact-root and --artifact-root")
     hardening.verify_training_finalization(Path(train_arg))
     hardening.install_evaluation_fixes(evaluation)
+    numeric_guard.install_evaluation_guard()
     _dispatch_main(evaluation, argv)
     hardening.write_benchmark_interpretation(Path(eval_arg))
     print(
@@ -88,6 +92,7 @@ def _evaluate(argv: list[str]) -> None:
             {
                 "status": "HOLDOUT_EVALUATION_COMPLETE_REVIEWED",
                 "finalization_fixes_version": hardening.FINALIZATION_FIXES_VERSION,
+                "numeric_guard_version": numeric_guard.NUMERIC_GUARD_VERSION,
                 "artifact_root": str(Path(eval_arg).resolve()),
             },
             indent=2,
@@ -104,12 +109,14 @@ def _sensitivities(argv: list[str]) -> None:
         raise SystemExit("sensitivities requires --training-artifact-root and --artifact-root")
     hardening.verify_training_finalization(Path(train_arg))
     hardening.install_sensitivity_fixes(runner)
+    numeric_guard.install_sensitivity_guard()
     _dispatch_main(runner, argv)
     print(
         json.dumps(
             {
                 "status": "REQUIRED_SENSITIVITIES_COMPLETE_REVIEWED",
                 "finalization_fixes_version": hardening.FINALIZATION_FIXES_VERSION,
+                "numeric_guard_version": numeric_guard.NUMERIC_GUARD_VERSION,
                 "artifact_root": str(Path(root_arg).resolve()),
             },
             indent=2,
@@ -120,6 +127,9 @@ def _sensitivities(argv: list[str]) -> None:
 def _preflight(argv: list[str]) -> None:
     import run_final_paper_preflight as preflight
 
+    # The solver check uses the same process worker as Stage 1, so install the
+    # reviewed numeric guard here as well.
+    numeric_guard.install_training_guard()
     _dispatch_main(preflight, argv)
 
 
