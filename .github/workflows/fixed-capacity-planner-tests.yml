@@ -25,4 +25,5 @@ jobs:
           tests/test_planning/test_fixed_capacity.py
           tests/test_final_paper_experiment.py
           tests/test_final_paper_runtime_fixes.py
+          tests/test_final_paper_scientific_fixes.py
           -q
