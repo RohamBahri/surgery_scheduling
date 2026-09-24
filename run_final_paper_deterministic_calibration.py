@@ -43,8 +43,8 @@ def main() -> None:
     fixes.apply_runtime_fixes()
     science.apply_scientific_fixes()
     science._deterministic_site_solve = hardening.robust_deterministic_site_solve
-    # Exercise the exact all-path worker and solver-tolerance installation used
-    # by the reviewed Stage 2, including inside macOS spawned child processes.
+    # Exercise the exact all-path worker installation and accounting tolerance
+    # used by reviewed Stage 2, including inside macOS spawned child processes.
     release_guard.install_reviewed_guards()
     args = parse_args()
 
@@ -109,7 +109,6 @@ def main() -> None:
         "release_guard_version": release_guard.RELEASE_GUARD_VERSION,
         "phi_accounting_atol": numeric_guard.PHI_ACCOUNTING_ATOL,
         "phi_accounting_rtol": numeric_guard.PHI_ACCOUNTING_RTOL,
-        "int_feas_tol": release_guard.INT_FEAS_TOL,
         "training_weeks_tested": len(subset),
         "training_week_positions": [int(w.position) for w in subset],
         "training_week_case_counts": [int(w.instance.num_cases) for w in subset],
