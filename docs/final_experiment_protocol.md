@@ -1,9 +1,9 @@
 # Frozen final-paper experiment protocol
 
 This document is the operational source of truth for the final experiment.
-Do **not** run `run_final_vf_experiment.py` or `run_final_paper_experiment.py`
-as final experiment entry points. They are implementation modules retained for
-reuse/tests. The supported entry points are the scripts below.
+The **only supported final-paper entry point is `run_final_paper.py`**. The
+older stage modules remain implementation modules used by tests and the wrapper;
+do not execute them directly for the final paper run.
 
 ## Frozen primary specification
 
@@ -19,73 +19,106 @@ reuse/tests. The supported entry points are the scripts below.
 - Response: alpha=.8, h=30 primary; minimum displayed recommended duration 1 minute.
 - Coefficient box: +/-100; intercept unpenalized.
 - Regularization: Naive has its own minutes-scale L1 calibration; RA, RA_FULL, OS and VF share one common cost-scale lambda.
-- Main policies: Booked, Naive, exposure-weighted RA, full-weight RA, site-shift baseline, OS, VF, realized oracle, implementable behavioral oracle.
+- Main deployable policies: Booked, Naive, exposure-weighted RA, full-weight RA, SITE_SHIFT, OS and VF.
+- Retrospective benchmarks: realized oracle and the **projected hindsight benchmark** (`IMPLEMENTABLE_ORACLE`). The latter is not a scheduling-performance ceiling or lower bound.
+- SITE_SHIFT is fit directly on its deployed clipped full-weight case-loss objective; the 1-minute floor is applied case by case rather than imposed as a raw-score constraint on every case at the site.
 - VF library: per-site TGH/TWH surfaces with implicit Cartesian-product combination.
-- Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; wall-clock `TimeLimit` is fail-only.
+- Stage 1 is rejected if VF never attempts outer iteration 1. `VF_STATUS.json` records attempted iterations and termination reason.
+- Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; the emergency wall cap is several times the work limit and is retried once if it fires first.
+- Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. They are deployment-robustness checks, not retrained alternative specifications.
 
 ## Required run order
 
-### 1. Update and test
+### 1. Update, clean the tracked tree, activate the environment
 
 ```bash
 cd "/Users/roham/Desktop/Surgery project/code"
 git checkout main
 git pull origin main
+git status --short
 source .venv/bin/activate
+```
 
+The final run requires a clean **tracked** tree. Untracked data/artifact files
+are allowed. If `git status --short` shows tracked modifications, stash or
+revert them before continuing.
+
+### 2. Focused tests
+
+```bash
 python -m pytest \
   tests/test_planning/test_fixed_capacity.py \
   tests/test_final_paper_experiment.py \
   tests/test_final_paper_runtime_fixes.py \
   tests/test_final_paper_scientific_fixes.py \
+  tests/test_final_paper_finalization_fixes.py \
   -q
 ```
 
-### 2. Real-data preflight
+### 3. Real-data preflight
 
-First run the solver-free structural/data check:
+Run the structural/data check:
 
 ```bash
-python run_final_paper_preflight.py \
+python run_final_paper.py preflight \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx
 ```
 
-Then run the short local solver/license check. It uses training data only:
+Then the existing short solver/license check:
 
 ```bash
-python run_final_paper_preflight.py \
+python run_final_paper.py preflight \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --cores 15 \
   --solver-check
 ```
 
-Do not start Stage 1 unless both finish with `PREFLIGHT_OK`.
+Finally calibrate the actual deterministic Stage-2 planning path on the 15
+largest **training** weeks. This can take materially longer than the short
+preflight because it intentionally uses the frozen final WorkLimit:
 
-### 3. Stage 1: training only
+```bash
+python run_final_paper_deterministic_calibration.py \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --cores 15 \
+  --weeks 15
+```
+
+Proceed only if this ends with `DETERMINISTIC_CALIBRATION_OK`.
+
+### 4. Stage 1: training only
 
 Use a fresh artifact directory:
 
 ```bash
-caffeinate -i python run_final_paper_training.py \
+caffeinate -i python run_final_paper.py train \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --artifact-root artifacts/final_paper_training_frozen_v2 \
+  --artifact-root artifacts/final_paper_training_frozen_v3 \
   --cores 15 \
   --max-wall-minutes 720
 ```
 
-Success is `TRAINING_COMPLETE_HOLDOUT_LOCKED`. Review the Stage-1 diagnostics
-before consuming the holdout. In particular inspect oracle gaps, RA/RA_FULL/OS
-pDCA histories, VF trajectory, library saturation, tie-seed audit, and clipping
-rates/regularization records.
+Successful completion prints `TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED`.
+Before consuming the holdout, review at least:
 
-### 4. Stage 2: primary holdout, once
+- `ORACLE_TRAIN.csv`;
+- `RA_PDCA.csv`, `RA_FULL_PDCA.csv`, `OS_PDCA.csv`;
+- `SITE_SHIFT_PDCA.csv` (the rows explicitly identify the deterministic clipped-grid fit; the historical filename is retained for compatibility);
+- `VF_TRAJECTORY.csv` and `VF_STATUS.json`;
+- `TRAIN_LIBRARY_SURFACES.csv` and saturation status;
+- `REGULARIZATION.json`;
+- `TIE_SEED_AUDIT.csv` (a coarse training diagnostic only, not a deployment tie-equivalence proof);
+- `FINALIZATION_FIXES.json`.
+
+Do **not** run Stage 2 until the Stage-1 diagnostics have been reviewed.
+
+### 5. Stage 2: primary holdout, once
 
 Stage 2 requires the exact Git commit recorded in `TRAINING_FREEZE.json` and a
-clean tracked tree. If `main` has moved, create a worktree at the frozen SHA.
-For example:
+clean tracked tree. If `main` has moved, create a worktree at the frozen SHA:
 
 ```bash
-FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v2/TRAINING_FREEZE.json"))["git_head"])')
+FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v3/TRAINING_FREEZE.json"))["git_head"])')
 git worktree add ../surgery_final_eval "$FROZEN_SHA"
 cd ../surgery_final_eval
 source "/Users/roham/Desktop/Surgery project/code/.venv/bin/activate"
@@ -94,30 +127,31 @@ source "/Users/roham/Desktop/Surgery project/code/.venv/bin/activate"
 Run the primary evaluator once:
 
 ```bash
-caffeinate -i python run_final_paper_evaluation.py \
+caffeinate -i python run_final_paper.py evaluate \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v2" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v2" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v3" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v3" \
   --cores 15
 ```
 
-If response-misspecification results are desired in the same one-shot run, add
-`--run-response-sensitivities` before starting Stage 2. The predeclared response
-scenarios are `(alpha,h)=(0.5,30),(0.8,15),(0.8,60)`.
+The response-misspecification scenarios remain optional. If they are wanted,
+add `--run-response-sensitivities` **before** the one-shot Stage-2 run. BOOKED
+is reused from the primary evaluation rather than solved three redundant times.
+The frozen response scenarios are `(alpha,h)=(0.5,30),(0.8,15),(0.8,60)`.
 
-### 5. Required structural sensitivities
+### 6. Required structural sensitivities
 
-These are predeclared and source-frozen by the Stage-1 commit. Run them only
-after successful primary Stage 2, from the same frozen worktree:
+After successful primary Stage 2, from the same frozen worktree:
 
 ```bash
-caffeinate -i python run_final_paper_required_sensitivities.py \
+caffeinate -i python run_final_paper.py sensitivities \
   --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v2" \
-  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v2" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v2" \
+  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v3" \
+  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v3" \
+  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v3" \
   --cores 15
 ```
 
-This runner evaluates frozen policies under the regular-template capacity proxy
-and under zero turnover. It does not retrain anything.
+This evaluates the frozen primary policies under `regular_template` capacity and
+under zero turnover. Each scenario includes its own realized-duration oracle,
+regret brackets, and within-scenario gap-closed summaries. Nothing is retrained.
