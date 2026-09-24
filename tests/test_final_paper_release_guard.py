@@ -7,6 +7,7 @@ import pandas as pd
 from scipy import sparse
 
 import final_paper_finalization_fixes as hardening
+import final_paper_numeric_guard as numeric
 import final_paper_release_guard as release
 import final_paper_required_sensitivities as sensitivity
 import final_paper_runtime_fixes as runtime
@@ -32,9 +33,9 @@ def _two_site_arrays() -> base.Arrays:
 
 def test_release_install_covers_every_process_worker() -> None:
     release.install_reviewed_guards()
-    assert runtime._solve_process_task is release.runtime_worker
-    assert science.deterministic_eval_worker is release.deterministic_worker
-    assert sensitivity._worker is release.sensitivity_worker
+    assert runtime._solve_process_task is numeric.training_process_task
+    assert science.deterministic_eval_worker is numeric.deterministic_eval_worker
+    assert sensitivity._worker is numeric.sensitivity_worker
     assert hardening._solve_site_shift_grid is release.constrained_site_shift_grid
 
 
