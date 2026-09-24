@@ -21,6 +21,7 @@ jobs:
       - name: Compile final paper entry points
         run: >-
           python -m py_compile
+          run_final_paper.py
           run_final_paper_training.py
           run_final_paper_evaluation.py
           run_final_paper_preflight.py
@@ -28,6 +29,7 @@ jobs:
           final_paper_runtime_fixes.py
           final_paper_scientific_fixes.py
           final_paper_required_sensitivities.py
+          final_paper_finalization_fixes.py
       - name: Run mathematical planner and final-driver regressions
         # All optimization fixtures fit the bundled restricted Gurobi license.
         run: >-
@@ -36,4 +38,5 @@ jobs:
           tests/test_final_paper_experiment.py
           tests/test_final_paper_runtime_fixes.py
           tests/test_final_paper_scientific_fixes.py
+          tests/test_final_paper_finalization_fixes.py
           -q
