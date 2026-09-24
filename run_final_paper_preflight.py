@@ -7,8 +7,9 @@ and eligibility, reconstructs the 107-feature predecision encoder, and performs
 no holdout optimization or holdout-outcome summaries.
 
 With ``--solver-check`` it also exercises the local Gurobi setup on training
-only: 15 concurrent process-isolated weekly jobs and one full-size RA_FULL pDCA
-convex subproblem with a short time cap.
+only: 15 concurrent process-isolated runtime jobs, the deterministic worker path
+used by the late Stage-1 seed audit / Stage-2 policy scheduler, and one full-size
+RA_FULL pDCA convex subproblem with a short time cap.
 """
 
 from __future__ import annotations
@@ -36,14 +37,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--solver-check",
         action="store_true",
-        help="Run short training-only Gurobi concurrency and pDCA-size checks.",
+        help="Run short training-only Gurobi concurrency, deterministic-worker, and pDCA-size checks.",
     )
     p.add_argument("--cores", type=int, default=15)
     return p.parse_args()
 
 
 def _solver_checks(train_weeks, train_arrays, s) -> dict:
-    # 1) Exercise the same process-isolated concurrent weekly path used by Stage 1.
+    # 1) Exercise the same process-isolated runtime path used by Stage 1 and the
+    # Stage-2 realized oracle.  This is the path that was previously left outside
+    # the numerical guard during evaluation.
     subset = list(train_weeks[: min(15, len(train_weeks))])
     dm = {w.position: train_arrays.booked[train_arrays.week_slices[w.position]] for w in subset}
     t0 = time.perf_counter()
@@ -53,12 +56,36 @@ def _solver_checks(train_weeks, train_arrays, s) -> dict:
         s,
         seconds=30,
         gap=0.20,
-        label="preflight_concurrency",
+        label="preflight_runtime_worker",
     )
     concurrency_seconds = time.perf_counter() - t0
 
-    # 2) Build the full 72-week RA_FULL convex pDCA subproblem and ask Gurobi for
-    # one short solve.  This checks model size/license compatibility before the
+    # 2) Exercise the deterministic process worker used by the late Stage-1
+    # tie-seed audit and final policy scheduling. Keep this short: the separate
+    # deterministic calibration script tests the full Stage-2 WorkLimit.
+    det_subset = sorted(
+        train_weeks,
+        key=lambda w: w.instance.num_cases,
+        reverse=True,
+    )[: min(2, len(train_weeks))]
+    det_dm = {
+        w.position: train_arrays.booked[train_arrays.week_slices[w.position]]
+        for w in det_subset
+    }
+    t_det = time.perf_counter()
+    det_plans = science.deterministic_eval_solve_batch(
+        det_subset,
+        det_dm,
+        s,
+        work_limit=min(20.0, float(s.sensitivity_planner_work_limit)),
+        wall_seconds=300,
+        gap=0.20,
+        label="preflight_deterministic_worker",
+    )
+    deterministic_seconds = time.perf_counter() - t_det
+
+    # 3) Build the full 72-week RA_FULL convex pDCA subproblem and ask Gurobi for
+    # one short solve. This checks model size/license compatibility before the
     # expensive run without consuming any holdout information.
     ss = copy.copy(s)
     ss.pdca_convex_seconds = 30
@@ -82,9 +109,12 @@ def _solver_checks(train_weeks, train_arrays, s) -> dict:
         solver.dispose()
     pdca_seconds = time.perf_counter() - t1
     return {
-        "concurrent_weekly_jobs": len(plans),
-        "concurrency_wall_seconds": concurrency_seconds,
-        "concurrency_max_gap_native_psi": float(max(p.gap for p in plans.values())),
+        "runtime_worker_jobs": len(plans),
+        "runtime_worker_wall_seconds": concurrency_seconds,
+        "runtime_worker_max_gap_native_psi": float(max(p.gap for p in plans.values())),
+        "deterministic_worker_jobs": len(det_plans),
+        "deterministic_worker_wall_seconds": deterministic_seconds,
+        "deterministic_worker_max_gap_native_psi": float(max(p.gap for p in det_plans.values())),
         "full_pdca_variables": int(train_arrays.p),
         "full_pdca_wall_seconds": pdca_seconds,
         "full_pdca_candidate_finite": bool(np.all(np.isfinite(candidate))),
