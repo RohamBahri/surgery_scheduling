@@ -353,6 +353,10 @@ def solve_deterministic(
 def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
     model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.TimeLimit = cfg.time_limit_seconds
+    if cfg.work_limit is not None:
+        if cfg.work_limit <= 0:
+            raise ValueError("work_limit must be positive when supplied")
+        model.Params.WorkLimit = float(cfg.work_limit)
     model.Params.MIPGap = cfg.mip_gap
     if cfg.mip_gap_abs is not None:
         model.Params.MIPGapAbs = cfg.mip_gap_abs
