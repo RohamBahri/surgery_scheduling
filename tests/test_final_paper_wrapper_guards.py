@@ -6,6 +6,7 @@ import final_paper_runtime_fixes as runtime
 import final_paper_scientific_fixes as science
 import run_final_paper as wrapper
 import run_final_paper_evaluation as evaluation
+import run_final_paper_experiment as final
 import run_final_paper_training as training
 
 
@@ -56,3 +57,17 @@ def test_evaluate_wrapper_installs_oracle_and_policy_guards(monkeypatch, tmp_pat
     # deterministic worker. Both must be guarded before evaluation.main starts.
     assert observed["runtime"] is numeric.training_process_task
     assert observed["deterministic"] is numeric.deterministic_eval_worker
+
+
+def test_guard_survives_stage_internal_initialization_sequence() -> None:
+    # The real stage mains call these three installers again after the wrapper
+    # installs the release guard. Verify that sequence cannot silently restore
+    # either legacy strict-check worker.
+    release.install_reviewed_guards()
+    final.install_final_adapter()
+    runtime.apply_runtime_fixes()
+    science.apply_scientific_fixes()
+
+    assert runtime._solve_process_task is numeric.training_process_task
+    assert science.deterministic_eval_worker is numeric.deterministic_eval_worker
+    assert final.final_solve_week is numeric.reviewed_final_solve_week
