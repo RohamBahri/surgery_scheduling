@@ -20,6 +20,7 @@ def test_train_wrapper_installs_runtime_and_deterministic_guards(monkeypatch, tm
     monkeypatch.setattr(wrapper.hardening, "stamp_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.numeric_guard, "stamp_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.release_guard, "stamp_training_bundle", lambda root: None)
+    monkeypatch.setattr(wrapper, "_rewrite_frozen_next_step", lambda root: None)
 
     wrapper._train(["--artifact-root", str(tmp_path)])
 
