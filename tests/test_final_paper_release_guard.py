@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 from scipy import sparse
@@ -101,3 +103,48 @@ def test_positive_booked_regret_keeps_gap_closed_defined() -> None:
     assert np.isfinite(float(vf["gap_closed_upper_pct"]))
     assert vf["gap_closed_lower_status"] == "DEFINED"
     assert vf["gap_closed_upper_status"] == "DEFINED"
+
+
+def test_response_sensitivity_booked_uses_sensitivity_budget_once(tmp_path, monkeypatch) -> None:
+    final.install_final_adapter()
+    science.apply_scientific_fixes()
+    a = _two_site_arrays()
+    s = science.ScientificFinalSettings(
+        data="dummy.xlsx",
+        artifact_root=str(tmp_path),
+    )
+    calls = []
+
+    class Column:
+        def compute_cost(self, *args, **kwargs):
+            return 100.0
+
+    def fake_batch(weeks, dm, settings, **kwargs):
+        calls.append(kwargs)
+        return {
+            0: SimpleNamespace(
+                column=Column(),
+                gap=0.001,
+                status="WORK_LIMIT",
+            )
+        }
+
+    monkeypatch.setattr(science, "deterministic_eval_solve_batch", fake_batch)
+    release.fair_response_sensitivities(
+        SimpleNamespace(_policy_meta=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError())),
+        [SimpleNamespace(position=0)],
+        a,
+        {"BOOKED": None},
+        {0: SimpleNamespace(bound=0.0)},
+        s,
+        tmp_path,
+    )
+
+    # BOOKED is solved exactly once, at the same sensitivity budget used by the
+    # response-scenario policy solves, then reused across all alpha/h scenarios.
+    assert len(calls) == 1
+    assert calls[0]["work_limit"] == s.sensitivity_planner_work_limit
+    assert calls[0]["gap"] == max(s.final_planner_gap, 0.002)
+    frame = pd.read_csv(tmp_path / "RESPONSE_SENSITIVITY_WEEKLY.csv")
+    assert len(frame) == len(science.RESPONSE_SENSITIVITY_SCENARIOS)
+    assert set(frame["planner_work_limit"]) == {s.sensitivity_planner_work_limit}
