@@ -18,6 +18,16 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: python -m pip install -e '.[dev]'
+      - name: Compile final paper entry points
+        run: >-
+          python -m py_compile
+          run_final_paper_training.py
+          run_final_paper_evaluation.py
+          run_final_paper_preflight.py
+          run_final_paper_required_sensitivities.py
+          final_paper_runtime_fixes.py
+          final_paper_scientific_fixes.py
+          final_paper_required_sensitivities.py
       - name: Run mathematical planner and final-driver regressions
         # All optimization fixtures fit the bundled restricted Gurobi license.
         run: >-
