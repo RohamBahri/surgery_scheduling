@@ -17,6 +17,7 @@ import numpy as np
 
 import final_paper_finalization_fixes as hardening
 import final_paper_numeric_guard as numeric_guard
+import final_paper_release_guard as release_guard
 import final_paper_runtime_fixes as fixes
 import final_paper_scientific_fixes as science
 import run_final_paper_experiment as final
@@ -42,7 +43,9 @@ def main() -> None:
     fixes.apply_runtime_fixes()
     science.apply_scientific_fixes()
     science._deterministic_site_solve = hardening.robust_deterministic_site_solve
-    numeric_guard.install_evaluation_guard()
+    # Exercise the exact all-path worker and solver-tolerance installation used
+    # by the reviewed Stage 2, including inside macOS spawned child processes.
+    release_guard.install_reviewed_guards()
     args = parse_args()
 
     s = science.ScientificFinalSettings(
@@ -103,8 +106,10 @@ def main() -> None:
         "status": "DETERMINISTIC_CALIBRATION_OK",
         "finalization_fixes_version": hardening.FINALIZATION_FIXES_VERSION,
         "numeric_guard_version": numeric_guard.NUMERIC_GUARD_VERSION,
+        "release_guard_version": release_guard.RELEASE_GUARD_VERSION,
         "phi_accounting_atol": numeric_guard.PHI_ACCOUNTING_ATOL,
         "phi_accounting_rtol": numeric_guard.PHI_ACCOUNTING_RTOL,
+        "int_feas_tol": release_guard.INT_FEAS_TOL,
         "training_weeks_tested": len(subset),
         "training_week_positions": [int(w.position) for w in subset],
         "training_week_case_counts": [int(w.instance.num_cases) for w in subset],
