@@ -6,7 +6,6 @@ training, evaluation, and sensitivity modules:
 * install every numerical-accounting worker in every reviewed stage, so the
   late Stage-1 seed audit and Stage-2 holdout oracle cannot fall back to the
   legacy absolute 1e-5 accounting check;
-* tighten Gurobi IntFeasTol for the final fixed-capacity planner;
 * enforce the SITE_SHIFT coefficient box during grid optimization, rather than
   only checking it after an unconstrained minimization;
 * make structural gap-closed percentages undefined when BOOKED has zero regret;
@@ -31,52 +30,12 @@ import final_paper_required_sensitivities as sensitivity
 import final_paper_scientific_fixes as science
 import run_final_paper_experiment as final
 import run_final_vf_experiment as base
-import src.solvers.deterministic as deterministic_solver
 
 
-RELEASE_GUARD_VERSION = "final_paper_release_guard_2026_09_24_v1"
-INT_FEAS_TOL = 1e-9
+RELEASE_GUARD_VERSION = "final_paper_release_guard_2026_09_24_v2"
 ZERO_REGRET_TOL = 1e-8
 
-_ORIGINAL_APPLY_SOLVER_PARAMS = deterministic_solver._apply_solver_params
 _ORIGINAL_REQUIRED_SENSITIVITIES = hardening.run_required_sensitivities_with_oracle
-_SOLVER_PARAMS_INSTALLED = False
-
-
-def _reviewed_apply_solver_params(model, cfg) -> None:
-    """Apply normal parameters, then tighten binary/integer feasibility."""
-
-    _ORIGINAL_APPLY_SOLVER_PARAMS(model, cfg)
-    model.Params.IntFeasTol = float(INT_FEAS_TOL)
-
-
-def _install_solver_numeric_params() -> None:
-    global _SOLVER_PARAMS_INSTALLED
-    if _SOLVER_PARAMS_INSTALLED:
-        return
-    deterministic_solver._apply_solver_params = _reviewed_apply_solver_params
-    _SOLVER_PARAMS_INSTALLED = True
-
-
-def runtime_worker(*args, **kwargs):
-    """Spawn-safe runtime worker that also tightens IntFeasTol in the child."""
-
-    _install_solver_numeric_params()
-    return numeric.training_process_task(*args, **kwargs)
-
-
-def deterministic_worker(*args, **kwargs):
-    """Spawn-safe deterministic worker that installs child-process solver params."""
-
-    _install_solver_numeric_params()
-    return numeric.deterministic_eval_worker(*args, **kwargs)
-
-
-def sensitivity_worker(*args, **kwargs):
-    """Spawn-safe sensitivity worker that installs child-process solver params."""
-
-    _install_solver_numeric_params()
-    return numeric.sensitivity_worker(*args, **kwargs)
 
 
 def constrained_site_shift_grid(
@@ -391,17 +350,9 @@ def install_reviewed_guards(
 ) -> None:
     """Install all last-mile fixes after the stage-specific hardening hooks."""
 
-    _install_solver_numeric_params()
-
-    # Every stage gets every numeric worker. This deliberately covers the late
-    # Stage-1 deterministic seed audit and the Stage-2 runtime oracle path.
+    # Every reviewed stage gets every numeric worker. This deliberately covers
+    # the late Stage-1 deterministic seed audit and the Stage-2 runtime oracle.
     numeric.install_all_guards()
-    # Use release-guard wrappers so macOS spawned children also install the
-    # tightened IntFeasTol before creating Gurobi models.
-    import final_paper_runtime_fixes as runtime
-    runtime._solve_process_task = runtime_worker
-    science.deterministic_eval_worker = deterministic_worker
-    sensitivity._worker = sensitivity_worker
 
     # SITE_SHIFT's training hook resolves this module-global helper at call time.
     hardening._solve_site_shift_grid = constrained_site_shift_grid
@@ -420,7 +371,7 @@ def install_reviewed_guards(
 
     if sensitivity_runner_module is not None:
         # The runner dispatches through final_paper_required_sensitivities.
-        sensitivity._worker = sensitivity_worker
+        sensitivity._worker = numeric.sensitivity_worker
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -453,7 +404,6 @@ def stamp_training_bundle(root: Path) -> None:
             ),
             "phi_accounting_atol": float(numeric.PHI_ACCOUNTING_ATOL),
             "phi_accounting_rtol": float(numeric.PHI_ACCOUNTING_RTOL),
-            "gurobi_int_feas_tol": float(INT_FEAS_TOL),
             "site_shift_grid": "coefficient-feasible before minimization",
             "structural_gap_closed_zero_baseline": "NaN with explicit status",
             "response_sensitivity_booked": (
