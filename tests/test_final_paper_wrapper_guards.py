@@ -4,6 +4,7 @@ import final_paper_numeric_guard as numeric
 import final_paper_release_guard as release
 import final_paper_runtime_fixes as runtime
 import final_paper_scientific_fixes as science
+import final_paper_shared_plans as shared
 import run_final_paper as wrapper
 import run_final_paper_evaluation as evaluation
 import run_final_paper_experiment as final
@@ -21,12 +22,26 @@ def test_train_wrapper_installs_runtime_and_deterministic_guards(monkeypatch, tm
     monkeypatch.setattr(wrapper.hardening, "stamp_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.numeric_guard, "stamp_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.release_guard, "stamp_training_bundle", lambda root: None)
+    monkeypatch.setattr(wrapper.shared, "stamp_training_bundle", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper, "_rewrite_frozen_next_step", lambda root: None)
 
-    wrapper._train(["--artifact-root", str(tmp_path)])
+    wrapper._train(
+        [
+            "--artifact-root",
+            str(tmp_path),
+            "--scenario-name",
+            "custom",
+            "--alpha",
+            "0.6",
+            "--h",
+            "45",
+        ]
+    )
 
     assert observed["runtime"] is numeric.training_process_task
     assert observed["deterministic"] is numeric.deterministic_eval_worker
+    assert observed["runtime"] is shared.training_process_task_logged
+    assert observed["deterministic"] is shared.deterministic_eval_worker_logged
 
 
 def test_evaluate_wrapper_installs_oracle_and_policy_guards(monkeypatch, tmp_path) -> None:
@@ -42,6 +57,7 @@ def test_evaluate_wrapper_installs_oracle_and_policy_guards(monkeypatch, tmp_pat
     monkeypatch.setattr(wrapper.hardening, "verify_training_finalization", lambda root: {})
     monkeypatch.setattr(wrapper.numeric_guard, "verify_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.release_guard, "verify_training_bundle", lambda root: None)
+    monkeypatch.setattr(wrapper.shared, "verify_shared_plan_provenance", lambda root: None)
     monkeypatch.setattr(wrapper.hardening, "write_benchmark_interpretation", lambda root: None)
 
     wrapper._evaluate(
@@ -54,15 +70,17 @@ def test_evaluate_wrapper_installs_oracle_and_policy_guards(monkeypatch, tmp_pat
     )
 
     # The holdout oracle uses the runtime worker; policy scheduling uses the
-    # deterministic worker. Both must be guarded before evaluation.main starts.
+    # deterministic worker. Both must be guarded/logged before evaluation.main.
     assert observed["runtime"] is numeric.training_process_task
     assert observed["deterministic"] is numeric.deterministic_eval_worker
+    assert observed["runtime"] is shared.training_process_task_logged
+    assert observed["deterministic"] is shared.deterministic_eval_worker_logged
 
 
 def test_guard_survives_stage_internal_initialization_sequence() -> None:
-    # The real stage mains call these three installers again after the wrapper
-    # installs the release guard. Verify that sequence cannot silently restore
-    # either legacy strict-check worker.
+    # The real stage mains call these installers again after the wrapper. Verify
+    # the spawn-safe logging wrappers remain the reviewed numeric workers.
+    shared.install_spawn_safe_weekly_logging()
     release.install_reviewed_guards()
     final.install_final_adapter()
     runtime.apply_runtime_fixes()
@@ -70,4 +88,6 @@ def test_guard_survives_stage_internal_initialization_sequence() -> None:
 
     assert runtime._solve_process_task is numeric.training_process_task
     assert science.deterministic_eval_worker is numeric.deterministic_eval_worker
+    assert runtime._solve_process_task is shared.training_process_task_logged
+    assert science.deterministic_eval_worker is shared.deterministic_eval_worker_logged
     assert final.final_solve_week is numeric.reviewed_final_solve_week
