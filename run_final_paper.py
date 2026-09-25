@@ -19,6 +19,7 @@ import json
 import sys
 from pathlib import Path
 
+import experiment_audit as audit
 import experiment_protocol as protocol
 import final_paper_finalization_fixes as hardening
 import final_paper_numeric_guard as numeric_guard
@@ -89,6 +90,64 @@ def _rewrite_frozen_next_step(root: Path) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_shared_provenance(training_root: Path, shared_root: Path) -> None:
+    manifest = Path(shared_root).resolve() / "SHARED_PLANS_MANIFEST.json"
+    if not manifest.exists():
+        raise RuntimeError(f"Missing shared-plan manifest: {manifest}")
+    payload = {
+        "shared_plans_root": str(Path(shared_root).resolve()),
+        "manifest_sha256": protocol.sha256_file(manifest),
+        "registry_sha256": protocol.registry_hash(),
+        "git_head": protocol.git_head(),
+    }
+    (Path(training_root) / "SHARED_PLAN_PROVENANCE.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _write_diagonal_matrix_files(eval_root: Path, scenario: str) -> None:
+    import pandas as pd
+    summary_path = Path(eval_root) / "FINAL_HOLDOUT_SUMMARY.csv"
+    weekly_path = Path(eval_root) / "FINAL_HOLDOUT_WEEKLY.csv"
+    if summary_path.exists():
+        df = pd.read_csv(summary_path)
+        df.insert(0, "response_scenario", scenario)
+        df.insert(0, "training_scenario", scenario)
+        df.to_csv(Path(eval_root) / "RESPONSE_MATRIX_DIAGONAL_SUMMARY.csv", index=False)
+    if weekly_path.exists():
+        df = pd.read_csv(weekly_path)
+        df.insert(0, "response_scenario", scenario)
+        df.insert(0, "training_scenario", scenario)
+        df.to_csv(Path(eval_root) / "RESPONSE_MATRIX_DIAGONAL_WEEKLY.csv", index=False)
+
+
+def _aggregate_matrix_if_complete(experiment_root: Path) -> None:
+    import pandas as pd
+    root = Path(experiment_root).resolve()
+    consumption = json.loads((root / "EXPERIMENT_CONSUMPTION.json").read_text(encoding="utf-8"))
+    if consumption.get("status") != "HOLDOUT_CONSUMPTION_COMPLETE":
+        return
+    pieces = []
+    registry_eval = [x["name"] for x in protocol.registered_scenarios(purpose="evaluate")]
+    for train_name, meta in sorted(consumption.get("bundles", {}).items()):
+        er = Path(meta["evaluation_root"])
+        diag_path = er / "RESPONSE_MATRIX_DIAGONAL_SUMMARY.csv"
+        off_path = er / "RESPONSE_MATRIX_OFFDIAGONAL_SUMMARY.csv"
+        if not diag_path.exists() or not off_path.exists():
+            raise RuntimeError(f"Completed evaluation for {train_name} is missing matrix summaries")
+        diag = pd.read_csv(diag_path)
+        off = pd.read_csv(off_path)
+        pieces.extend([diag, off])
+        booked = diag[diag["method"] == "BOOKED"].copy()
+        for response_name in registry_eval:
+            if response_name == train_name:
+                continue
+            b = booked.copy()
+            b["response_scenario"] = response_name
+            pieces.append(b)
+    pd.concat(pieces, ignore_index=True, sort=False).to_csv(root / "RESPONSE_MATRIX_SUMMARY.csv", index=False)
+
+
 def _train(argv: list[str]) -> None:
     import run_final_paper_training as training
 
@@ -110,18 +169,14 @@ def _train(argv: list[str]) -> None:
 
     hardening.install_training_fixes(training)
     _install_review_stack()
-    shared.configure_training_scenario(
-        training, alpha=alpha, h=h, scenario_name=scenario_name, shared_root=shared_root
-    )
-    # Reinstall because configure_training_scenario changes runtime hooks.
+    shared.configure_training_scenario(training, alpha=alpha, h=h, scenario_name=scenario_name, shared_root=shared_root)
     _install_review_stack()
     _dispatch_main(training, stage_argv)
     hardening.stamp_training_bundle(Path(root_arg))
     numeric_guard.stamp_training_bundle(Path(root_arg))
     release_guard.stamp_training_bundle(Path(root_arg))
-    shared.stamp_training_bundle(
-        Path(root_arg), scenario_name=scenario_name, alpha=alpha, h=h, shared_root=shared_root
-    )
+    shared.stamp_training_bundle(Path(root_arg), scenario_name=scenario_name, alpha=alpha, h=h, shared_root=shared_root)
+    _write_shared_provenance(Path(root_arg), shared_root)
     protocol.stamp_training_registry(Path(root_arg), scenario_name=scenario_name, alpha=alpha, h=h)
     _rewrite_frozen_next_step(Path(root_arg))
     print(json.dumps({
@@ -139,13 +194,17 @@ def _seal(argv: list[str]) -> None:
     p.add_argument("--shared-plans-root", required=True)
     p.add_argument("--training-root", action="append", required=True)
     args = p.parse_args(argv)
-    seal = protocol.seal_experiment(
-        Path(args.experiment_root), [Path(x) for x in args.training_root], Path(args.shared_plans_root)
-    )
+    roots = [Path(x).resolve() for x in args.training_root]
+    shared_root = Path(args.shared_plans_root).resolve()
+    for tr in roots:
+        _write_shared_provenance(tr, shared_root)
+    report_path = audit.write_report(Path(args.experiment_root), roots)
+    seal = protocol.seal_experiment(Path(args.experiment_root), roots, shared_root)
     print(json.dumps({
         "status": seal["status"],
         "experiment_root": str(Path(args.experiment_root).resolve()),
         "registry_sha256": seal["registry_sha256"],
+        "comparability_report": str(report_path),
         "accepted_scenarios": sorted(seal["accepted_training_bundles"]),
     }, indent=2))
 
@@ -159,6 +218,7 @@ def _evaluate(argv: list[str]) -> None:
     if not train_arg or not eval_arg or not experiment_arg:
         raise SystemExit("evaluate requires --experiment-root, --training-artifact-root and --artifact-root")
     training_root, eval_root, experiment_root = Path(train_arg), Path(eval_arg), Path(experiment_arg)
+    audit.verify_report(experiment_root)
     resume = _has_flag(argv, "--resume")
     _, scenario = protocol.verify_sealed_bundle(experiment_root, training_root)
     if resume:
@@ -172,8 +232,6 @@ def _evaluate(argv: list[str]) -> None:
     shared.verify_shared_plan_provenance(training_root)
     hardening.install_evaluation_fixes(evaluation)
     _install_review_stack()
-    # Generate off-diagonal response conditions from the committed registry at
-    # the same primary evaluation budget. The diagonal is the normal evaluation.
     evaluation._run_response_sensitivities = protocol.registered_response_sensitivity_runner
     stage_argv = _strip_value_args(argv, {"--experiment-root"})
     stage_argv = _strip_flags(stage_argv, {"--resume"})
@@ -185,7 +243,9 @@ def _evaluate(argv: list[str]) -> None:
         protocol.update_consumption(experiment_root, scenario, state="FAILED_RESTARTABLE", evaluation_root=eval_root)
         raise
     hardening.write_benchmark_interpretation(eval_root)
+    _write_diagonal_matrix_files(eval_root, scenario)
     protocol.update_consumption(experiment_root, scenario, state="COMPLETE", evaluation_root=eval_root)
+    _aggregate_matrix_if_complete(experiment_root)
     print(json.dumps({
         "status": "HOLDOUT_EVALUATION_COMPLETE_REVIEWED",
         "training_scenario": scenario,
