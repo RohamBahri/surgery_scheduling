@@ -27,6 +27,7 @@ def test_train_wrapper_installs_spawn_safe_protocol_guards(monkeypatch, tmp_path
     monkeypatch.setattr(wrapper.shared, "stamp_training_bundle", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper.shared, "configure_training_scenario", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper.protocol, "stamp_training_registry", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wrapper, "_write_shared_provenance", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper, "_rewrite_frozen_next_step", lambda root: None)
 
     wrapper._train([
@@ -52,6 +53,7 @@ def test_evaluate_wrapper_requires_sealed_bundle_and_installs_protocol_guards(mo
         observed["deterministic"] = science.deterministic_eval_worker
 
     monkeypatch.setattr(evaluation, "main", fake_main)
+    monkeypatch.setattr(wrapper.audit, "verify_report", lambda *args, **kwargs: {})
     monkeypatch.setattr(wrapper.protocol, "verify_sealed_bundle", lambda *args, **kwargs: ({}, "primary"))
     monkeypatch.setattr(wrapper.protocol, "update_consumption", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper.hardening, "verify_training_finalization", lambda root: {})
@@ -59,6 +61,8 @@ def test_evaluate_wrapper_requires_sealed_bundle_and_installs_protocol_guards(mo
     monkeypatch.setattr(wrapper.release_guard, "verify_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.shared, "verify_shared_plan_provenance", lambda root: None)
     monkeypatch.setattr(wrapper.hardening, "write_benchmark_interpretation", lambda root: None)
+    monkeypatch.setattr(wrapper, "_write_diagonal_matrix_files", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wrapper, "_aggregate_matrix_if_complete", lambda *args, **kwargs: None)
 
     wrapper._evaluate([
         "--experiment-root", str(experiment_root),
@@ -77,7 +81,6 @@ def test_protocol_numeric_guard_survives_stage_reinstallation() -> None:
     final.install_final_adapter()
     runtime.apply_runtime_fixes()
     science.apply_scientific_fixes()
-    # Reinstalling the protocol after stage initialization is the supported order.
     shared.install_spawn_safe_weekly_logging()
     protocol.install_numeric_policy()
     release.install_reviewed_guards()
