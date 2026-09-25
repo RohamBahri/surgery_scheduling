@@ -13,8 +13,8 @@ import final_paper_scientific_fixes as science
 import final_paper_shared_plans as shared
 import run_final_paper_experiment as final
 import run_final_vf_experiment as base
-from src.core.column import column_from_assignment
 from src.core.types import BlockCalendar, CandidateBlock, CaseRecord, WeeklyInstance
+from src.solvers.fixed_capacity import column_from_assignment
 
 
 def _case(case_id: int, site: str, duration: float) -> CaseRecord:
