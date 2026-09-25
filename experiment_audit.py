@@ -23,7 +23,6 @@ def _canonical_hash(payload: Any) -> str:
 
 def _settings_signature(root: Path) -> str:
     settings = dict(_json(root / "FROZEN_SETTINGS.json"))
-    # Expected scenario/output differences; everything else must agree.
     for key in ("alpha", "h", "artifact_root", "verbose", "data"):
         settings.pop(key, None)
     return _canonical_hash(settings)
@@ -73,14 +72,13 @@ def validate_training_comparability(training_roots: Iterable[Path]) -> dict[str,
         for key, value in hashes.items():
             invariant_sets[key].add(value)
         vf = _json(root / "VF_STATUS.json") if (root / "VF_STATUS.json").exists() else {}
-        last = _last_csv_row(root / "VF_TRAJECTORY.csv")
         rows[name] = {
             "training_root": str(root),
             "alpha": stamp["scenario"]["alpha"],
             "h": stamp["scenario"]["h"],
             "vf_attempted_outer_iterations": vf.get("attempted_outer_iterations"),
             "vf_termination_reason": vf.get("termination_reason"),
-            "vf_last_trajectory_row": last,
+            "vf_last_trajectory_row": _last_csv_row(root / "VF_TRAJECTORY.csv"),
             "max_training_oracle_gap_native_psi": _max_csv_float(root / "ORACLE_TRAIN.csv", "gap_native_psi"),
             "invariant_hashes": hashes,
         }
@@ -109,10 +107,16 @@ def write_report(experiment_root: Path, training_roots: Iterable[Path]) -> Path:
 
 
 def verify_report(experiment_root: Path) -> dict[str, Any]:
-    p = Path(experiment_root).resolve() / "COMPARABILITY_REPORT.json"
+    root = Path(experiment_root).resolve()
+    p = root / "COMPARABILITY_REPORT.json"
     if not p.exists():
         raise RuntimeError("Holdout evaluation requires the pre-holdout comparability report")
     report = _json(p)
     if report.get("status") != "COMPARABLE_FROZEN_INPUTS" or report.get("registry_sha256") != protocol.registry_hash():
         raise RuntimeError("Comparability report does not match the committed experiment registry")
+    # Install the experiment-level cache before evaluation.main initializes its
+    # runtime hooks. Oracle and BOOKED are identical across every sealed row;
+    # projected off-diagonal benchmarks are identical within response columns.
+    import holdout_cache
+    holdout_cache.install(root, None)
     return report
