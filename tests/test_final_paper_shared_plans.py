@@ -13,8 +13,9 @@ import final_paper_scientific_fixes as science
 import final_paper_shared_plans as shared
 import run_final_paper_experiment as final
 import run_final_vf_experiment as base
+from src.core.config import SolverConfig
 from src.core.types import BlockCalendar, CandidateBlock, CaseRecord, WeeklyInstance
-from src.solvers.fixed_capacity import column_from_assignment
+from src.solvers.fixed_capacity import column_from_assignment, solve_fixed_capacity_assignment
 
 
 def _case(case_id: int, site: str, duration: float) -> CaseRecord:
@@ -149,6 +150,34 @@ def test_log_file_path_is_label_week_site_and_duration_specific(tmp_path) -> Non
     assert "oracle_train_retry" in p1
     assert "week_004" in p1
     assert p1.endswith(".log")
+
+
+def test_solver_config_writes_full_gurobi_log_even_when_console_is_quiet(tmp_path) -> None:
+    week = _week()
+    log_path = tmp_path / "gurobi" / "weekly.log"
+    cfg = SolverConfig(
+        time_limit_seconds=30,
+        mip_gap=0.0,
+        threads=1,
+        verbose=False,
+        mip_gap_abs=1e-10,
+        seed=42,
+        log_file=str(log_path),
+    )
+    result = solve_fixed_capacity_assignment(
+        week.instance,
+        np.asarray(week.instance.booked_durations(), dtype=float),
+        final.final_cost_cfg(_settings(tmp_path)),
+        final.PRIMARY_TURNOVER,
+        cfg,
+        objective_mode=final.PRIMARY_OBJECTIVE,
+        symmetry_breaking=True,
+    )
+    assert result.column is not None
+    assert log_path.exists()
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    assert "Gurobi" in text
+    assert "Optimize" in text or "Explored" in text
 
 
 def test_release_guard_selects_spawn_safe_logged_workers(monkeypatch) -> None:
