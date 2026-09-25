@@ -12,7 +12,7 @@ import final_paper_resilience as resilience
 
 # The supported wrapper imports this module before any expensive stage starts.
 # Install the non-destructive late-run guards once, before Stage 1/2 initialize
-their runtime hooks.
+# their runtime hooks.
 resilience.install()
 
 AUDIT_VERSION = "experiment_comparability_2026_09_25_v2"
@@ -120,8 +120,8 @@ def verify_report(experiment_root: Path) -> dict[str, Any]:
     report = _json(p)
     if report.get("status") != "COMPARABLE_FROZEN_INPUTS" or report.get("registry_sha256") != protocol.registry_hash():
         raise RuntimeError("Comparability report does not match the committed experiment registry")
-    # Deliberately no holdout-cache installation here.  At this point the
+    # Deliberately no holdout-cache installation here. At this point the
     # training scenario is not yet known, and installing a response-dependent
     # projected benchmark under a sentinel scenario can poison later cache
-    # provenance.  Correctness takes priority over cross-row cache reuse.
+    # provenance. Correctness takes priority over cross-row cache reuse.
     return report
