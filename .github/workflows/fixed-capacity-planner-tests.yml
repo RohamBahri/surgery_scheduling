@@ -29,6 +29,7 @@ jobs:
           run_final_paper_deterministic_calibration.py
           run_final_paper_shared_plans.py
           experiment_protocol.py
+          experiment_audit.py
           final_paper_runtime_fixes.py
           final_paper_scientific_fixes.py
           final_paper_required_sensitivities.py
