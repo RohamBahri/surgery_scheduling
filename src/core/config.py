@@ -64,6 +64,9 @@ class SolverConfig:
     # holdout policy planner uses this while retaining TimeLimit only as an
     # emergency fail-safe.
     work_limit: float | None = None
+    # Optional persistent Gurobi log.  When supplied, solver output is always
+    # written to this file even when console verbosity is disabled.
+    log_file: str | None = None
 
 
 @dataclass
