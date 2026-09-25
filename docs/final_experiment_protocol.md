@@ -1,11 +1,11 @@
-# Frozen final-paper experiment protocol
+# Final-paper experiment protocol
 
-This document is the operational source of truth for the final experiment.
-The **only supported final-paper entry point is `run_final_paper.py`**. The
-older stage modules remain implementation modules used by tests and the wrapper;
-do not execute them directly for the final paper run.
+This document is the operational source of truth for the final experiment. The
+**only supported final-paper entry point is `run_final_paper.py`**. The older
+stage modules remain implementation modules used by tests and the wrapper; do
+not execute them directly for the paper run.
 
-## Frozen primary specification
+## Scientific specification
 
 - Sites: TGH + TWH; one pooled recommendation policy, physically separate site capacity.
 - Split: 72 training weeks / 22 final holdout weeks; holdout begins 2013-01-28.
@@ -16,23 +16,53 @@ do not execute them directly for the final paper run.
 - Planning: weekly day-flexible fixed-capacity assignment; no cross-site assignment; no deferral.
 - Costs: overtime 15/min, idle 10/min; 480-minute blocks; 30-minute turnover primary.
 - Turnover sensitivity: 0 minutes, required as a secondary structural check.
-- Response: alpha=.8, h=30 primary; minimum displayed recommended duration 1 minute.
+- Behavior: `(alpha,h)=(0.8,30)` remains the reference scenario, but Stage 1 now accepts any explicitly declared valid scenario with `0 <= alpha < 1` and `h > 0`. Each trained scenario is frozen separately in `BEHAVIOR_SCENARIO.json` and `FROZEN_SETTINGS.json`.
 - Coefficient box: +/-100; intercept unpenalized.
-- Regularization: Naive has its own minutes-scale L1 calibration; RA, RA_FULL, OS and VF share one common cost-scale lambda.
+- Regularization: Naive has its own minutes-scale L1 calibration; RA, RA_FULL, OS and VF share one common cost-scale lambda within a scenario.
 - Main deployable policies: Booked, Naive, exposure-weighted RA, full-weight RA, SITE_SHIFT, OS and VF.
-- Retrospective benchmarks: realized oracle and the **projected hindsight benchmark** (`IMPLEMENTABLE_ORACLE`). The latter is not a scheduling-performance ceiling or lower bound.
-- SITE_SHIFT is fit directly on its deployed clipped full-weight case-loss objective. The coarse and refined grids enforce the frozen coefficient box before minimization; the 1-minute duration floor is still applied case by case by the deployed clipping rule.
+- Retrospective benchmarks: realized oracle and the projected hindsight benchmark (`IMPLEMENTABLE_ORACLE`). The latter is not a scheduling-performance ceiling or lower bound.
 - VF library: per-site TGH/TWH surfaces with implicit Cartesian-product combination.
-- Stage 1 is rejected if VF never attempts outer iteration 1. `VF_STATUS.json` records attempted iterations and termination reason.
 - Holdout policy scheduling: one thread, fixed seed, deterministic Gurobi `WorkLimit`; the emergency wall cap is several times the work limit and is retried once if it fires first.
-- Decomposed-site Phi accounting uses a scale-aware numerical audit: `abs(error) <= max(1e-2, 1e-6*scale)`. The independently recomputed feasible schedule cost is reported as the incumbent. The reviewed wrapper installs this guard on **all** runtime, deterministic-evaluation and sensitivity worker paths, including the late Stage-1 seed audit and the Stage-2 realized oracle. This tolerance remains far below the cost change from a one-minute idle/overtime accounting error, while leaving ample margin for solver feasibility round-off.
-- The supported RA exposure cross-fit leaves scikit-learn's L2 penalty at its default instead of passing the deprecated `penalty="l2"` argument.
-- Structural sensitivities evaluate the frozen primary policies under changed capacity/turnover and include a scenario-specific realized oracle and regret brackets. If BOOKED has zero regret in a scenario, percentage gap-closed is reported as undefined (`NaN`), not 100%.
-- Optional response sensitivities solve BOOKED once at the **same reduced sensitivity planner budget** used by the learned policies and reuse that solve across the three response scenarios.
+- Decomposed-site Phi accounting uses `abs(error) <= max(1e-2, 1e-6*scale)`, with the independently recomputed feasible schedule cost reported as the incumbent.
+
+## Shared behavior-independent weekly backbone
+
+The training realized oracle and BOOKED schedules depend on the data, weekly
+instances, eligibility, roster, turnover and cost specification, but **not** on
+behavioral `alpha` or `h`. They must therefore be solved once and reused across
+all behavior-specific training runs.
+
+The shared-plan artifact stores, for every training week:
+
+- the complete case-to-block assignment;
+- feasible Phi incumbent;
+- valid Phi lower bound;
+- native-Psi gap;
+- solver status, exactness flag and accumulated solve time;
+- a cryptographic manifest over the input workbook and the exact weekly case,
+  block and eligibility structure.
+
+Loading a shared plan reconstructs the schedule, verifies eligibility, recomputes
+its cost, verifies the stored bound, and rejects a changed data/weekly planning
+instance. The shared artifact is not accepted merely because filenames match.
+
+### Persistent Gurobi diagnostics
+
+Every reviewed weekly site MILP now receives a unique `LogFile`, independent of
+console verbosity. Logs are stored under the relevant run root at:
+
+```text
+gurobi_logs/<solve-label>/week_<###>/<site>__<duration-hash>__<budget>.log
+```
+
+This covers training oracle/BOOKED solves, VF/training weekly solves,
+deterministic holdout scheduling and structural sensitivities, including macOS
+spawned worker processes. These files are intended for later diagnosis of hard
+weeks, root gaps, node growth, incumbent discovery and solver termination.
 
 ## Required run order
 
-### 1. Update, clean the tracked tree, activate the environment
+### 1. Update and test
 
 ```bash
 cd "/Users/roham/Desktop/Surgery project/code"
@@ -40,15 +70,7 @@ git checkout main
 git pull origin main
 git status --short
 source .venv/bin/activate
-```
 
-The final run requires a clean **tracked** tree. Untracked data/artifact files
-are allowed. If `git status --short` shows tracked modifications, stash or
-revert them before continuing.
-
-### 2. Focused tests
-
-```bash
 python -m pytest \
   tests/test_planning/test_fixed_capacity.py \
   tests/test_final_paper_experiment.py \
@@ -57,123 +79,145 @@ python -m pytest \
   tests/test_final_paper_finalization_fixes.py \
   tests/test_final_paper_numeric_guard.py \
   tests/test_final_paper_release_guard.py \
+  tests/test_final_paper_shared_plans.py \
   tests/test_final_paper_wrapper_guards.py \
   -q
-```
 
-On the local Mac/scikit-learn version, also turn the warning discussed in the
-audit into an error for the dedicated regression test:
-
-```bash
 python -W error::FutureWarning -m pytest tests/test_final_paper_numeric_guard.py -q
 ```
 
-The regression suite contains the exact Phi values from the eight-hour failed
-run and requires that this solver-scale discrepancy pass while a materially
-larger accounting discrepancy still fails. It also verifies the wrapper installs
-the guarded runtime worker for the Stage-2 oracle and the guarded deterministic
-worker for the late Stage-1 seed audit before either stage main function starts.
+The final run requires a clean **tracked** tree. Untracked data/artifact files
+are allowed.
 
-### 3. Real-data preflight
-
-Run the structural/data check:
-
-```bash
-python run_final_paper.py preflight \
-  --data data/UHNOperating_RoomScheduling2011-2013.xlsx
-```
-
-Then the short solver/license check. This now explicitly exercises **both** the
-runtime worker used by the Stage-2 oracle and the deterministic worker used by
-the late Stage-1 seed audit, on training data only:
+### 2. Real-data preflight and deterministic calibration
 
 ```bash
 python run_final_paper.py preflight \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --cores 15 \
   --solver-check
-```
 
-Finally calibrate the actual deterministic Stage-2 planning path on the 15
-largest **training** weeks. This can take materially longer than the short
-preflight because it intentionally uses the frozen final WorkLimit:
-
-```bash
 python run_final_paper_deterministic_calibration.py \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --cores 15 \
   --weeks 15
 ```
 
-Proceed only if this ends with `DETERMINISTIC_CALIBRATION_OK`.
+Proceed only if calibration ends with `DETERMINISTIC_CALIBRATION_OK`.
 
-### 4. Stage 1: training only
+### 3. Solve the shared realized oracle and BOOKED plans once
 
-Use a fresh artifact directory:
+Use a fresh directory. `--verbose` is optional for the terminal; full Gurobi
+logs are persisted to files either way.
+
+```bash
+caffeinate -i python run_final_paper.py shared-plans \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --artifact-root artifacts/final_paper_shared_plans_v1 \
+  --cores 15 \
+  --kind both \
+  --oracle-seconds 1800 \
+  --booked-seconds 300 \
+  --booked-gap 0.01
+```
+
+Successful completion prints `SHARED_PLANS_COMPLETE`. Review
+`SHARED_PLANS_MANIFEST.json`, `ORACLE_TRAIN.csv`, `BOOKED_TRAIN.csv`, and the
+`gurobi_logs/` tree.
+
+Oracle and BOOKED can also be run independently with `--kind oracle` or
+`--kind booked`.
+
+#### Give unresolved weeks more time later
+
+Never mutate the first shared artifact. Create a new version and point
+`--warm-start-root` at the previous one. Only weeks still above the requested
+gap are re-solved, and their saved assignments are used as Gurobi MIP starts.
+The refined artifact keeps the best feasible incumbent and strongest valid lower
+bound across attempts.
+
+```bash
+caffeinate -i python run_final_paper.py shared-plans \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --artifact-root artifacts/final_paper_shared_plans_v2 \
+  --warm-start-root artifacts/final_paper_shared_plans_v1 \
+  --cores 15 \
+  --kind both \
+  --oracle-seconds 3600 \
+  --booked-seconds 900 \
+  --booked-gap 0.002
+```
+
+### 4. Train behavioral scenarios using the same shared plans
+
+Each scenario gets a separate fresh artifact directory. `alpha` and `h` are not
+restricted to the old three sensitivity values. The scenario name and parameters
+are frozen into the training bundle.
+
+Reference scenario:
 
 ```bash
 caffeinate -i python run_final_paper.py train \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --artifact-root artifacts/final_paper_training_frozen_v5 \
+  --shared-plans-root artifacts/final_paper_shared_plans_v2 \
+  --scenario-name alpha080_h30 \
+  --alpha 0.8 \
+  --h 30 \
+  --artifact-root artifacts/train_alpha080_h30 \
   --cores 15 \
   --max-wall-minutes 720
 ```
 
-Successful completion prints `TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED`.
-Before consuming the holdout, review at least:
-
-- `ORACLE_TRAIN.csv`;
-- `RA_PDCA.csv`, `RA_FULL_PDCA.csv`, `OS_PDCA.csv`;
-- `SITE_SHIFT_PDCA.csv`;
-- `VF_TRAJECTORY.csv` and `VF_STATUS.json`;
-- `TRAIN_LIBRARY_SURFACES.csv` and saturation status;
-- `REGULARIZATION.json`;
-- `TIE_SEED_AUDIT.csv` (a coarse training diagnostic only, not a deployment tie-equivalence proof);
-- `FINALIZATION_FIXES.json`, `NUMERIC_GUARD.json`, and `RELEASE_GUARD.json`.
-
-Do **not** run Stage 2 until the Stage-1 diagnostics have been reviewed.
-
-### 5. Stage 2: primary holdout, once
-
-Stage 2 requires the exact Git commit recorded in `TRAINING_FREEZE.json` and a
-clean tracked tree. If `main` has moved, create a worktree at the frozen SHA:
+Examples of additional **trained** regimes (illustrative; the final scenario set
+should be declared before holdout evaluation):
 
 ```bash
-FROZEN_SHA=$(python -c 'import json; print(json.load(open("artifacts/final_paper_training_frozen_v5/TRAINING_FREEZE.json"))["git_head"])')
-git worktree add ../surgery_final_eval "$FROZEN_SHA"
-cd ../surgery_final_eval
-source "/Users/roham/Desktop/Surgery project/code/.venv/bin/activate"
+caffeinate -i python run_final_paper.py train \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --shared-plans-root artifacts/final_paper_shared_plans_v2 \
+  --scenario-name alpha050_h30 --alpha 0.5 --h 30 \
+  --artifact-root artifacts/train_alpha050_h30 \
+  --cores 15 --max-wall-minutes 720
+
+caffeinate -i python run_final_paper.py train \
+  --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --shared-plans-root artifacts/final_paper_shared_plans_v2 \
+  --scenario-name alpha080_h60 --alpha 0.8 --h 60 \
+  --artifact-root artifacts/train_alpha080_h60 \
+  --cores 15 --max-wall-minutes 720
 ```
 
-Run the primary evaluator once:
+For every scenario, Stage 1 **loads** `oracle_train` and `booked_train` from the
+validated shared artifact instead of re-solving them. Those schedules are then
+added to the scenario's initial schedule library exactly as before. Remaining
+weekly optimization is behavior-specific (especially VF enrichment) and is not
+silently reused unless scientifically valid.
 
-```bash
-caffeinate -i python run_final_paper.py evaluate \
-  --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v5" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v5" \
-  --cores 15
-```
+Successful completion prints `TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED`. Before
+holdout use, review at least `BEHAVIOR_SCENARIO.json`, `RA_PDCA.csv`,
+`RA_FULL_PDCA.csv`, `OS_PDCA.csv`, `SITE_SHIFT_PDCA.csv`, `VF_TRAJECTORY.csv`,
+`VF_STATUS.json`, `TRAIN_LIBRARY_SURFACES.csv`, `REGULARIZATION.json`,
+`TIE_SEED_AUDIT.csv`, and the run's `gurobi_logs/`.
 
-The response-misspecification scenarios remain optional. If they are wanted,
-add `--run-response-sensitivities` **before** the one-shot Stage-2 run. BOOKED is
-solved once at the response-sensitivity planner budget and reused across all
-three scenarios. The frozen scenarios are
-`(alpha,h)=(0.5,30),(0.8,15),(0.8,60)`.
+### 5. Holdout evaluation
 
-### 6. Required structural sensitivities
+Do not evaluate holdout until the full set of trained scenarios has been fixed
+and reviewed. Each Stage-1 bundle records its exact Git commit. Evaluate from a
+clean worktree at that commit using only `python run_final_paper.py evaluate ...`.
+The one-shot holdout-consumption rule remains unchanged.
 
-After successful primary Stage 2, from the same frozen worktree:
+### 6. Structural sensitivities
 
-```bash
-caffeinate -i python run_final_paper.py sensitivities \
-  --data "/Users/roham/Desktop/Surgery project/code/data/UHNOperating_RoomScheduling2011-2013.xlsx" \
-  --training-artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_training_frozen_v5" \
-  --primary-evaluation-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_holdout_frozen_v5" \
-  --artifact-root "/Users/roham/Desktop/Surgery project/code/artifacts/final_paper_required_sensitivities_v5" \
-  --cores 15
-```
+Run required `regular_template` capacity and zero-turnover checks after primary
+holdout evaluation using `python run_final_paper.py sensitivities ...`. These are
+deployment robustness checks for frozen policies; they do not retrain them.
 
-This evaluates the frozen primary policies under `regular_template` capacity and
-under zero turnover. Each scenario includes its own realized-duration oracle,
-regret brackets, and within-scenario gap-closed summaries. Nothing is retrained.
+## Efficiency boundary
+
+This refactor intentionally removes work that is **provably behavior-independent**:
+realized-oracle and BOOKED training MILPs. It also makes their schedules reusable
+as warm starts for stronger later solves. It does **not** yet share behavior-
+dependent VF schedule-library enrichment across scenarios. Cross-scenario VF
+library sharing is a promising next optimization, but it should be added only
+after the first multi-scenario timing/profile confirms the benefit and its
+reproducibility rules are specified.
