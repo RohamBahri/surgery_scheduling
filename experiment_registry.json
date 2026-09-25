@@ -1,0 +1,53 @@
+{
+  "registry_version": "2026-09-25-v1",
+  "training_budget": {
+    "max_wall_minutes": 720,
+    "note": "All registered scenarios use the same declared Stage-1 wall budget and stopping rules. Budget-limited results are reported as such; stagnation is not treated as an optimality certificate."
+  },
+  "evaluation_protocol": {
+    "work_limit_per_site": 1200.0,
+    "mip_gap": 0.0005,
+    "threads": 1,
+    "seed": 42,
+    "wall_cap_rule": "reviewed deterministic WorkLimit protocol with emergency wall-cap retry",
+    "matrix": "rows are training scenarios; columns are evaluation response conditions"
+  },
+  "scenarios": [
+    {
+      "name": "primary",
+      "alpha": 0.8,
+      "h": 30.0,
+      "role": "primary",
+      "train": true,
+      "evaluate": true,
+      "planned_comparisons": ["diagonal", "all_registered_response_conditions"]
+    },
+    {
+      "name": "lower_responsiveness",
+      "alpha": 0.5,
+      "h": 30.0,
+      "role": "secondary",
+      "train": true,
+      "evaluate": true,
+      "planned_comparisons": ["diagonal", "all_registered_response_conditions"]
+    },
+    {
+      "name": "narrower_tolerance",
+      "alpha": 0.8,
+      "h": 15.0,
+      "role": "secondary",
+      "train": true,
+      "evaluate": true,
+      "planned_comparisons": ["diagonal", "all_registered_response_conditions"]
+    },
+    {
+      "name": "broader_tolerance",
+      "alpha": 0.8,
+      "h": 60.0,
+      "role": "secondary",
+      "train": true,
+      "evaluate": true,
+      "planned_comparisons": ["diagonal", "all_registered_response_conditions"]
+    }
+  ]
+}
