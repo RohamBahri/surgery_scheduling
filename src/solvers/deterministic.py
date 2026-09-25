@@ -4,6 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import gurobipy as gp
@@ -351,7 +352,18 @@ def solve_deterministic(
 
 
 def _apply_solver_params(model: gp.Model, cfg: SolverConfig) -> None:
-    model.Params.OutputFlag = 1 if cfg.verbose else 0
+    # Persistent per-model logs are deliberately independent of console noise.
+    # Gurobi requires OutputFlag=1 for file logging; LogToConsole controls only
+    # terminal output.  This lets final experiments keep a complete diagnostic
+    # record without flooding the parent process console.
+    if cfg.log_file:
+        path = Path(cfg.log_file).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        model.Params.OutputFlag = 1
+        model.Params.LogToConsole = 1 if cfg.verbose else 0
+        model.Params.LogFile = str(path)
+    else:
+        model.Params.OutputFlag = 1 if cfg.verbose else 0
     model.Params.TimeLimit = cfg.time_limit_seconds
     if cfg.work_limit is not None:
         if cfg.work_limit <= 0:
