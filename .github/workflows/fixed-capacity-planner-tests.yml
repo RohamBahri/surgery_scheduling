@@ -18,7 +18,7 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: python -m pip install -e '.[dev]'
-      - name: Compile final paper entry points
+      - name: Compile paper experiment entry points
         run: >-
           python -m py_compile
           run_final_paper.py
@@ -28,6 +28,7 @@ jobs:
           run_final_paper_required_sensitivities.py
           run_final_paper_deterministic_calibration.py
           run_final_paper_shared_plans.py
+          experiment_protocol.py
           final_paper_runtime_fixes.py
           final_paper_scientific_fixes.py
           final_paper_required_sensitivities.py
@@ -35,8 +36,7 @@ jobs:
           final_paper_numeric_guard.py
           final_paper_release_guard.py
           final_paper_shared_plans.py
-      - name: Run mathematical planner and final-driver regressions
-        # All optimization fixtures fit the bundled restricted Gurobi license.
+      - name: Run mathematical planner and experiment regressions
         run: >-
           python -m pytest
           tests/test_planning/test_fixed_capacity.py
@@ -48,4 +48,5 @@ jobs:
           tests/test_final_paper_release_guard.py
           tests/test_final_paper_shared_plans.py
           tests/test_final_paper_wrapper_guards.py
+          tests/test_experiment_protocol.py
           -q
