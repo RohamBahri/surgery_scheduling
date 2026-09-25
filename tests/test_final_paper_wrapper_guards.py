@@ -28,6 +28,7 @@ def test_train_wrapper_installs_spawn_safe_protocol_guards(monkeypatch, tmp_path
     monkeypatch.setattr(wrapper.shared, "configure_training_scenario", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper.protocol, "stamp_training_registry", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper, "_write_shared_provenance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wrapper, "_fingerprint_protocol_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper, "_rewrite_frozen_next_step", lambda root: None)
 
     wrapper._train([
