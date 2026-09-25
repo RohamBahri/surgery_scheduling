@@ -38,6 +38,7 @@ jobs:
           final_paper_numeric_guard.py
           final_paper_release_guard.py
           final_paper_shared_plans.py
+          final_paper_resilience.py
       - name: Run mathematical planner and experiment regressions
         run: >-
           python -m pytest
@@ -51,4 +52,5 @@ jobs:
           tests/test_final_paper_shared_plans.py
           tests/test_final_paper_wrapper_guards.py
           tests/test_experiment_protocol.py
+          tests/test_final_paper_resilience.py
           -q
