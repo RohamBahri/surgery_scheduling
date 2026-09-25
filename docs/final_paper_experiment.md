@@ -9,4 +9,9 @@ The operational source of truth is:
 - `docs/final_experiment_protocol.md`
 - the single supported command wrapper: `python run_final_paper.py ...`
 
-For Stage 1 use `python run_final_paper.py train ...`; for the one-shot holdout use `python run_final_paper.py evaluate ...`; and for the required structural checks use `python run_final_paper.py sensitivities ...`.
+The current workflow solves the behavior-independent training oracle and BOOKED
+weekly plans once with `python run_final_paper.py shared-plans ...`, then trains
+one or more explicitly declared `(alpha,h)` regimes with
+`python run_final_paper.py train --shared-plans-root ... --alpha ... --h ...`.
+Use `python run_final_paper.py evaluate ...` for the one-shot holdout and
+`python run_final_paper.py sensitivities ...` for required structural checks.
