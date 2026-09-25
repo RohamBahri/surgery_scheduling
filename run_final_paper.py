@@ -105,6 +105,22 @@ def _write_shared_provenance(training_root: Path, shared_root: Path) -> None:
     )
 
 
+def _fingerprint_protocol_artifacts(training_root: Path) -> None:
+    root = Path(training_root)
+    freeze_path = root / "TRAINING_FREEZE.json"
+    freeze = json.loads(freeze_path.read_text(encoding="utf-8"))
+    freeze["experiment_protocol_version"] = protocol.PROTOCOL_VERSION
+    freeze["experiment_registry_sha256"] = protocol.registry_hash()
+    fps = dict(freeze.get("artifact_fingerprints", {}))
+    for name in ("EXPERIMENT_REGISTRY.json", "SHARED_PLAN_PROVENANCE.json"):
+        p = root / name
+        if not p.exists():
+            raise RuntimeError(f"Missing protocol artifact before freeze: {name}")
+        fps[name] = protocol.sha256_file(p)
+    freeze["artifact_fingerprints"] = fps
+    freeze_path.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _write_diagonal_matrix_files(eval_root: Path, scenario: str) -> None:
     import pandas as pd
     summary_path = Path(eval_root) / "FINAL_HOLDOUT_SUMMARY.csv"
@@ -142,9 +158,7 @@ def _aggregate_matrix_if_complete(experiment_root: Path) -> None:
         for response_name in registry_eval:
             if response_name == train_name:
                 continue
-            b = booked.copy()
-            b["response_scenario"] = response_name
-            pieces.append(b)
+            b = booked.copy(); b["response_scenario"] = response_name; pieces.append(b)
     pd.concat(pieces, ignore_index=True, sort=False).to_csv(root / "RESPONSE_MATRIX_SUMMARY.csv", index=False)
 
 
@@ -178,6 +192,7 @@ def _train(argv: list[str]) -> None:
     shared.stamp_training_bundle(Path(root_arg), scenario_name=scenario_name, alpha=alpha, h=h, shared_root=shared_root)
     _write_shared_provenance(Path(root_arg), shared_root)
     protocol.stamp_training_registry(Path(root_arg), scenario_name=scenario_name, alpha=alpha, h=h)
+    _fingerprint_protocol_artifacts(Path(root_arg))
     _rewrite_frozen_next_step(Path(root_arg))
     print(json.dumps({
         "status": "TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED",
@@ -198,6 +213,7 @@ def _seal(argv: list[str]) -> None:
     shared_root = Path(args.shared_plans_root).resolve()
     for tr in roots:
         _write_shared_provenance(tr, shared_root)
+        _fingerprint_protocol_artifacts(tr)
     report_path = audit.write_report(Path(args.experiment_root), roots)
     seal = protocol.seal_experiment(Path(args.experiment_root), roots, shared_root)
     print(json.dumps({
