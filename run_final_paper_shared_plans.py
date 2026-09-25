@@ -3,7 +3,7 @@
 
 This runner builds the exact frozen 72-week training planning instances, solves
 REALIZED_ORACLE and/or BOOKED, saves complete assignments/bounds/statuses, and
-keeps one Gurobi log per site solve.  A later invocation may load a previous
+keeps one Gurobi log per site solve. A later invocation may load a previous
 shared-plan root, use those assignments as MIP starts, and spend more time only
 on weeks whose native-Psi gap still exceeds the requested target.
 
@@ -151,6 +151,14 @@ def main() -> None:
     root = Path(args.artifact_root).resolve()
     warm_root = None if args.warm_start_root is None else Path(args.warm_start_root).resolve()
 
+    # Output roots are immutable snapshots. A refinement reads a previous root
+    # and writes a new root; it never mutates the artifact it uses as a warm start.
+    if warm_root is not None and root == warm_root:
+        raise RuntimeError("--artifact-root must differ from --warm-start-root")
+    if root.exists() and any(root.iterdir()):
+        raise RuntimeError(f"Artifact root is not empty: {root}. Use a fresh output directory.")
+    root.mkdir(parents=True, exist_ok=True)
+
     # Install the identical reviewed fixed-capacity/numeric stack used by Stage 1,
     # plus spawn-safe persistent weekly Gurobi logging.
     final.install_final_adapter()
@@ -174,11 +182,6 @@ def main() -> None:
     s.validate()
     base.setup_logging(root, s.verbose)
 
-    if root.exists() and any(root.iterdir()) and warm_root is None:
-        raise RuntimeError(
-            f"Artifact root is not empty: {root}. Use --warm-start-root for an explicit refinement run."
-        )
-    root.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
     base.write_json(
         root / "SHARED_RUN_STATUS.json",
