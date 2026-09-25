@@ -3,9 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import final_paper_finalization_fixes as hardening
-import final_paper_numeric_guard as numeric
 import final_paper_resilience as resilience
 import final_paper_runtime_fixes as runtime
+import final_paper_shared_plans as shared
 import run_final_paper_training as training
 
 
@@ -15,7 +15,10 @@ def test_resilience_installed_by_supported_wrapper_import_path() -> None:
     assert runtime.safe_saturation_test is resilience.safe_saturation_test
     assert hardening._ORIGINAL_TRAIN_VF is resilience.resilient_train_vf
     assert hardening.robust_deterministic_site_solve is resilience.resilient_deterministic_site_solve
-    assert numeric.sensitivity_worker is resilience.resilient_sensitivity_worker
+    # Protocol installation later replaces numeric.sensitivity_worker with its
+    # logging wrapper. What matters is that the shared wrapper captured the
+    # resilient source worker before that replacement.
+    assert shared._ORIGINAL_SENSITIVITY_WORKER is resilience.resilient_sensitivity_worker
 
 
 def test_tie_seed_diagnostic_failure_is_nonfatal(monkeypatch) -> None:
