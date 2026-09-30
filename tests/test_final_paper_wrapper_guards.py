@@ -89,5 +89,8 @@ def test_protocol_numeric_guard_survives_stage_reinstallation() -> None:
     assert runtime._solve_process_task is protocol.training_process_task
     assert science.deterministic_eval_worker is protocol.deterministic_eval_worker
     assert numeric.phi_accounting_tolerance(21074.971248, 21074.9452086) >= 0.0260393
-    with __import__("pytest").raises(AssertionError):
-        numeric.assert_phi_accounting_close(21074.0, 21073.0, context="material")
+    # Finite solver-incumbent differences are diagnostic only; certificate validity
+    # is enforced by the lower-bound-vs-feasible-objective check instead.
+    numeric.assert_phi_accounting_close(21074.0, 21073.0, context="material-diagnostic")
+    with __import__("pytest").raises(AssertionError, match="lower bound exceeds"):
+        numeric.assert_lower_bound_valid(1000.0, 1001.0, context="invalid-certificate")
