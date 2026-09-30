@@ -131,7 +131,10 @@ def test_shared_plan_rejects_changed_duration_cost_accounting(tmp_path) -> None:
 
     bad = d.copy()
     bad[0] += 20.0
-    with pytest.raises(AssertionError, match="decomposed Phi mismatch"):
+    # The old stored incumbent-objective mismatch is diagnostic. The artifact is
+    # still rejected because its stored lower bound is no longer valid for the
+    # changed current feasible cost, which is the validity condition that matters.
+    with pytest.raises(RuntimeError, match="lower bound exceeds current feasible cost"):
         shared.load_plan_set(root, "booked", weeks, {0: bad}, s)
 
 
