@@ -52,5 +52,6 @@ jobs:
           tests/test_final_paper_shared_plans.py
           tests/test_final_paper_wrapper_guards.py
           tests/test_experiment_protocol.py
+          tests/test_experiment_audit.py
           tests/test_final_paper_resilience.py
           -q
