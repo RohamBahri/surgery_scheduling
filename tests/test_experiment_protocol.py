@@ -65,6 +65,26 @@ def test_shared_plan_math_compatibility_ignores_provenance_only_hashes(monkeypat
         protocol._assert_shared_math_compatible(legacy_manifest)
 
 
+
+def test_training_math_compatibility_allows_provenance_only_commit_change(monkeypatch) -> None:
+    monkeypatch.setattr(protocol, "git_head", lambda: "current")
+    identities = {
+        "old": {"a.py": "same", "b.py": "same"},
+        "current": {"a.py": "same", "b.py": "same"},
+        "changed": {"a.py": "same", "b.py": "different"},
+    }
+    monkeypatch.setattr(
+        protocol,
+        "_training_math_source_identity_at_head",
+        lambda head: dict(identities[head]),
+    )
+    monkeypatch.setattr(protocol, "TRAINING_MATH_SOURCE_FILES", ("a.py", "b.py"))
+
+    assert protocol.assert_training_math_compatible("old") == identities["current"]
+    with pytest.raises(RuntimeError, match="different training mathematics"):
+        protocol.assert_training_math_compatible("changed")
+
+
 def test_projected_benchmark_respects_display_cap() -> None:
     a = SimpleNamespace(
         booked=np.array([100.0, 20.0]),
