@@ -103,3 +103,24 @@ def test_registered_parameters_reject_posthoc_unregistered_scenario() -> None:
         protocol.validate_registered_parameters("primary", 0.7, 30.0, purpose="train")
     with pytest.raises(RuntimeError):
         protocol.registered_scenario("new_after_results", purpose="evaluate")
+
+
+def test_preholdout_amendment_defers_narrower_tolerance() -> None:
+    amendment = protocol.load_amendment()
+    assert amendment["status"] == "PREHOLDOUT_SCOPE_REDUCTION"
+    assert amendment["active_scenarios"] == [
+        "primary",
+        "lower_responsiveness",
+        "broader_tolerance",
+    ]
+    assert amendment["deferred_scenarios"] == ["narrower_tolerance"]
+    assert [x["name"] for x in protocol.active_scenarios(purpose="train")] == [
+        "primary",
+        "lower_responsiveness",
+        "broader_tolerance",
+    ]
+    assert [x["name"] for x in protocol.active_scenarios(purpose="evaluate")] == [
+        "primary",
+        "lower_responsiveness",
+        "broader_tolerance",
+    ]
