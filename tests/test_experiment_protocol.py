@@ -107,7 +107,7 @@ def test_registered_parameters_reject_posthoc_unregistered_scenario() -> None:
 
 def test_preholdout_amendment_defers_narrower_tolerance() -> None:
     amendment = protocol.load_amendment()
-    assert amendment["status"] == "PREHOLDOUT_SCOPE_REDUCTION"
+    assert amendment["status"] == "PREHOLDOUT_SCOPE_AND_EXECUTION_AMENDMENT"
     assert amendment["active_scenarios"] == [
         "primary",
         "lower_responsiveness",
