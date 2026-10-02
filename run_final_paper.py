@@ -144,7 +144,7 @@ def _aggregate_matrix_if_complete(experiment_root: Path) -> None:
     if consumption.get("status") != "HOLDOUT_CONSUMPTION_COMPLETE":
         return
     pieces = []
-    registry_eval = [x["name"] for x in protocol.registered_scenarios(purpose="evaluate")]
+    registry_eval = [x["name"] for x in protocol.active_scenarios(purpose="evaluate")]
     for train_name, meta in sorted(consumption.get("bundles", {}).items()):
         er = Path(meta["evaluation_root"])
         diag_path = er / "RESPONSE_MATRIX_DIAGONAL_SUMMARY.csv"
