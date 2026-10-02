@@ -105,9 +105,9 @@ def test_registered_parameters_reject_posthoc_unregistered_scenario() -> None:
         protocol.registered_scenario("new_after_results", purpose="evaluate")
 
 
-def test_preholdout_amendment_defers_narrower_tolerance() -> None:
+def test_evaluation_amendment_defers_narrower_tolerance() -> None:
     amendment = protocol.load_amendment()
-    assert amendment["status"] == "PREHOLDOUT_SCOPE_AND_EXECUTION_AMENDMENT"
+    assert amendment["status"] == "SCOPE_AND_EXECUTION_AMENDMENT"
     assert amendment["active_scenarios"] == [
         "primary",
         "lower_responsiveness",
@@ -126,7 +126,7 @@ def test_preholdout_amendment_defers_narrower_tolerance() -> None:
     ]
 
 
-def test_preholdout_amendment_freezes_efficient_matrix_engine() -> None:
+def test_evaluation_amendment_uses_efficient_matrix_engine() -> None:
     amendment = protocol.load_amendment()
     execution = amendment["evaluation_execution"]
     assert execution["engine"] == "holdout_matrix_engine_2026_10_01_v1"
