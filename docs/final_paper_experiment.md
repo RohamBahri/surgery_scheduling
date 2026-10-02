@@ -13,5 +13,4 @@ The current workflow solves the behavior-independent training oracle and BOOKED
 weekly plans once with `python run_final_paper.py shared-plans ...`, then trains
 one or more explicitly declared `(alpha,h)` regimes with
 `python run_final_paper.py train --shared-plans-root ... --alpha ... --h ...`.
-Use `python run_final_paper.py evaluate ...` for the one-shot holdout and
-`python run_final_paper.py sensitivities ...` for required structural checks.
+Use `python run_final_paper.py matrix ...` for the pooled three-scenario holdout matrix, `python run_final_paper.py evaluate ...` for an individual repeatable evaluation, and `python run_final_paper.py sensitivities ...` for structural checks.
