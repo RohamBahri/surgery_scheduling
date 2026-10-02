@@ -33,10 +33,6 @@ def _arg_value(argv: list[str], name: str) -> str | None:
     return None
 
 
-def _has_flag(argv: list[str], name: str) -> bool:
-    return name in argv
-
-
 def _strip_value_args(argv: list[str], names: set[str]) -> list[str]:
     out: list[str] = []
     i = 0
@@ -133,31 +129,6 @@ def _write_diagonal_matrix_files(eval_root: Path, scenario: str) -> None:
         df.to_csv(Path(eval_root) / "RESPONSE_MATRIX_DIAGONAL_WEEKLY.csv", index=False)
 
 
-def _aggregate_matrix_if_complete(experiment_root: Path) -> None:
-    import pandas as pd
-    root = Path(experiment_root).resolve()
-    consumption = json.loads((root / "EXPERIMENT_CONSUMPTION.json").read_text(encoding="utf-8"))
-    if consumption.get("status") != "HOLDOUT_CONSUMPTION_COMPLETE":
-        return
-    pieces = []
-    registry_eval = [x["name"] for x in protocol.active_scenarios(purpose="evaluate")]
-    for train_name, meta in sorted(consumption.get("bundles", {}).items()):
-        er = Path(meta["evaluation_root"])
-        diag_path = er / "RESPONSE_MATRIX_DIAGONAL_SUMMARY.csv"
-        off_path = er / "RESPONSE_MATRIX_OFFDIAGONAL_SUMMARY.csv"
-        if not diag_path.exists() or not off_path.exists():
-            raise RuntimeError(f"Completed evaluation for {train_name} is missing matrix summaries")
-        diag = pd.read_csv(diag_path)
-        off = pd.read_csv(off_path)
-        pieces.extend([diag, off])
-        booked = diag[diag["method"] == "BOOKED"].copy()
-        for response_name in registry_eval:
-            if response_name == train_name:
-                continue
-            b = booked.copy(); b["response_scenario"] = response_name; pieces.append(b)
-    pd.concat(pieces, ignore_index=True, sort=False).to_csv(root / "RESPONSE_MATRIX_SUMMARY.csv", index=False)
-
-
 def _train(argv: list[str]) -> None:
     import run_final_paper_training as training
 
@@ -191,7 +162,7 @@ def _train(argv: list[str]) -> None:
     _fingerprint_protocol_artifacts(Path(root_arg))
     _rewrite_frozen_next_step(Path(root_arg))
     print(json.dumps({
-        "status": "TRAINING_COMPLETE_HOLDOUT_LOCKED_REVIEWED",
+        "status": "TRAINING_COMPLETE_REVIEWED",
         "scenario": row,
         "registry_sha256": protocol.registry_hash(),
         "shared_plans_root": str(shared_root),
