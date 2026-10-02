@@ -90,9 +90,7 @@ python run_final_paper.py evaluate \
 
 The evaluator automatically evaluates every registered response column. The diagonal uses the normal primary evaluation; off-diagonal conditions use the same 1200-work-unit / 0.05% protocol. The experiment-level holdout cache reuses identical realized-oracle and BOOKED solves across training rows and reuses projected benchmarks when the response condition/provenance is identical. Cached bounds are never reused on a provenance mismatch.
 
-If an evaluation fails after holdout consumption starts, use `--resume` with the **same** training bundle and **same** evaluation directory. The restart mechanism rejects substitutions and rebuilds the failed output deterministically from the same frozen inputs.
-
-After every registered training row completes, the coordinator writes the combined `RESPONSE_MATRIX_SUMMARY.csv` under the experiment root.
+If a matrix evaluation is interrupted, rerun the same matrix command with `--resume`; compatible completed week/map checkpoints are reused. A fresh evaluation can also be started intentionally because holdout access is not a one-shot lock.\n\nThe matrix runner writes combined `RESPONSE_MATRIX_WEEKLY.csv` and `RESPONSE_MATRIX_SUMMARY.csv` under both the experiment root and `holdout_matrix/`, using one experiment-wide oracle bracket for cross-row comparisons.
 
 ## Numerical accounting
 
