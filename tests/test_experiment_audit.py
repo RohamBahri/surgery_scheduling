@@ -61,3 +61,31 @@ def test_regularization_signature_rejects_wrong_formula(tmp_path: Path) -> None:
     (root / "REGULARIZATION.json").write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(RuntimeError, match="COMMON_COST lambda does not follow"):
         audit._regularization_signature(root)
+
+
+def test_data_and_shared_provenance_signatures_ignore_git_head_only(tmp_path: Path) -> None:
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir(); b.mkdir()
+
+    data = {"git_head": "old", "cohort_sha256": "abc", "train_cases": 20951}
+    prov = {
+        "git_head": "old",
+        "manifest_sha256": "manifest",
+        "registry_sha256": "registry",
+        "shared_plans_root": "/same/shared/root",
+    }
+    (a / "DATA_FREEZE.json").write_text(json.dumps(data), encoding="utf-8")
+    (a / "SHARED_PLAN_PROVENANCE.json").write_text(json.dumps(prov), encoding="utf-8")
+
+    data["git_head"] = "new"
+    prov["git_head"] = "new"
+    (b / "DATA_FREEZE.json").write_text(json.dumps(data), encoding="utf-8")
+    (b / "SHARED_PLAN_PROVENANCE.json").write_text(json.dumps(prov), encoding="utf-8")
+
+    assert audit._data_freeze_signature(a) == audit._data_freeze_signature(b)
+    assert audit._shared_plan_provenance_signature(a) == audit._shared_plan_provenance_signature(b)
+
+    data["train_cases"] = 20950
+    (b / "DATA_FREEZE.json").write_text(json.dumps(data), encoding="utf-8")
+    assert audit._data_freeze_signature(a) != audit._data_freeze_signature(b)
