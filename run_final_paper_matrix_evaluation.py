@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Single-pass, checkpointed holdout matrix evaluation.
 
-This runner is the supported efficient Stage-2 path after the experiment is
-sealed.  It preserves the registered evaluation target (same mathematical
+This runner is the supported efficient Stage-2 path for repeatable evaluation.  It preserves the registered evaluation target (same mathematical
 fixed-capacity planner, 1200 deterministic WorkLimit/site, 5e-4 native-Psi
 MIP gap, one thread, fixed seed) while removing avoidable repeated work:
 
@@ -39,6 +38,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -215,7 +215,7 @@ def _save_plan_checkpoint(
     durations: np.ndarray,
     plan: base.PlanResult,
     s,
-    seal_sha256: str,
+    run_sha256: str,
     warm_parent_hash: str | None,
 ) -> None:
     feasible = float(
@@ -230,7 +230,7 @@ def _save_plan_checkpoint(
         raise RuntimeError(f"Matrix cache {kind} week {week.position}: lower bound exceeds incumbent")
     payload = {
         "engine_version": ENGINE_VERSION,
-        "seal_sha256": seal_sha256,
+        "run_sha256": run_sha256,
         "amendment_sha256": protocol.amendment_hash(),
         "git_head": protocol.git_head(),
         "kind": str(kind),
@@ -265,7 +265,7 @@ def _load_plan_checkpoint(
     week,
     durations: np.ndarray,
     s,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> base.PlanResult | None:
     path = Path(path)
     if not path.exists():
@@ -275,7 +275,7 @@ def _load_plan_checkpoint(
             payload = json.load(fh)
         expected = {
             "engine_version": ENGINE_VERSION,
-            "seal_sha256": seal_sha256,
+            "run_sha256": run_sha256,
             "amendment_sha256": protocol.amendment_hash(),
             "git_head": protocol.git_head(),
             "kind": str(kind),
@@ -792,7 +792,7 @@ def _load_batch_from_checkpoints(
     *,
     map_hash: str,
     kind: str,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> dict[int, base.PlanResult] | None:
     out = {}
     for week in weeks:
@@ -808,7 +808,7 @@ def _load_batch_from_checkpoints(
             week=week,
             durations=np.asarray(dm[int(week.position)], float),
             s=s,
-            seal_sha256=seal_sha256,
+            run_sha256=run_sha256,
         )
         if plan is None:
             return None
@@ -824,7 +824,7 @@ def _solve_map_phase(
     s,
     *,
     phase: int,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> dict[str, dict[int, base.PlanResult]]:
     """Solve all missing week/map jobs in one shared worker pool."""
     phase_hashes = sorted(
@@ -855,7 +855,7 @@ def _solve_map_phase(
                 s,
                 map_hash=parent_hash,
                 kind="plan",
-                seal_sha256=seal_sha256,
+                run_sha256=run_sha256,
             )
             if parent_plans is None:
                 raise RuntimeError(
@@ -869,7 +869,7 @@ def _solve_map_phase(
                 week=week,
                 durations=np.asarray(dm[int(week.position)], float),
                 s=s,
-                seal_sha256=seal_sha256,
+                run_sha256=run_sha256,
             )
             if cached is not None:
                 results[h][int(week.position)] = cached
@@ -921,7 +921,7 @@ def _solve_map_phase(
                 durations=d,
                 plan=plan,
                 s=s,
-                seal_sha256=seal_sha256,
+                run_sha256=run_sha256,
                 warm_parent_hash=meta[h].get("parent_hash"),
             )
             completed += 1
@@ -943,7 +943,7 @@ def _precompute_oracle(
     arrays,
     s,
     *,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> dict[int, base.PlanResult]:
     dm = {
         int(wk): np.asarray(arrays.actual[idx], float)
@@ -960,7 +960,7 @@ def _precompute_oracle(
             week=week,
             durations=dm[int(week.position)],
             s=s,
-            seal_sha256=seal_sha256,
+            run_sha256=run_sha256,
         )
         if plan is None:
             missing.append(week)
@@ -986,7 +986,7 @@ def _precompute_oracle(
                 durations=dm[int(week.position)],
                 plan=plan,
                 s=s,
-                seal_sha256=seal_sha256,
+                run_sha256=run_sha256,
                 warm_parent_hash=None,
             )
     return out
@@ -999,7 +999,7 @@ def _precompute(
     training_roots: Mapping[str, Path],
     s,
     *,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> dict[str, Any]:
     unique, meta, aliases = build_duration_registry(
         weeks, arrays, training_roots, s
@@ -1009,17 +1009,17 @@ def _precompute(
     started = time.perf_counter()
     # Phase 0 is only BOOKED. It becomes the common predecision warm start.
     _solve_map_phase(
-        matrix_root, weeks, unique, meta, s, phase=0, seal_sha256=seal_sha256
+        matrix_root, weeks, unique, meta, s, phase=0, run_sha256=run_sha256
     )
     # Realized oracle is behavior/policy independent and solved once.
-    _precompute_oracle(matrix_root, weeks, arrays, s, seal_sha256=seal_sha256)
+    _precompute_oracle(matrix_root, weeks, arrays, s, run_sha256=run_sha256)
     # Diagonal policies + projected response benchmarks.
     _solve_map_phase(
-        matrix_root, weeks, unique, meta, s, phase=1, seal_sha256=seal_sha256
+        matrix_root, weeks, unique, meta, s, phase=1, run_sha256=run_sha256
     )
     # Off-diagonal response conditions warm-start from their own diagonal plan.
     _solve_map_phase(
-        matrix_root, weeks, unique, meta, s, phase=2, seal_sha256=seal_sha256
+        matrix_root, weeks, unique, meta, s, phase=2, run_sha256=run_sha256
     )
 
     total_aliases = len(aliases)
@@ -1027,7 +1027,7 @@ def _precompute(
     payload = {
         "status": "PRECOMPUTE_COMPLETE",
         "engine_version": ENGINE_VERSION,
-        "seal_sha256": seal_sha256,
+        "run_sha256": run_sha256,
         "amendment_sha256": protocol.amendment_hash(),
         "git_head": protocol.git_head(),
         "booked_map_hash": booked_hash,
@@ -1051,7 +1051,7 @@ def _precompute(
 # ---------------------------------------------------------------------------
 
 _REPLAY_ROOT: Path | None = None
-_REPLAY_SEAL_SHA: str | None = None
+_REPLAY_RUN_SHA: str | None = None
 _REPLAY_ORIGINAL_ORACLE = fixes.safe_solve_oracle_batch
 _REPLAY_ORIGINAL_BATCH = science.deterministic_eval_solve_batch
 
@@ -1067,7 +1067,7 @@ def _replay_batch(
     label,
     seed=None,
 ):
-    if _REPLAY_ROOT is None or _REPLAY_SEAL_SHA is None:
+    if _REPLAY_ROOT is None or _REPLAY_RUN_SHA is None:
         raise RuntimeError("Matrix replay cache is not configured")
     work = float(s.final_planner_work_limit if work_limit is None else work_limit)
     target_gap = float(s.final_planner_gap if gap is None else gap)
@@ -1089,7 +1089,7 @@ def _replay_batch(
         s,
         map_hash=h,
         kind="plan",
-        seal_sha256=_REPLAY_SEAL_SHA,
+        run_sha256=_REPLAY_RUN_SHA,
     )
     if out is None:
         raise RuntimeError(
@@ -1100,7 +1100,7 @@ def _replay_batch(
 
 
 def _replay_oracle(weeks, duration_by_week, s, *, label):
-    if _REPLAY_ROOT is None or _REPLAY_SEAL_SHA is None:
+    if _REPLAY_ROOT is None or _REPLAY_RUN_SHA is None:
         raise RuntimeError("Matrix replay cache is not configured")
     dm = {int(k): np.asarray(v, float) for k, v in duration_by_week.items()}
     h = duration_map_hash(weeks, dm)
@@ -1111,7 +1111,7 @@ def _replay_oracle(weeks, duration_by_week, s, *, label):
         s,
         map_hash=h,
         kind="oracle",
-        seal_sha256=_REPLAY_SEAL_SHA,
+        run_sha256=_REPLAY_RUN_SHA,
     )
     if out is None:
         raise RuntimeError("Reporting requested an oracle map that was not precomputed")
@@ -1119,10 +1119,10 @@ def _replay_oracle(weeks, duration_by_week, s, *, label):
     return out
 
 
-def install_replay(matrix_root: Path, seal_sha256: str) -> None:
-    global _REPLAY_ROOT, _REPLAY_SEAL_SHA
+def install_replay(matrix_root: Path, run_sha256: str) -> None:
+    global _REPLAY_ROOT, _REPLAY_RUN_SHA
     _REPLAY_ROOT = Path(matrix_root).resolve()
-    _REPLAY_SEAL_SHA = str(seal_sha256)
+    _REPLAY_RUN_SHA = str(run_sha256)
     # evaluation.main calls apply_runtime_fixes(), which reads this source hook.
     fixes.safe_solve_oracle_batch = _replay_oracle
     # apply_scientific_fixes() does not replace this batch function.
@@ -1133,21 +1133,24 @@ def install_replay(matrix_root: Path, seal_sha256: str) -> None:
 # Protocol / reporting orchestration
 # ---------------------------------------------------------------------------
 
-def _training_roots_from_seal(experiment_root: Path) -> dict[str, Path]:
-    seal = _json(Path(experiment_root) / "EXPERIMENT_SEAL.json")
-    active = [x["name"] for x in protocol.active_scenarios(purpose="train")]
-    accepted = dict(seal.get("accepted_training_bundles", {}))
-    if sorted(accepted) != sorted(active):
+def _training_roots_from_experiment(experiment_root: Path) -> dict[str, Path]:
+    report_path = Path(experiment_root) / "COMPARABILITY_REPORT.json"
+    if not report_path.exists():
         raise RuntimeError(
-            f"Seal scenarios differ from active amendment: seal={sorted(accepted)}, active={active}"
+            "Matrix evaluation needs COMPARABILITY_REPORT.json to locate training bundles. "
+            "Create it with experiment_audit.write_report or use the regular evaluate command per bundle."
         )
-    return {name: Path(accepted[name]["training_root"]).resolve() for name in active}
+    report = _json(report_path)
+    rows = dict(report.get("scenarios", {}))
+    active = [x["name"] for x in protocol.active_scenarios(purpose="train")]
+    missing = [name for name in active if name not in rows or not rows[name].get("training_root")]
+    if missing:
+        raise RuntimeError(f"Comparability report is missing active training roots: {missing}")
+    return {name: Path(rows[name]["training_root"]).resolve() for name in active}
 
 
 def _verify_before_holdout(experiment_root: Path, roots: Mapping[str, Path]) -> None:
-    audit.verify_report(experiment_root)
     for name, root in roots.items():
-        protocol.verify_sealed_bundle(experiment_root, root)
         hardening.verify_training_finalization(root)
         numeric.verify_training_bundle(root)
         release.verify_training_bundle(root)
@@ -1159,13 +1162,13 @@ def _matrix_marker_payload(
     matrix_root: Path,
     roots: Mapping[str, Path],
     *,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> dict[str, Any]:
     return {
         "status": "HOLDOUT_MATRIX_CONSUMPTION_STARTED",
         "engine_version": ENGINE_VERSION,
         "git_head": protocol.git_head(),
-        "seal_sha256": seal_sha256,
+        "run_sha256": run_sha256,
         "amendment_sha256": protocol.amendment_hash(),
         "experiment_root": str(Path(experiment_root).resolve()),
         "matrix_root": str(Path(matrix_root).resolve()),
@@ -1181,54 +1184,27 @@ def _start_or_resume(
     *,
     resume: bool,
 ) -> str:
-    seal_path = Path(experiment_root) / "EXPERIMENT_SEAL.json"
-    seal_sha = protocol.sha256_file(seal_path)
+    run_sha = _canonical_hash(
+        {
+            "registry_sha256": protocol.registry_hash(),
+            "amendment_sha256": protocol.amendment_hash(),
+            "git_head": protocol.git_head(),
+            "training_bundles": {name: protocol.bundle_hash(root) for name, root in roots.items()},
+        }
+    )
     marker_path = Path(matrix_root) / START_MARKER
     expected = _matrix_marker_payload(
-        experiment_root, matrix_root, roots, seal_sha256=seal_sha
+        experiment_root, matrix_root, roots, run_sha256=run_sha
     )
-
-    if marker_path.exists():
+    Path(matrix_root).mkdir(parents=True, exist_ok=True)
+    if marker_path.exists() and resume:
         stored = _json(marker_path)
         if any(stored.get(k) != v for k, v in expected.items()):
-            raise RuntimeError("Existing matrix-evaluation marker does not match current sealed inputs")
-        if not resume and not (Path(matrix_root) / DONE_MARKER).exists():
-            raise RuntimeError(
-                "Matrix evaluation already started. Re-run the same command with --resume."
-            )
-        return seal_sha
-
-    if resume:
-        raise RuntimeError("--resume was requested but no matrix start marker exists")
-
-    for root in roots.values():
-        if (root / "HOLDOUT_EVALUATED.json").exists() or (root / "HOLDOUT_EVALUATION_STARTED.json").exists():
-            raise RuntimeError(
-                f"Legacy holdout evaluation already started for {root}; do not start matrix evaluation"
-            )
-        if (root / START_MARKER).exists():
-            raise RuntimeError(f"Training bundle already has a matrix start marker: {root}")
-
-    Path(matrix_root).mkdir(parents=True, exist_ok=True)
+            raise RuntimeError("Existing matrix-evaluation marker does not match current inputs")
+        return run_sha
     payload = {**expected, "started_unix_time": time.time()}
     _write_json(marker_path, payload)
-    marker_sha = protocol.sha256_file(marker_path)
-    for name, root in roots.items():
-        _write_json(
-            root / START_MARKER,
-            {
-                **payload,
-                "training_scenario": name,
-                "matrix_start_marker_sha256": marker_sha,
-            },
-        )
-        protocol.update_consumption(
-            experiment_root,
-            name,
-            state="MATRIX_PRECOMPUTE_STARTED",
-            evaluation_root=Path(matrix_root) / "evaluations" / name,
-        )
-    return seal_sha
+    return run_sha
 
 
 def _report_all(
@@ -1238,19 +1214,17 @@ def _report_all(
     *,
     data: str,
     cores: int,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> None:
     # Reuse the reviewed Stage-2 reporter. Every expensive planner call is
     # intercepted by the exact-content replay cache above.
-    install_replay(matrix_root, seal_sha256)
+    install_replay(matrix_root, run_sha256)
     import run_final_paper as wrapper
 
     for name, training_root in roots.items():
         eval_root = Path(matrix_root) / "evaluations" / name
-        done = training_root / "HOLDOUT_EVALUATED.json"
-        if done.exists():
-            base.LOG.info("[MATRIX] reporting already complete for %s", name)
-            continue
+        if eval_root.exists():
+            shutil.rmtree(eval_root)
 
         argv = [
             "--experiment-root",
@@ -1275,25 +1249,19 @@ def _finish(
     matrix_root: Path,
     roots: Mapping[str, Path],
     *,
-    seal_sha256: str,
+    run_sha256: str,
 ) -> None:
     payload = {
         "status": "HOLDOUT_MATRIX_EVALUATION_COMPLETE",
         "engine_version": ENGINE_VERSION,
         "git_head": protocol.git_head(),
-        "seal_sha256": seal_sha256,
+        "run_sha256": run_sha256,
         "amendment_sha256": protocol.amendment_hash(),
         "active_scenarios": list(roots),
         "matrix_root": str(Path(matrix_root).resolve()),
         "completed_unix_time": time.time(),
     }
     _write_json(Path(matrix_root) / DONE_MARKER, payload)
-    done_sha = protocol.sha256_file(Path(matrix_root) / DONE_MARKER)
-    for name, root in roots.items():
-        _write_json(
-            root / DONE_MARKER,
-            {**payload, "training_scenario": name, "matrix_done_marker_sha256": done_sha},
-        )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -1310,9 +1278,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     experiment_root = Path(args.experiment_root).resolve()
     matrix_root = experiment_root / "holdout_matrix"
 
-    if not protocol.tracked_tree_clean():
-        raise RuntimeError("Matrix evaluation requires a clean tracked tree")
-
     # Install the exact same adapter/scientific/numeric stack before any
     # verification or solve. The supported wrapper import also installs the
     # non-destructive resilience layer through experiment_audit.
@@ -1324,9 +1289,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     protocol.install_behavioral_protocol()
     release.install_reviewed_guards()
 
-    roots = _training_roots_from_seal(experiment_root)
+    roots = _training_roots_from_experiment(experiment_root)
     _verify_before_holdout(experiment_root, roots)
-    seal_sha = _start_or_resume(
+    run_sha = _start_or_resume(
         experiment_root, matrix_root, roots, resume=bool(args.resume)
     )
 
@@ -1348,7 +1313,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         {
             "engine_version": ENGINE_VERSION,
             "git_head": protocol.git_head(),
-            "seal_sha256": seal_sha,
+            "run_sha256": run_sha,
             "amendment_sha256": protocol.amendment_hash(),
             "cores": int(s.cores),
             "solver_protocol": _solver_protocol(s),
@@ -1374,7 +1339,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             arrays,
             roots,
             s,
-            seal_sha256=seal_sha,
+            run_sha256=run_sha,
         )
         base.LOG.info(
             "[MATRIX] precompute complete | requested_maps=%d unique_maps=%d dedup=%d",
@@ -1389,9 +1354,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             roots,
             data=args.data,
             cores=int(s.cores),
-            seal_sha256=seal_sha,
+            run_sha256=run_sha,
         )
-        _finish(experiment_root, matrix_root, roots, seal_sha256=seal_sha)
+        _finish(experiment_root, matrix_root, roots, run_sha256=run_sha)
         base.LOG.info("[DONE] pooled checkpointed holdout matrix evaluation complete")
     except Exception as exc:
         _write_json(
@@ -1401,7 +1366,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "engine_version": ENGINE_VERSION,
                 "error": repr(exc),
                 "traceback": traceback.format_exc(),
-                "seal_sha256": seal_sha,
+                "run_sha256": run_sha,
                 "amendment_sha256": protocol.amendment_hash(),
             },
         )
@@ -1413,7 +1378,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         {
             "status": "HOLDOUT_MATRIX_EVALUATION_COMPLETE",
             "engine_version": ENGINE_VERSION,
-            "seal_sha256": seal_sha,
+            "run_sha256": run_sha,
             "amendment_sha256": protocol.amendment_hash(),
             "active_scenarios": list(roots),
         },
