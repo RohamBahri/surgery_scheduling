@@ -194,12 +194,12 @@ def verify_report(experiment_root: Path) -> dict[str, Any]:
     root = Path(experiment_root).resolve()
     p = root / "COMPARABILITY_REPORT.json"
     if not p.exists():
-        raise RuntimeError("Holdout evaluation requires the pre-holdout comparability report")
+        raise RuntimeError("Evaluation requires a comparability report")
     report = _json(p)
     if report.get("status") != "COMPARABLE_FROZEN_INPUTS" or report.get("registry_sha256") != protocol.registry_hash():
         raise RuntimeError("Comparability report does not match the committed experiment registry")
     if report.get("amendment_sha256") != protocol.amendment_hash():
-        raise RuntimeError("Comparability report does not match the committed pre-holdout experiment amendment")
+        raise RuntimeError("Comparability report does not match the current experiment amendment")
     # Deliberately no holdout-cache installation here. At this point the
     # training scenario is not yet known, and installing a response-dependent
     # projected benchmark under a sentinel scenario can poison later cache
