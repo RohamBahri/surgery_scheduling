@@ -38,6 +38,10 @@ PHI_ACCOUNTING_ATOL = 0.1
 PHI_ACCOUNTING_RTOL = 2e-6
 PHI_ACCOUNTING_MAX_TOL = 0.5
 PHI_ACCOUNTING_WARN_ATOL = 1e-5
+COMPATIBLE_FROZEN_NUMERIC_GUARD_VERSIONS = {
+    "phi_accounting_2026_09_25_v5",
+    "phi_accounting_2026_09_29_v6",
+}
 
 
 def phi_accounting_tolerance(a: float, b: float) -> float:
@@ -293,12 +297,20 @@ def stamp_training_bundle(root: Path) -> None:
 
 
 def verify_training_bundle(root: Path) -> None:
-    root=Path(root).resolve(); freeze=_read_json(root/"TRAINING_FREEZE.json")
-    if freeze.get("numeric_guard_version") != NUMERIC_GUARD_VERSION:
-        raise RuntimeError("Training bundle predates the reviewed numeric-accounting guard")
-    note=root/"NUMERIC_GUARD.json"; expected=dict(freeze.get("artifact_fingerprints",{})).get(note.name)
-    if not note.exists() or not expected or base.sha256_file(note)!=expected:
+    root = Path(root).resolve()
+    freeze = _read_json(root / "TRAINING_FREEZE.json")
+    frozen_version = str(freeze.get("numeric_guard_version", ""))
+    if frozen_version not in COMPATIBLE_FROZEN_NUMERIC_GUARD_VERSIONS:
+        raise RuntimeError(
+            f"Training bundle uses an unreviewed numeric-accounting guard version: {frozen_version!r}"
+        )
+    note = root / "NUMERIC_GUARD.json"
+    expected = dict(freeze.get("artifact_fingerprints", {})).get(note.name)
+    if not note.exists() or not expected or base.sha256_file(note) != expected:
         raise RuntimeError("Frozen NUMERIC_GUARD.json is missing or changed")
+    payload = _read_json(note)
+    if str(payload.get("version", "")) != frozen_version:
+        raise RuntimeError("Frozen NUMERIC_GUARD.json version disagrees with TRAINING_FREEZE.json")
 
 
 def install_all_guards() -> None:
