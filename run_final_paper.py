@@ -270,6 +270,11 @@ def _evaluate(argv: list[str]) -> None:
     }, indent=2))
 
 
+def _evaluate_matrix(argv: list[str]) -> None:
+    import run_final_paper_matrix_evaluation as runner
+    runner.main(argv)
+
+
 def _sensitivities(argv: list[str]) -> None:
     import run_final_paper_required_sensitivities as runner
     train_arg = _arg_value(argv, "--training-artifact-root")
