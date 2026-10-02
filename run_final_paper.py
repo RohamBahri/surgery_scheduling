@@ -320,6 +320,8 @@ def main() -> None:
         _seal(argv)
     elif stage in {"evaluate", "evaluation"}:
         _evaluate(argv)
+    elif stage == "matrix":
+        _evaluate_matrix(argv)
     elif stage in {"sensitivities", "sensitivity"}:
         _sensitivities(argv)
     elif stage == "preflight":
