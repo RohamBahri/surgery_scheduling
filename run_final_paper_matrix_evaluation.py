@@ -31,6 +31,7 @@ unnecessary binary u variables.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import gzip
 import hashlib
@@ -39,6 +40,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -79,6 +81,24 @@ START_MARKER = "HOLDOUT_MATRIX_EVALUATION_STARTED.json"
 DONE_MARKER = "HOLDOUT_MATRIX_EVALUATED.json"
 PRECOMPUTE_STATUS = "PRECOMPUTE_STATUS.json"
 
+# Checkpoint compatibility is tied to the code that can change a solved
+# assignment/certificate, not to unrelated documentation/provenance commits.
+CHECKPOINT_SOURCE_FILES = tuple(dict.fromkeys((
+    *protocol.SHARED_MATH_SOURCE_FILES,
+    "src/solvers/deterministic.py",
+    "final_paper_runtime_fixes.py",
+    "final_paper_numeric_guard.py",
+    "final_paper_finalization_fixes.py",
+)))
+CHECKPOINT_FUNCTION_NAMES = (
+    "_solver_protocol",
+    "_week_structure_hash",
+    "_duration_hash",
+    "duration_map_hash",
+    "solve_fixed_capacity_assignment_strong",
+    "_strong_week_worker",
+)
+
 
 def _json(path: Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -95,6 +115,75 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 def _canonical_hash(payload: Any) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _git_text_at_head(head: str, rel: str) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "show", f"{str(head)}:{rel}"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot verify matrix checkpoint source {rel!r} at commit {head!r}"
+        ) from exc
+
+
+def _function_hashes_from_source(source: str, names: Sequence[str]) -> dict[str, str]:
+    tree = ast.parse(source)
+    found = {}
+    wanted = set(names)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
+            found[node.name] = _canonical_hash(
+                ast.dump(node, annotate_fields=True, include_attributes=False)
+            )
+    missing = sorted(wanted - set(found))
+    if missing:
+        raise RuntimeError(f"Matrix checkpoint functions missing from source: {missing}")
+    return found
+
+
+def _checkpoint_semantic_identity_at_head(head: str) -> dict[str, Any]:
+    files = {
+        rel: hashlib.sha256(_git_text_at_head(head, rel).encode("utf-8")).hexdigest()
+        for rel in CHECKPOINT_SOURCE_FILES
+    }
+    matrix_source = _git_text_at_head(head, "run_final_paper_matrix_evaluation.py")
+    return {
+        "source_files": files,
+        "matrix_solver_functions": _function_hashes_from_source(
+            matrix_source, CHECKPOINT_FUNCTION_NAMES
+        ),
+    }
+
+
+def _assert_checkpoint_semantics_compatible(frozen_head: str) -> None:
+    old = _checkpoint_semantic_identity_at_head(str(frozen_head))
+    new = _checkpoint_semantic_identity_at_head(protocol.git_head())
+    if old != new:
+        raise RuntimeError(
+            "Existing matrix checkpoints were produced under different solver "
+            "mathematics/runtime semantics and cannot be resumed safely."
+        )
+
+
+def _matrix_run_identity(roots: Mapping[str, Path]) -> dict[str, Any]:
+    active = [
+        {"name": x["name"], "alpha": float(x["alpha"]), "h": float(x["h"])}
+        for x in protocol.active_scenarios(purpose="evaluate")
+    ]
+    return {
+        "engine_version": ENGINE_VERSION,
+        "evaluation_protocol": protocol.load_registry()["evaluation_protocol"],
+        "active_scenarios": active,
+        "training_freeze_sha256": {
+            name: protocol.sha256_file(root / "TRAINING_FREEZE.json")
+            for name, root in roots.items()
+        },
+        "checkpoint_semantics": _checkpoint_semantic_identity_at_head(protocol.git_head()),
+    }
 
 
 def _safe_name(value: object) -> str:
@@ -276,8 +365,6 @@ def _load_plan_checkpoint(
         expected = {
             "engine_version": ENGINE_VERSION,
             "run_sha256": run_sha256,
-            "amendment_sha256": protocol.amendment_hash(),
-            "git_head": protocol.git_head(),
             "kind": str(kind),
             "map_hash": str(map_hash),
             "week": int(week.position),
@@ -1201,17 +1288,7 @@ def _start_or_resume(
     *,
     resume: bool,
 ) -> str:
-    run_sha = _canonical_hash(
-        {
-            "registry_sha256": protocol.registry_hash(),
-            "amendment_sha256": protocol.amendment_hash(),
-            "git_head": protocol.git_head(),
-            "training_freeze_sha256": {
-                name: protocol.sha256_file(root / "TRAINING_FREEZE.json")
-                for name, root in roots.items()
-            },
-        }
-    )
+    run_sha = _canonical_hash(_matrix_run_identity(roots))
     marker_path = Path(matrix_root) / START_MARKER
     expected = _matrix_marker_payload(
         experiment_root, matrix_root, roots, run_sha256=run_sha
@@ -1219,10 +1296,37 @@ def _start_or_resume(
     Path(matrix_root).mkdir(parents=True, exist_ok=True)
     if marker_path.exists() and resume:
         stored = _json(marker_path)
-        if any(stored.get(k) != v for k, v in expected.items()):
-            raise RuntimeError("Existing matrix-evaluation marker does not match current inputs")
-        return run_sha
-    payload = {**expected, "started_unix_time": time.time()}
+        for key in (
+            "engine_version",
+            "experiment_root",
+            "matrix_root",
+            "active_scenarios",
+            "training_roots",
+        ):
+            if stored.get(key) != expected.get(key):
+                raise RuntimeError(
+                    f"Existing matrix-evaluation marker does not match current inputs at {key}"
+                )
+        old_head = str(stored.get("git_head", "")).strip()
+        if not old_head:
+            raise RuntimeError("Existing matrix marker has no git_head provenance")
+        _assert_checkpoint_semantics_compatible(old_head)
+        old_run_sha = str(stored.get("run_sha256", "")).strip()
+        if not old_run_sha:
+            raise RuntimeError("Existing matrix marker has no run_sha256")
+        if old_run_sha != run_sha:
+            base.LOG.info(
+                "[MATRIX] resuming compatible checkpoints across provenance-only "
+                "changes: checkpoint_head=%s current_head=%s",
+                old_head,
+                protocol.git_head(),
+            )
+        return old_run_sha
+    payload = {
+        **expected,
+        "checkpoint_semantic_identity": _checkpoint_semantic_identity_at_head(protocol.git_head()),
+        "started_unix_time": time.time(),
+    }
     _write_json(marker_path, payload)
     return run_sha
 
@@ -1424,6 +1528,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if not protocol.tracked_tree_clean():
+        raise RuntimeError(
+            "Matrix evaluation requires a clean tracked Git worktree before any checkpoint is created."
+        )
     experiment_root = Path(args.experiment_root).resolve()
     matrix_root = experiment_root / "holdout_matrix"
 
