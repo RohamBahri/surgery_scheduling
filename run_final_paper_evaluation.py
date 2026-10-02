@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Stage 2: one-shot evaluation of the accepted Stage-1 policy bundle.
+"""Stage 2: repeatable evaluation of an accepted Stage-1 policy bundle.
 
 This program never trains a policy.  It verifies the frozen Stage-1 artifacts,
 requires a clean evaluation commit with training mathematics byte-identical to
-the commit that produced the frozen policies, writes a consumption marker before
-loading/materializing holdout data, then evaluates the exact frozen policies once.
+the commit that produced the frozen policies, then evaluates the frozen policies on the requested holdout data. Holdout access is not a one-shot lock.
 
 Final policy schedules use deterministic Gurobi WorkLimit with one solver thread,
 a fixed seed and predecision model ordering.  A wall-clock TimeLimit is retained
@@ -68,7 +67,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--run-response-sensitivities",
         action="store_true",
-        help="Also run the three predeclared response-misspecification scenarios in this one-shot evaluation.",
+        help="Also run the registered response-misspecification scenarios in this evaluation.",
     )
     return p.parse_args()
 
