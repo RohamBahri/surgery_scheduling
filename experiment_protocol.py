@@ -25,7 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 REGISTRY_FILE = Path(__file__).resolve().with_name("experiment_registry.json")
-PROTOCOL_VERSION = "experiment_protocol_2026_09_29_v3"
+PROTOCOL_VERSION = "experiment_protocol_2026_10_01_v4"
 NUMERIC_POLICY_VERSION = "phi_accounting_2026_09_29_v6"
 PHI_ACCOUNTING_ATOL = 0.1
 PHI_ACCOUNTING_RTOL = 2e-6
@@ -47,6 +47,36 @@ SHARED_MATH_SOURCE_FILES = (
     "src/core/config.py",
     "run_final_paper_experiment.py",
     "final_paper_scientific_fixes.py",
+)
+
+# Source files that can change the learned Stage-1 policies or the training
+# certificates.  Administrative wrappers, tests, logging, provenance checks,
+# and the solver-vs-reconstruction diagnostic are intentionally excluded.
+# This lets a completed frozen training bundle survive a later non-mathematical
+# hardening commit, while still rejecting reuse after any scientific/algorithmic
+# change.
+TRAINING_MATH_SOURCE_FILES = (
+    "src/core/column.py",
+    "src/core/config.py",
+    "src/core/types.py",
+    "src/data/capacity.py",
+    "src/data/eligibility.py",
+    "src/data/loader.py",
+    "src/data/scope.py",
+    "src/planning/eligibility.py",
+    "src/planning/instance.py",
+    "src/planning/roster.py",
+    "src/solvers/deterministic.py",
+    "src/solvers/fixed_capacity.py",
+    "run_final_vf_experiment.py",
+    "run_final_paper_experiment.py",
+    "run_final_paper_training.py",
+    "final_paper_runtime_fixes.py",
+    "final_paper_scientific_fixes.py",
+    "final_paper_finalization_fixes.py",
+    "final_paper_release_guard.py",
+    "final_paper_shared_plans.py",
+    "final_paper_resilience.py",
 )
 
 
@@ -259,6 +289,55 @@ def _assert_shared_math_compatible(manifest: Mapping[str, Any]) -> None:
         )
 
 
+def _git_blob_sha256(head: str, rel: str) -> str:
+    """Hash one tracked source file at a historical Git commit."""
+    try:
+        raw = subprocess.check_output(
+            ["git", "show", f"{head}:{rel}"],
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot verify frozen training source {rel!r} at commit {head!r}; "
+            "the historical commit/file must be available locally"
+        ) from exc
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _training_math_source_identity_at_head(head: str) -> dict[str, str]:
+    return {rel: _git_blob_sha256(str(head), rel) for rel in TRAINING_MATH_SOURCE_FILES}
+
+
+def assert_training_math_compatible(head: str) -> dict[str, str]:
+    """Verify that a frozen Stage-1 bundle used the same training mathematics.
+
+    Git commit identity is provenance, not a scientific invariant.  A bundle
+    from an older commit is accepted only if every source file that can change
+    the learned policies/training certificates is byte-identical to the current
+    sealed code.  This deliberately permits later changes to tests, logging,
+    provenance checks, and numerical diagnostics that do not change the
+    optimization problem or algorithm.
+    """
+    frozen_head = str(head or "").strip()
+    if not frozen_head:
+        raise RuntimeError("Frozen training bundle has no git_head")
+    current_head = git_head()
+    frozen = _training_math_source_identity_at_head(frozen_head)
+    current = _training_math_source_identity_at_head(current_head)
+    changed = {
+        rel: {"frozen": frozen.get(rel), "current": current.get(rel)}
+        for rel in TRAINING_MATH_SOURCE_FILES
+        if frozen.get(rel) != current.get(rel)
+    }
+    if changed:
+        raise RuntimeError(
+            "Frozen training bundle was produced under different training mathematics; "
+            f"cached policies cannot be accepted. frozen_head={frozen_head}, "
+            f"current_head={current_head}, changed={changed}"
+        )
+    return current
+
+
 def _gurobi_version() -> str:
     try:
         import gurobipy as gp
@@ -382,7 +461,6 @@ def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], share
     reg_hash = registry_hash()
     expected = [str(x["name"]) for x in registry["scenarios"] if bool(x.get("train", False))]
     accepted: dict[str, Any] = {}
-    heads: set[str] = set()
     shared_hash = _shared_manifest_hash(Path(shared_root))
     shared_manifest = json.loads((Path(shared_root) / "SHARED_PLANS_MANIFEST.json").read_text(encoding="utf-8"))
     if shared_manifest.get("registry_sha256") != reg_hash:
@@ -404,17 +482,17 @@ def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], share
             raise RuntimeError(f"Training bundle {scenario} did not use the sealed shared-plan artifact")
         files = _bundle_files(tr)
         freeze = json.loads((tr / "TRAINING_FREEZE.json").read_text(encoding="utf-8"))
-        head = str(freeze.get("git_head")); heads.add(head)
+        head = str(freeze.get("git_head"))
+        training_math = assert_training_math_compatible(head)
         accepted[scenario] = {
             "training_root": str(tr),
             "bundle_sha256": hashlib.sha256(_canonical_bytes(files)).hexdigest(),
             "files": files,
             "git_head": head,
+            "training_math_source_sha256": training_math,
         }
     if sorted(accepted) != sorted(expected):
         raise RuntimeError(f"Seal requires exactly the registered training scenarios: expected={expected}, got={sorted(accepted)}")
-    if len(heads) != 1 or next(iter(heads)) != git_head():
-        raise RuntimeError(f"All accepted bundles must use the current single clean commit; bundle heads={sorted(heads)}, current={git_head()}")
     payload = {
         "protocol_version": PROTOCOL_VERSION,
         "status": "SEALED_BEFORE_HOLDOUT",
@@ -426,6 +504,7 @@ def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], share
         "shared_plans_manifest_sha256": shared_hash,
         "shared_plans_source_git_head": shared_manifest.get("source_git_head"),
         "shared_plans_math_source_sha256": _model_source_identity(),
+        "training_math_source_sha256": _training_math_source_identity_at_head(git_head()),
         "accepted_training_bundles": accepted,
     }
     if seal_path.exists():
