@@ -1,10 +1,9 @@
 """Protocol utilities for the registered multi-scenario paper experiment.
 
-The registry is committed before holdout access. Training bundles record its
-hash. After every registered training scenario is accepted, ``seal_experiment``
-creates an immutable experiment-level manifest. Evaluation may only consume a
-bundle named in that seal; interrupted evaluations may restart only against the
-same seal, bundle, and output directory.
+The registry defines named scenarios and training bundles record its hash.
+Evaluation is repeatable: there is no pre-holdout seal or single-consumption
+restriction. Provenance checks protect scientific and mathematical
+compatibility without preventing additional holdout analysis.
 
 Shared weekly plans are reusable across code commits when, and only when, the
 mathematical planner/cost sources and the artifact/data fingerprints that make
@@ -16,9 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import shutil
 import subprocess
-import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -26,7 +23,7 @@ import numpy as np
 
 REGISTRY_FILE = Path(__file__).resolve().with_name("experiment_registry.json")
 AMENDMENT_FILE = Path(__file__).resolve().with_name("experiment_amendment.json")
-PROTOCOL_VERSION = "experiment_protocol_2026_10_01_v5"
+PROTOCOL_VERSION = "experiment_protocol_2026_10_01_v6"
 NUMERIC_POLICY_VERSION = "phi_accounting_2026_09_29_v6"
 PHI_ACCOUNTING_ATOL = 0.1
 PHI_ACCOUNTING_RTOL = 2e-6
@@ -362,7 +359,7 @@ def assert_training_math_compatible(head: str) -> dict[str, str]:
     Git commit identity is provenance, not a scientific invariant.  A bundle
     from an older commit is accepted only if every source file that can change
     the learned policies/training certificates is byte-identical to the current
-    sealed code.  This deliberately permits later changes to tests, logging,
+    code.  This deliberately permits later changes to tests, logging,
     provenance checks, and numerical diagnostics that do not change the
     optimization problem or algorithm.
     """
@@ -490,148 +487,6 @@ def stamp_training_registry(root: Path, *, scenario_name: str, alpha: float, h: 
     p = Path(root) / "EXPERIMENT_REGISTRY.json"
     p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
-
-
-def _shared_manifest_hash(shared_root: Path) -> str:
-    p = Path(shared_root) / "SHARED_PLANS_MANIFEST.json"
-    if not p.exists():
-        raise RuntimeError(f"Missing shared-plan manifest: {p}")
-    return sha256_file(p)
-
-
-def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], shared_root: Path) -> dict[str, Any]:
-    if not tracked_tree_clean():
-        raise RuntimeError("Experiment sealing requires a clean tracked tree")
-    root = Path(experiment_root).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    seal_path = root / "EXPERIMENT_SEAL.json"
-    registry = load_registry()
-    reg_hash = registry_hash()
-    amendment = load_amendment()
-    expected = [str(x["name"]) for x in active_scenarios(purpose="train")]
-    accepted: dict[str, Any] = {}
-    shared_hash = _shared_manifest_hash(Path(shared_root))
-    shared_manifest = json.loads((Path(shared_root) / "SHARED_PLANS_MANIFEST.json").read_text(encoding="utf-8"))
-    if shared_manifest.get("registry_sha256") != reg_hash:
-        raise RuntimeError("Shared-plan registry hash differs from the committed experiment design")
-    _assert_shared_math_compatible(shared_manifest)
-    for tr in training_roots:
-        tr = Path(tr).resolve()
-        stamp = json.loads((tr / "EXPERIMENT_REGISTRY.json").read_text(encoding="utf-8"))
-        if stamp.get("registry_sha256") != reg_hash:
-            raise RuntimeError(f"Training bundle registry hash differs: {tr}")
-        scenario = str(stamp["scenario"]["name"])
-        if scenario in accepted:
-            raise RuntimeError(f"Duplicate accepted training scenario: {scenario}")
-        provenance = tr / "SHARED_PLAN_PROVENANCE.json"
-        if not provenance.exists():
-            raise RuntimeError(f"Training bundle has no shared-plan provenance: {tr}")
-        prov = json.loads(provenance.read_text(encoding="utf-8"))
-        if prov.get("manifest_sha256") != shared_hash:
-            raise RuntimeError(f"Training bundle {scenario} did not use the sealed shared-plan artifact")
-        files = _bundle_files(tr)
-        freeze = json.loads((tr / "TRAINING_FREEZE.json").read_text(encoding="utf-8"))
-        head = str(freeze.get("git_head"))
-        training_math = assert_training_math_compatible(head)
-        accepted[scenario] = {
-            "training_root": str(tr),
-            "bundle_sha256": hashlib.sha256(_canonical_bytes(files)).hexdigest(),
-            "files": files,
-            "git_head": head,
-            "training_math_source_sha256": training_math,
-        }
-    if sorted(accepted) != sorted(expected):
-        raise RuntimeError(f"Seal requires exactly the registered training scenarios: expected={expected}, got={sorted(accepted)}")
-    payload = {
-        "protocol_version": PROTOCOL_VERSION,
-        "status": "SEALED_BEFORE_HOLDOUT",
-        "sealed_unix_time": time.time(),
-        "git_head": git_head(),
-        "registry_sha256": reg_hash,
-        "registry": registry,
-        "amendment_sha256": amendment_hash(),
-        "amendment": amendment,
-        "shared_plans_root": str(Path(shared_root).resolve()),
-        "shared_plans_manifest_sha256": shared_hash,
-        "shared_plans_source_git_head": shared_manifest.get("source_git_head"),
-        "shared_plans_math_source_sha256": _model_source_identity(),
-        "training_math_source_sha256": _training_math_source_identity_at_head(git_head()),
-        "accepted_training_bundles": accepted,
-    }
-    if seal_path.exists():
-        old = json.loads(seal_path.read_text(encoding="utf-8"))
-        old_cmp = dict(old); old_cmp.pop("sealed_unix_time", None)
-        new_cmp = dict(payload); new_cmp.pop("sealed_unix_time", None)
-        if old_cmp != new_cmp:
-            raise RuntimeError("Experiment is already sealed with different inputs; additions/substitutions are forbidden")
-        return old
-    seal_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (root / "EXPERIMENT_CONSUMPTION.json").write_text(
-        json.dumps({"status": "SEALED_NOT_STARTED", "registry_sha256": reg_hash, "bundles": {}}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return payload
-
-
-def verify_sealed_bundle(experiment_root: Path, training_root: Path) -> tuple[dict[str, Any], str]:
-    root = Path(experiment_root).resolve()
-    seal = json.loads((root / "EXPERIMENT_SEAL.json").read_text(encoding="utf-8"))
-    if seal.get("registry_sha256") != registry_hash():
-        raise RuntimeError("Committed experiment registry differs from the sealed registry")
-    if seal.get("amendment_sha256") != amendment_hash():
-        raise RuntimeError("Committed pre-holdout experiment amendment differs from the sealed amendment")
-    tr = Path(training_root).resolve()
-    current_files = _bundle_files(tr)
-    current_hash = hashlib.sha256(_canonical_bytes(current_files)).hexdigest()
-    matches = [name for name, meta in seal.get("accepted_training_bundles", {}).items() if str(Path(meta["training_root"]).resolve()) == str(tr)]
-    if len(matches) != 1:
-        raise RuntimeError("Training bundle is not one of the pre-holdout sealed bundles")
-    name = matches[0]
-    meta = seal["accepted_training_bundles"][name]
-    if current_hash != meta.get("bundle_sha256") or current_files != meta.get("files"):
-        raise RuntimeError(f"Sealed training bundle {name} has changed")
-    if seal.get("git_head") != git_head() or not tracked_tree_clean():
-        raise RuntimeError("Evaluation must use the exact clean commit recorded by the experiment seal")
-    return seal, name
-
-
-def update_consumption(experiment_root: Path, scenario: str, *, state: str, evaluation_root: Path) -> None:
-    root = Path(experiment_root).resolve()
-    p = root / "EXPERIMENT_CONSUMPTION.json"
-    payload = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"bundles": {}}
-    bundles = dict(payload.get("bundles", {}))
-    old = bundles.get(scenario)
-    eval_path = str(Path(evaluation_root).resolve())
-    if old and old.get("evaluation_root") != eval_path:
-        raise RuntimeError(f"Scenario {scenario} consumption is already tied to another evaluation directory")
-    bundles[scenario] = {"state": state, "evaluation_root": eval_path, "updated_unix_time": time.time()}
-    payload["bundles"] = bundles
-    payload["status"] = "HOLDOUT_CONSUMPTION_IN_PROGRESS"
-    expected = set(json.loads((root / "EXPERIMENT_SEAL.json").read_text(encoding="utf-8"))["accepted_training_bundles"])
-    if expected and all(bundles.get(x, {}).get("state") == "COMPLETE" for x in expected):
-        payload["status"] = "HOLDOUT_CONSUMPTION_COMPLETE"
-    p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def prepare_exact_restart(experiment_root: Path, training_root: Path, evaluation_root: Path) -> str:
-    """Permit a failed evaluation to restart only with the exact sealed inputs/path."""
-    _, scenario = verify_sealed_bundle(experiment_root, training_root)
-    tr = Path(training_root).resolve(); er = Path(evaluation_root).resolve()
-    started = tr / "HOLDOUT_EVALUATION_STARTED.json"
-    done = tr / "HOLDOUT_EVALUATED.json"
-    if done.exists() or not started.exists():
-        raise RuntimeError("Exact restart is only allowed after a started-but-incomplete evaluation")
-    marker = json.loads(started.read_text(encoding="utf-8"))
-    if str(Path(marker.get("evaluation_artifact_root", "")).resolve()) != str(er):
-        raise RuntimeError("Restart output directory differs from the original frozen evaluation directory")
-    status = er / "RUN_STATUS.json"
-    if not status.exists() or not str(json.loads(status.read_text(encoding="utf-8")).get("status", "")).startswith("FAILED"):
-        raise RuntimeError("Restart requires a recorded failed evaluation")
-    if er.exists():
-        shutil.rmtree(er)
-    started.unlink()
-    update_consumption(experiment_root, scenario, state="RESTARTING_EXACT_INPUTS", evaluation_root=er)
-    return scenario
 
 
 def registered_response_sensitivity_runner(weeks, a, policies, oracle_plans, s, root: Path) -> None:
