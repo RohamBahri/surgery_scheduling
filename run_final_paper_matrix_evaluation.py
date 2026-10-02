@@ -1222,6 +1222,12 @@ def _start_or_resume(
                 "matrix_start_marker_sha256": marker_sha,
             },
         )
+        protocol.update_consumption(
+            experiment_root,
+            name,
+            state="MATRIX_PRECOMPUTE_STARTED",
+            evaluation_root=Path(matrix_root) / "evaluations" / name,
+        )
     return seal_sha
 
 
