@@ -1,0 +1,15 @@
+{
+  "amendment_version": "2026-10-01-preholdout-v1",
+  "status": "PREHOLDOUT_SCOPE_REDUCTION",
+  "decision_time": "before any final holdout evaluation",
+  "reason": "Proceed with the completed primary, lower-responsiveness, and broader-tolerance training scenarios; defer the narrower-tolerance scenario rather than delaying holdout evaluation.",
+  "active_scenarios": [
+    "primary",
+    "lower_responsiveness",
+    "broader_tolerance"
+  ],
+  "deferred_scenarios": [
+    "narrower_tolerance"
+  ],
+  "interpretation": "The deferred narrower-tolerance scenario is not part of this sealed confirmatory experiment. If trained or evaluated after holdout access begins, it must be reported as a post-hoc/exploratory sensitivity and cannot be added to this seal."
+}
