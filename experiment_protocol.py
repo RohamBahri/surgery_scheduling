@@ -25,7 +25,8 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 REGISTRY_FILE = Path(__file__).resolve().with_name("experiment_registry.json")
-PROTOCOL_VERSION = "experiment_protocol_2026_10_01_v4"
+AMENDMENT_FILE = Path(__file__).resolve().with_name("experiment_amendment.json")
+PROTOCOL_VERSION = "experiment_protocol_2026_10_01_v5"
 NUMERIC_POLICY_VERSION = "phi_accounting_2026_09_29_v6"
 PHI_ACCOUNTING_ATOL = 0.1
 PHI_ACCOUNTING_RTOL = 2e-6
@@ -103,6 +104,53 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
 
 def registry_hash(path: Path | None = None) -> str:
     return hashlib.sha256(_canonical_bytes(load_registry(path))).hexdigest()
+
+
+def load_amendment(path: Path | None = None) -> dict[str, Any]:
+    p = AMENDMENT_FILE if path is None else Path(path)
+    if not p.exists():
+        # Backward-compatible default: no pre-holdout amendment.
+        names = [str(x["name"]) for x in load_registry().get("scenarios", [])]
+        return {
+            "amendment_version": None,
+            "status": "NO_AMENDMENT",
+            "active_scenarios": names,
+            "deferred_scenarios": [],
+        }
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    registered = [str(x["name"]) for x in load_registry().get("scenarios", [])]
+    active = [str(x) for x in payload.get("active_scenarios", [])]
+    deferred = [str(x) for x in payload.get("deferred_scenarios", [])]
+    if not active:
+        raise RuntimeError("Experiment amendment must retain at least one active scenario")
+    if len(active) != len(set(active)) or len(deferred) != len(set(deferred)):
+        raise RuntimeError("Experiment amendment scenario lists must be unique")
+    if set(active) & set(deferred):
+        raise RuntimeError("Experiment amendment cannot mark a scenario both active and deferred")
+    if sorted(set(active) | set(deferred)) != sorted(registered):
+        raise RuntimeError(
+            "Experiment amendment must classify every registered scenario exactly once: "
+            f"registered={registered}, active={active}, deferred={deferred}"
+        )
+    return payload
+
+
+def amendment_hash(path: Path | None = None) -> str:
+    p = AMENDMENT_FILE if path is None else Path(path)
+    if not p.exists():
+        return hashlib.sha256(_canonical_bytes(load_amendment(path))).hexdigest()
+    return sha256_file(p)
+
+
+def active_scenarios(*, purpose: str) -> list[dict[str, Any]]:
+    if purpose not in {"train", "evaluate"}:
+        raise ValueError("purpose must be train or evaluate")
+    active = set(load_amendment().get("active_scenarios", []))
+    return [
+        dict(x)
+        for x in load_registry().get("scenarios", [])
+        if str(x.get("name")) in active and bool(x.get(purpose, False))
+    ]
 
 
 def registered_scenario(name: str, *, purpose: str) -> dict[str, Any]:
@@ -459,7 +507,8 @@ def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], share
     seal_path = root / "EXPERIMENT_SEAL.json"
     registry = load_registry()
     reg_hash = registry_hash()
-    expected = [str(x["name"]) for x in registry["scenarios"] if bool(x.get("train", False))]
+    amendment = load_amendment()
+    expected = [str(x["name"]) for x in active_scenarios(purpose="train")]
     accepted: dict[str, Any] = {}
     shared_hash = _shared_manifest_hash(Path(shared_root))
     shared_manifest = json.loads((Path(shared_root) / "SHARED_PLANS_MANIFEST.json").read_text(encoding="utf-8"))
@@ -500,6 +549,8 @@ def seal_experiment(experiment_root: Path, training_roots: Iterable[Path], share
         "git_head": git_head(),
         "registry_sha256": reg_hash,
         "registry": registry,
+        "amendment_sha256": amendment_hash(),
+        "amendment": amendment,
         "shared_plans_root": str(Path(shared_root).resolve()),
         "shared_plans_manifest_sha256": shared_hash,
         "shared_plans_source_git_head": shared_manifest.get("source_git_head"),
@@ -527,6 +578,8 @@ def verify_sealed_bundle(experiment_root: Path, training_root: Path) -> tuple[di
     seal = json.loads((root / "EXPERIMENT_SEAL.json").read_text(encoding="utf-8"))
     if seal.get("registry_sha256") != registry_hash():
         raise RuntimeError("Committed experiment registry differs from the sealed registry")
+    if seal.get("amendment_sha256") != amendment_hash():
+        raise RuntimeError("Committed pre-holdout experiment amendment differs from the sealed amendment")
     tr = Path(training_root).resolve()
     current_files = _bundle_files(tr)
     current_hash = hashlib.sha256(_canonical_bytes(current_files)).hexdigest()
@@ -597,7 +650,7 @@ def registered_response_sensitivity_runner(weeks, a, policies, oracle_plans, s, 
     rows = []
     oracle_lb = {w: r.bound for w, r in oracle_plans.items()}
     learned = {k: v for k, v in policies.items() if k != "BOOKED"}
-    for response in registered_scenarios(purpose="evaluate"):
+    for response in active_scenarios(purpose="evaluate"):
         if response["name"] == training_row["name"]:
             continue
         ss = copy.copy(s); ss.alpha = float(response["alpha"]); ss.h = float(response["h"])
