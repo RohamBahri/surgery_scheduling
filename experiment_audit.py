@@ -170,6 +170,8 @@ def validate_training_comparability(training_roots: Iterable[Path]) -> dict[str,
     return {
         "audit_version": AUDIT_VERSION,
         "registry_sha256": protocol.registry_hash(),
+        "amendment_sha256": protocol.amendment_hash(),
+        "active_scenarios": [x["name"] for x in protocol.active_scenarios(purpose="train")],
         "status": "COMPARABLE_FROZEN_INPUTS",
         "important_interpretation": (
             "Different VF iteration counts or termination reasons do not invalidate equal-budget comparisons. "
@@ -196,6 +198,8 @@ def verify_report(experiment_root: Path) -> dict[str, Any]:
     report = _json(p)
     if report.get("status") != "COMPARABLE_FROZEN_INPUTS" or report.get("registry_sha256") != protocol.registry_hash():
         raise RuntimeError("Comparability report does not match the committed experiment registry")
+    if report.get("amendment_sha256") != protocol.amendment_hash():
+        raise RuntimeError("Comparability report does not match the committed pre-holdout experiment amendment")
     # Deliberately no holdout-cache installation here. At this point the
     # training scenario is not yet known, and installing a response-dependent
     # projected benchmark under a sentinel scenario can poison later cache
