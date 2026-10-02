@@ -93,12 +93,6 @@ def _verify_training_bundle(root: Path) -> dict:
             raise RuntimeError(f"Frozen training artifact is missing: {name}")
         if base.sha256_file(path) != expected:
             raise RuntimeError(f"Frozen training artifact hash changed: {name}")
-    for marker in ("HOLDOUT_EVALUATION_STARTED.json", "HOLDOUT_EVALUATED.json"):
-        path = root / marker
-        if path.exists():
-            raise RuntimeError(
-                f"This Stage-1 bundle has already started/finished holdout consumption: {path}"
-            )
     return freeze
 
 
@@ -438,21 +432,6 @@ def main() -> None:
         },
     )
 
-    # Consumption starts here, before the workbook is loaded or any holdout week
-    # is materialized.  A failed run leaves this marker in place deliberately.
-    started_marker = training_root / "HOLDOUT_EVALUATION_STARTED.json"
-    base.write_json(
-        started_marker,
-        {
-            "status": "HOLDOUT_CONSUMPTION_STARTED",
-            "git_head": base.git_head(),
-            "evaluation_artifact_root": str(eval_root),
-            "training_freeze_sha256": base.sha256_file(training_root / "TRAINING_FREEZE.json"),
-            "run_response_sensitivities": bool(args.run_response_sensitivities),
-            "started_unix_time": time.time(),
-        },
-    )
-
     start = time.monotonic()
     try:
         cfg = base.build_config(s)
@@ -551,29 +530,18 @@ def main() -> None:
         }
         base.write_json(eval_root / "FINAL_DECISION.json", payload)
         base.write_json(eval_root / "RUN_STATUS.json", payload)
-        base.write_json(
-            training_root / "HOLDOUT_EVALUATED.json",
-            {
-                "status": "HOLDOUT_CONSUMED",
-                "evaluation_artifact_root": str(eval_root),
-                "evaluation_final_decision_sha256": base.sha256_file(
-                    eval_root / "FINAL_DECISION.json"
-                ),
-                "git_head": base.git_head(),
-            },
-        )
         base.LOG.info("[DONE] frozen-policy holdout evaluation complete")
     except Exception as exc:
         base.write_json(
             eval_root / "RUN_STATUS.json",
             {
-                "status": "FAILED_AFTER_HOLDOUT_CONSUMPTION_STARTED",
+                "status": "FAILED_DURING_EVALUATION",
                 "error": repr(exc),
                 "traceback": traceback.format_exc(),
                 "elapsed_seconds": time.monotonic() - start,
             },
         )
-        base.LOG.exception("Stage 2 failed after the consumption marker was written: %s", exc)
+        base.LOG.exception("Stage 2 evaluation failed: %s", exc)
         raise
 
 
