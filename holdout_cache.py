@@ -2,8 +2,7 @@
 
 The realized-duration Oracle, BOOKED schedule, and projected hindsight benchmark
 for a given evaluation-response condition do not depend on which policy-training
-scenario is being evaluated.  Once holdout consumption has legitimately started
-this module stores those solves once and reuses them only when the exact
+scenario is being evaluated.  This module stores those solves once and reuses them only when the exact
 experiment context, code, instances, durations, costs, and solver protocol match.
 
 Cached lower bounds are never accepted on a provenance mismatch.  Assignments
