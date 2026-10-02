@@ -3,9 +3,8 @@
 The realized-duration Oracle, BOOKED schedule, and projected hindsight benchmark
 for a given evaluation-response condition do not depend on which policy-training
 scenario is being evaluated.  Once holdout consumption has legitimately started
-under a sealed experiment, this module stores those solves once and reuses them
-only when the exact seal, code, instances, durations, costs, and solver protocol
-match.
+this module stores those solves once and reuses them only when the exact
+experiment context, code, instances, durations, costs, and solver protocol match.
 
 Cached lower bounds are never accepted on a provenance mismatch.  Assignments
 from an incompatible cache are not loaded by this module.
@@ -70,8 +69,15 @@ def _week_and_duration_hash(weeks, duration_by_week) -> str:
     return _canonical_hash(rows)
 
 
-def _seal_hash(experiment_root: Path) -> str:
-    return protocol.sha256_file(Path(experiment_root) / "EXPERIMENT_SEAL.json")
+def _experiment_context_hash(experiment_root: Path) -> str:
+    payload = {
+        "registry_sha256": protocol.registry_hash(),
+        "amendment_sha256": protocol.amendment_hash(),
+        "git_head": protocol.git_head(),
+        "experiment_root": str(Path(experiment_root).resolve()),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _cache_dir() -> Path:
@@ -125,7 +131,7 @@ def _base_manifest(key, weeks, duration_by_week, s, solver_protocol) -> dict[str
     return {
         "cache_version": CACHE_VERSION,
         "key": key,
-        "seal_sha256": _seal_hash(_ACTIVE_ROOT),
+        "experiment_context_sha256": _experiment_context_hash(_ACTIVE_ROOT),
         "registry_sha256": protocol.registry_hash(),
         "git_head": protocol.git_head(),
         "model_source_sha256": protocol._model_source_identity(),
