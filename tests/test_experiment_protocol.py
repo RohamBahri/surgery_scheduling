@@ -124,3 +124,13 @@ def test_preholdout_amendment_defers_narrower_tolerance() -> None:
         "lower_responsiveness",
         "broader_tolerance",
     ]
+
+
+def test_preholdout_amendment_freezes_efficient_matrix_engine() -> None:
+    amendment = protocol.load_amendment()
+    execution = amendment["evaluation_execution"]
+    assert execution["engine"] == "holdout_matrix_engine_2026_10_01_v1"
+    assert execution["policy_solver"]["total_work_limit_per_site"] == 1200.0
+    assert execution["policy_solver"]["mip_gap"] == 0.0005
+    assert execution["policy_solver"]["threads_per_site"] == 1
+    assert execution["policy_solver"]["seed"] == 42
