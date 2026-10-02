@@ -167,9 +167,23 @@ def _column_from_payload(week, values: Sequence[Sequence[Any]]) -> ScheduleColum
     return column_from_assignment(week.instance, assignment, enforce_eligibility=True)
 
 
-def _solver_protocol(s) -> dict[str, Any]:
+def _solver_protocol(s, *, kind: str = "plan") -> dict[str, Any]:
+    if kind == "oracle":
+        return {
+            "kind": "oracle",
+            "first_pass_seconds_per_site": min(600, int(s.oracle_seconds)),
+            "retry_seconds_per_site": int(s.oracle_seconds),
+            "oracle_gap": float(s.oracle_gap),
+            "threads_per_site": 1,
+            "seed": int(s.random_seed),
+            "objective_mode": str(final.PRIMARY_OBJECTIVE),
+            "turnover": float(final.PRIMARY_TURNOVER),
+            "overtime": float(s.overtime),
+            "idle": float(s.idle),
+        }
     registry = protocol.load_registry()["evaluation_protocol"]
     return {
+        "kind": "plan",
         "work_limit_per_site": float(registry["work_limit_per_site"]),
         "mip_gap": float(registry["mip_gap"]),
         "threads": int(registry["threads"]),
@@ -224,7 +238,7 @@ def _save_plan_checkpoint(
         "week": int(week.position),
         "week_structure_sha256": _week_structure_hash(week),
         "duration_sha256": _duration_hash(np.asarray(durations, float)),
-        "solver_protocol": _solver_protocol(s),
+        "solver_protocol": _solver_protocol(s, kind=kind),
         "warm_parent_hash": warm_parent_hash,
         "n_cases": int(plan.column.n_cases),
         "assignment": _assignment_payload(plan.column),
@@ -269,7 +283,7 @@ def _load_plan_checkpoint(
             "week": int(week.position),
             "week_structure_sha256": _week_structure_hash(week),
             "duration_sha256": _duration_hash(np.asarray(durations, float)),
-            "solver_protocol": _solver_protocol(s),
+            "solver_protocol": _solver_protocol(s, kind=kind),
         }
         for key, value in expected.items():
             if payload.get(key) != value:
