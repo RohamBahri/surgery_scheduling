@@ -212,3 +212,54 @@ def test_apply_scientific_fixes_installs_final_hooks() -> None:
     assert base.FixedSpec is science.ScientificFixedSpec
     assert base.train_naive is science.scientific_train_naive
     assert base.library_metrics is science.scientific_library_metrics
+
+
+def test_matrix_strong_stage2_formulation_matches_reference() -> None:
+    import pytest
+    import run_final_paper_matrix_evaluation as matrix
+    from src.core.config import CostConfig, SolverConfig
+    from src.solvers.fixed_capacity import solve_fixed_capacity_assignment
+
+    blocks = [
+        CandidateBlock(0, "TGH", "A", 100.0, 0.0, True),
+        CandidateBlock(4, "TGH", "B", 100.0, 0.0, True),
+        CandidateBlock(0, "TGH", "C", 90.0, 0.0, True),
+    ]
+    durations = np.array([55.0, 65.0, 25.0, 45.0])
+    cases = [_case(i + 1, float(d), "TGH") for i, d in enumerate(durations)]
+    inst = WeeklyInstance(
+        0,
+        date(2024, 1, 1),
+        date(2024, 1, 7),
+        cases,
+        BlockCalendar(blocks),
+        {i: [b.id for b in blocks] for i in range(len(cases))},
+    )
+    inst.case_eligible_blocks[0] = inst.calendar.block_ids[:2]
+    cfg = SolverConfig(
+        time_limit_seconds=10,
+        mip_gap=0.0,
+        mip_gap_abs=0.0,
+        threads=1,
+        verbose=False,
+        seed=42,
+    )
+    costs = CostConfig()
+    reference = solve_fixed_capacity_assignment(
+        inst, durations, costs, 30.0, cfg, objective_mode="psi", symmetry_breaking=True
+    )
+    strong = matrix.solve_fixed_capacity_assignment_strong(
+        inst, durations, costs, 30.0, cfg, symmetry_breaking=True
+    )
+    assert reference.diagnostics.proven_optimal
+    assert strong.diagnostics.proven_optimal
+    assert strong.phi_ub == pytest.approx(reference.phi_ub)
+    assert strong.phi_lb == pytest.approx(reference.phi_lb)
+    assert strong.psi_ub == pytest.approx(reference.psi_ub)
+    assert strong.psi_lb == pytest.approx(reference.psi_lb)
+
+    warm = matrix.solve_fixed_capacity_assignment_strong(
+        inst, durations, costs, 30.0, cfg, warm_start=reference.column
+    )
+    assert warm.diagnostics.proven_optimal
+    assert warm.phi_ub == pytest.approx(reference.phi_ub)
