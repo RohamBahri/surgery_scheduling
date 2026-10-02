@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import experiment_protocol as protocol
+import experiment_audit as audit  # side effect: installs resilience before shared worker capture
 import final_paper_finalization_fixes as hardening
 import final_paper_numeric_guard as numeric_guard
 import final_paper_release_guard as release_guard
