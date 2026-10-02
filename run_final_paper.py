@@ -211,9 +211,9 @@ def _seal(argv: list[str]) -> None:
     args = p.parse_args(argv)
     roots = [Path(x).resolve() for x in args.training_root]
     shared_root = Path(args.shared_plans_root).resolve()
-    for tr in roots:
-        _write_shared_provenance(tr, shared_root)
-        _fingerprint_protocol_artifacts(tr)
+    # Sealing is read-only with respect to completed Stage-1 bundles. Their
+    # provenance/fingerprints were frozen when training finished; rewriting
+    # them here would blur the boundary between training and experiment review.
     report_path = audit.write_report(Path(args.experiment_root), roots)
     seal = protocol.seal_experiment(Path(args.experiment_root), roots, shared_root)
     print(json.dumps({
