@@ -19,6 +19,9 @@ def test_train_wrapper_installs_spawn_safe_protocol_guards(monkeypatch, tmp_path
     def fake_main():
         observed["runtime"] = runtime._solve_process_task
         observed["deterministic"] = science.deterministic_eval_worker
+        observed["flexible_validation"] = (
+            final.FinalSettings.validate is shared.flexible_final_validate
+        )
         observed["tolerance"] = numeric.phi_accounting_tolerance(21074.971248, 21074.9452086)
 
     monkeypatch.setattr(training, "main", fake_main)
@@ -53,6 +56,9 @@ def test_evaluate_wrapper_accepts_registered_bundle_without_seal_and_installs_pr
     def fake_main():
         observed["runtime"] = runtime._solve_process_task
         observed["deterministic"] = science.deterministic_eval_worker
+        observed["flexible_validation"] = (
+            final.FinalSettings.validate is shared.flexible_final_validate
+        )
 
     training_root.mkdir()
     (training_root / "EXPERIMENT_REGISTRY.json").write_text(
@@ -79,6 +85,7 @@ def test_evaluate_wrapper_accepts_registered_bundle_without_seal_and_installs_pr
 
     assert observed["runtime"] is protocol.training_process_task
     assert observed["deterministic"] is protocol.deterministic_eval_worker
+    assert observed["flexible_validation"]
 
 
 def test_protocol_numeric_guard_survives_stage_reinstallation() -> None:
@@ -147,3 +154,35 @@ def test_matrix_replay_coverage_matches_registered_reporter_requests() -> None:
     aliases.pop("POLICY::primary::broader_tolerance::VF")
     with __import__("pytest").raises(RuntimeError, match="missing duration maps"):
         matrix._assert_replay_coverage({"aliases": aliases}, roots)
+
+
+
+def test_matrix_resume_reuses_compatible_legacy_run_sha(monkeypatch, tmp_path) -> None:
+    experiment_root = tmp_path / "experiment"
+    matrix_root = experiment_root / "holdout_matrix"
+    roots = {
+        "primary": tmp_path / "primary",
+        "lower_responsiveness": tmp_path / "lower",
+        "broader_tolerance": tmp_path / "broader",
+    }
+    matrix_root.mkdir(parents=True)
+    old_run = "legacy-run-sha"
+    marker = matrix._matrix_marker_payload(
+        experiment_root, matrix_root, roots, run_sha256=old_run
+    )
+    marker["git_head"] = "legacy-head"
+    matrix._write_json(matrix_root / matrix.START_MARKER, marker)
+
+    seen = {}
+    monkeypatch.setattr(matrix, "_matrix_run_identity", lambda roots: {"new": "identity"})
+    monkeypatch.setattr(
+        matrix,
+        "_assert_checkpoint_semantics_compatible",
+        lambda head: seen.setdefault("head", head),
+    )
+
+    resumed = matrix._start_or_resume(
+        experiment_root, matrix_root, roots, resume=True
+    )
+    assert resumed == old_run
+    assert seen["head"] == "legacy-head"
