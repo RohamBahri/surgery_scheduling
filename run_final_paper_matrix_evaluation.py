@@ -1133,23 +1133,35 @@ def install_replay(matrix_root: Path, run_sha256: str) -> None:
 # Protocol / reporting orchestration
 # ---------------------------------------------------------------------------
 
-def _training_roots_from_experiment(experiment_root: Path) -> dict[str, Path]:
-    report_path = Path(experiment_root) / "COMPARABILITY_REPORT.json"
-    if not report_path.exists():
-        raise RuntimeError(
-            "Matrix evaluation needs COMPARABILITY_REPORT.json to locate training bundles. "
-            "Create it with experiment_audit.write_report or use the regular evaluate command per bundle."
-        )
-    report = _json(report_path)
-    rows = dict(report.get("scenarios", {}))
+def _training_roots_from_args(training_roots: Sequence[str]) -> dict[str, Path]:
     active = [x["name"] for x in protocol.active_scenarios(purpose="train")]
-    missing = [name for name in active if name not in rows or not rows[name].get("training_root")]
-    if missing:
-        raise RuntimeError(f"Comparability report is missing active training roots: {missing}")
-    return {name: Path(rows[name]["training_root"]).resolve() for name in active}
+    out: dict[str, Path] = {}
+    for raw in training_roots:
+        root = Path(raw).resolve()
+        stamp_path = root / "EXPERIMENT_REGISTRY.json"
+        if not stamp_path.exists():
+            raise RuntimeError(f"Training root has no EXPERIMENT_REGISTRY.json: {root}")
+        stamp = _json(stamp_path)
+        row = dict(stamp.get("scenario", {}))
+        name = str(row.get("name", ""))
+        if not name:
+            raise RuntimeError(f"Training root has no scenario name: {root}")
+        if name in out:
+            raise RuntimeError(f"Duplicate training scenario {name!r}: {root}")
+        protocol.validate_registered_parameters(
+            name, float(row["alpha"]), float(row["h"]), purpose="train"
+        )
+        out[name] = root
+    if sorted(out) != sorted(active):
+        raise RuntimeError(
+            f"Matrix evaluation requires exactly the active training scenarios: "
+            f"expected={active}, got={sorted(out)}"
+        )
+    return {name: out[name] for name in active}
 
 
 def _verify_before_holdout(experiment_root: Path, roots: Mapping[str, Path]) -> None:
+    audit.write_report(experiment_root, roots.values())
     for name, root in roots.items():
         hardening.verify_training_finalization(root)
         numeric.verify_training_bundle(root)
@@ -1174,6 +1186,11 @@ def _matrix_marker_payload(
         "matrix_root": str(Path(matrix_root).resolve()),
         "active_scenarios": list(roots),
         "training_roots": {k: str(v) for k, v in roots.items()},
+        "legacy_holdout_markers": {
+            name: protocol.sha256_file(root / "HOLDOUT_EVALUATION_STARTED.json")
+            for name, root in roots.items()
+            if (root / "HOLDOUT_EVALUATION_STARTED.json").exists()
+        },
     }
 
 
@@ -1189,7 +1206,10 @@ def _start_or_resume(
             "registry_sha256": protocol.registry_hash(),
             "amendment_sha256": protocol.amendment_hash(),
             "git_head": protocol.git_head(),
-            "training_bundles": {name: protocol.bundle_hash(root) for name, root in roots.items()},
+            "training_freeze_sha256": {
+                name: protocol.sha256_file(root / "TRAINING_FREEZE.json")
+                for name, root in roots.items()
+            },
         }
     )
     marker_path = Path(matrix_root) / START_MARKER
@@ -1238,10 +1258,133 @@ def _report_all(
             "--cores",
             str(int(cores)),
         ]
-        started = training_root / "HOLDOUT_EVALUATION_STARTED.json"
-        if started.exists():
-            argv.append("--resume")
         wrapper._evaluate(argv)
+
+
+def _assert_replay_coverage(precompute: Mapping[str, Any], roots: Mapping[str, Path]) -> None:
+    aliases = set(dict(precompute.get("aliases", {})))
+    responses = [x["name"] for x in protocol.active_scenarios(purpose="evaluate")]
+    expected = {"BOOKED"}
+    expected.update(f"PROJECTED::{response}" for response in responses)
+    for train in roots:
+        for response in responses:
+            for method in METHODS:
+                expected.add(f"POLICY::{train}::{response}::{method}")
+    missing = sorted(expected - aliases)
+    if missing:
+        raise RuntimeError(
+            f"Matrix precompute is missing duration maps required by reporting: {missing}"
+        )
+
+
+def _aggregate_matrix_outputs(
+    experiment_root: Path,
+    matrix_root: Path,
+    roots: Mapping[str, Path],
+) -> None:
+    import pandas as pd
+
+    responses = [x["name"] for x in protocol.active_scenarios(purpose="evaluate")]
+    pieces = []
+    oracle_rows = []
+
+    for train_name in roots:
+        eval_root = Path(matrix_root) / "evaluations" / train_name
+        diag_path = eval_root / "RESPONSE_MATRIX_DIAGONAL_WEEKLY.csv"
+        off_path = eval_root / "RESPONSE_MATRIX_OFFDIAGONAL_WEEKLY.csv"
+        if not diag_path.exists() or not off_path.exists():
+            raise RuntimeError(
+                f"Matrix reporting for {train_name} is incomplete: "
+                f"missing diagonal/off-diagonal weekly output"
+            )
+
+        diag = pd.read_csv(diag_path)
+        off = pd.read_csv(off_path)
+        oracle_rows.append(diag[diag["method"] == "ORACLE"].copy())
+        pieces.append(diag)
+
+        if len(off):
+            pieces.append(off)
+
+        # BOOKED is response-independent and the off-diagonal runner deliberately
+        # does not re-solve it. Replicate its diagonal result into each response
+        # column so the matrix is rectangular.
+        booked = diag[diag["method"] == "BOOKED"].copy()
+        for response in responses:
+            if response == train_name:
+                continue
+            b = booked.copy()
+            b["response_scenario"] = response
+            pieces.append(b)
+
+    weekly = pd.concat(pieces, ignore_index=True, sort=False)
+    oracle = pd.concat(oracle_rows, ignore_index=True, sort=False)
+    if oracle.empty:
+        raise RuntimeError("No ORACLE rows were produced for the matrix")
+
+    # The realized-duration oracle is common to every row. Use the strongest
+    # valid experiment-wide lower bound and the best realized feasible cost
+    # observed anywhere in the full matrix to form one common regret bracket.
+    oracle_lb = (
+        oracle.groupby("week")["planning_bound_phi"].max().astype(float).to_dict()
+    )
+    global_ub = {}
+    for wk, frame in weekly.groupby("week"):
+        vals = [float(x) for x in frame["realized_cost"].dropna().tolist()]
+        if not vals:
+            raise RuntimeError(f"No realized cost available for matrix week {wk}")
+        global_ub[int(wk)] = min(vals)
+
+    weekly["oracle_lb_phi"] = weekly["week"].map(oracle_lb)
+    weekly["oracle_ub_effective_phi"] = weekly["week"].map(global_ub)
+    weekly["regret_lower"] = (
+        weekly["realized_cost"] - weekly["oracle_ub_effective_phi"]
+    ).clip(lower=0.0)
+    weekly["regret_upper"] = (
+        weekly["realized_cost"] - weekly["oracle_lb_phi"]
+    ).clip(lower=0.0)
+
+    group_cols = ["training_scenario", "response_scenario", "method"]
+    summary = (
+        weekly.groupby(group_cols, as_index=False)
+        .agg(
+            avg_realized_cost=("realized_cost", "mean"),
+            avg_regret_lower=("regret_lower", "mean"),
+            avg_regret_upper=("regret_upper", "mean"),
+            max_planning_gap_native_psi=("planning_gap_native_psi", "max"),
+        )
+    )
+    summary["avg_regret_mid"] = 0.5 * (
+        summary["avg_regret_lower"] + summary["avg_regret_upper"]
+    )
+
+    summary["gap_closed_lower_pct"] = np.nan
+    summary["gap_closed_upper_pct"] = np.nan
+    for (train, response), idx in summary.groupby(
+        ["training_scenario", "response_scenario"]
+    ).groups.items():
+        sub = summary.loc[idx]
+        booked = sub[sub["method"] == "BOOKED"]
+        if booked.empty:
+            continue
+        blo = max(1e-9, float(booked.iloc[0]["avg_regret_lower"]))
+        bhi = max(1e-9, float(booked.iloc[0]["avg_regret_upper"]))
+        summary.loc[idx, "gap_closed_lower_pct"] = [
+            100.0 * (1.0 - float(v) / blo) if blo > 1e-8 else np.nan
+            for v in sub["avg_regret_upper"]
+        ]
+        summary.loc[idx, "gap_closed_upper_pct"] = [
+            100.0 * (1.0 - float(v) / bhi) if bhi > 1e-8 else np.nan
+            for v in sub["avg_regret_lower"]
+        ]
+
+    matrix_weekly = Path(matrix_root) / "RESPONSE_MATRIX_WEEKLY.csv"
+    matrix_summary = Path(matrix_root) / "RESPONSE_MATRIX_SUMMARY.csv"
+    weekly.to_csv(matrix_weekly, index=False)
+    summary.to_csv(matrix_summary, index=False)
+    weekly.to_csv(Path(experiment_root) / "RESPONSE_MATRIX_WEEKLY.csv", index=False)
+    summary.to_csv(Path(experiment_root) / "RESPONSE_MATRIX_SUMMARY.csv", index=False)
+
 
 
 def _finish(
@@ -1267,6 +1410,12 @@ def _finish(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--experiment-root", required=True)
+    p.add_argument(
+        "--training-root",
+        action="append",
+        required=True,
+        help="Completed training bundle root; pass once for each active scenario.",
+    )
     p.add_argument("--data", default="data/UHNOperating_RoomScheduling2011-2013.xlsx")
     p.add_argument("--cores", type=int, default=15)
     p.add_argument("--resume", action="store_true")
@@ -1289,7 +1438,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     protocol.install_behavioral_protocol()
     release.install_reviewed_guards()
 
-    roots = _training_roots_from_experiment(experiment_root)
+    roots = _training_roots_from_args(args.training_root)
     _verify_before_holdout(experiment_root, roots)
     run_sha = _start_or_resume(
         experiment_root, matrix_root, roots, resume=bool(args.resume)
@@ -1347,6 +1496,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             pre["unique_duration_maps"],
             pre["exact_deduplications"],
         )
+        _assert_replay_coverage(pre, roots)
 
         _report_all(
             experiment_root,
@@ -1356,6 +1506,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             cores=int(s.cores),
             run_sha256=run_sha,
         )
+        _aggregate_matrix_outputs(experiment_root, matrix_root, roots)
         _finish(experiment_root, matrix_root, roots, run_sha256=run_sha)
         base.LOG.info("[DONE] pooled checkpointed holdout matrix evaluation complete")
     except Exception as exc:
