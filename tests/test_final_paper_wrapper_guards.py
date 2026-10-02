@@ -8,6 +8,7 @@ import final_paper_scientific_fixes as science
 import final_paper_shared_plans as shared
 import run_final_paper as wrapper
 import run_final_paper_evaluation as evaluation
+import run_final_paper_matrix_evaluation as matrix
 import run_final_paper_experiment as final
 import run_final_paper_training as training
 
@@ -125,3 +126,24 @@ def test_evaluation_bundle_verifier_accepts_compatible_older_training_head(monke
     assert seen["head"] == "older-compatible-head"
 
 
+
+
+def test_matrix_replay_coverage_matches_registered_reporter_requests() -> None:
+    roots = {
+        "primary": __import__("pathlib").Path("/tmp/primary"),
+        "lower_responsiveness": __import__("pathlib").Path("/tmp/lower"),
+        "broader_tolerance": __import__("pathlib").Path("/tmp/broader"),
+    }
+    responses = ["primary", "lower_responsiveness", "broader_tolerance"]
+    aliases = {"BOOKED": "b"}
+    aliases.update({f"PROJECTED::{r}": f"p-{r}" for r in responses})
+    for train in roots:
+        for response in responses:
+            for method in matrix.METHODS:
+                aliases[f"POLICY::{train}::{response}::{method}"] = "x"
+
+    matrix._assert_replay_coverage({"aliases": aliases}, roots)
+
+    aliases.pop("POLICY::primary::broader_tolerance::VF")
+    with __import__("pytest").raises(RuntimeError, match="missing duration maps"):
+        matrix._assert_replay_coverage({"aliases": aliases}, roots)
