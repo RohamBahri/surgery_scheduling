@@ -2,9 +2,9 @@
 """Stage 2: one-shot evaluation of the accepted Stage-1 policy bundle.
 
 This program never trains a policy.  It verifies the frozen Stage-1 artifacts,
-requires the exact clean Git commit used for training, writes a consumption
-marker before loading/materializing holdout data, then evaluates the exact frozen
-policies once.
+requires a clean evaluation commit with training mathematics byte-identical to
+the commit that produced the frozen policies, writes a consumption marker before
+loading/materializing holdout data, then evaluates the exact frozen policies once.
 
 Final policy schedules use deterministic Gurobi WorkLimit with one solver thread,
 a fixed seed and predecision model ordering.  A wall-clock TimeLimit is retained
@@ -27,6 +27,7 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+import experiment_protocol as protocol
 import final_paper_runtime_fixes as fixes
 import final_paper_scientific_fixes as science
 import run_final_paper_experiment as final
@@ -83,11 +84,7 @@ def _verify_training_bundle(root: Path) -> dict:
         raise RuntimeError("Training scientific-spec version does not match this evaluator")
     if freeze.get("runtime_fixes_version") != fixes.RUNTIME_FIXES_VERSION:
         raise RuntimeError("Training runtime-fix version does not match this evaluator")
-    if freeze.get("git_head") != base.git_head():
-        raise RuntimeError(
-            f"Git HEAD differs from frozen training code: current={base.git_head()} "
-            f"frozen={freeze.get('git_head')}. Run Stage 2 from a git worktree at the frozen commit."
-        )
+    protocol.assert_training_math_compatible(str(freeze.get("git_head", "")))
     if _tracked_tree_is_dirty():
         raise RuntimeError("Tracked evaluation source is modified; Stage 2 requires a clean frozen worktree")
     for name, expected in dict(freeze.get("artifact_fingerprints", {})).items():
