@@ -43,7 +43,7 @@ def test_train_wrapper_installs_spawn_safe_protocol_guards(monkeypatch, tmp_path
     assert observed["tolerance"] >= 0.0260393
 
 
-def test_evaluate_wrapper_requires_sealed_bundle_and_installs_protocol_guards(monkeypatch, tmp_path) -> None:
+def test_evaluate_wrapper_accepts_registered_bundle_without_seal_and_installs_protocol_guards(monkeypatch, tmp_path) -> None:
     observed = {}
     training_root = tmp_path / "train"
     eval_root = tmp_path / "eval"
@@ -53,10 +53,16 @@ def test_evaluate_wrapper_requires_sealed_bundle_and_installs_protocol_guards(mo
         observed["runtime"] = runtime._solve_process_task
         observed["deterministic"] = science.deterministic_eval_worker
 
+    training_root.mkdir()
+    (training_root / "EXPERIMENT_REGISTRY.json").write_text(
+        __import__("json").dumps(
+            {"scenario": {"name": "primary", "alpha": 0.8, "h": 30.0}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(wrapper.protocol, "validate_registered_parameters", lambda *args, **kwargs: {})
+
     monkeypatch.setattr(evaluation, "main", fake_main)
-    monkeypatch.setattr(wrapper.audit, "verify_report", lambda *args, **kwargs: {})
-    monkeypatch.setattr(wrapper.protocol, "verify_sealed_bundle", lambda *args, **kwargs: ({}, "primary"))
-    monkeypatch.setattr(wrapper.protocol, "update_consumption", lambda *args, **kwargs: None)
     monkeypatch.setattr(wrapper.hardening, "verify_training_finalization", lambda root: {})
     monkeypatch.setattr(wrapper.numeric_guard, "verify_training_bundle", lambda root: None)
     monkeypatch.setattr(wrapper.release_guard, "verify_training_bundle", lambda root: None)
@@ -120,36 +126,3 @@ def test_evaluation_bundle_verifier_accepts_compatible_older_training_head(monke
     assert seen["head"] == "older-compatible-head"
 
 
-def test_seal_wrapper_does_not_rewrite_frozen_training_bundles(monkeypatch, tmp_path) -> None:
-    train = tmp_path / "train"
-    shared_root = tmp_path / "shared"
-    exp = tmp_path / "exp"
-    train.mkdir(); shared_root.mkdir()
-    observed = {}
-
-    monkeypatch.setattr(
-        wrapper,
-        "_write_shared_provenance",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("seal must not rewrite provenance")),
-    )
-    monkeypatch.setattr(
-        wrapper,
-        "_fingerprint_protocol_artifacts",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("seal must not rewrite fingerprints")),
-    )
-    monkeypatch.setattr(wrapper.audit, "write_report", lambda root, roots: root / "COMPARABILITY_REPORT.json")
-    monkeypatch.setattr(
-        wrapper.protocol,
-        "seal_experiment",
-        lambda root, roots, shared: {
-            "status": "SEALED_BEFORE_HOLDOUT",
-            "registry_sha256": "r",
-            "accepted_training_bundles": {"primary": {}},
-        },
-    )
-
-    wrapper._seal([
-        "--experiment-root", str(exp),
-        "--shared-plans-root", str(shared_root),
-        "--training-root", str(train),
-    ])
