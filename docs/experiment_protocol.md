@@ -77,20 +77,23 @@ in force, but they do not prevent additional holdout analysis.
 
 ## Holdout evaluation
 
-Evaluate each sealed training row from the exact sealed commit. Example:
+Use the pooled matrix runner for the paper evaluation:
 
 ```bash
-python run_final_paper.py evaluate \
+python run_final_paper.py matrix \
   --experiment-root artifacts/experiment_v1 \
+  --training-root artifacts/train_primary \
+  --training-root artifacts/train_lower_responsiveness \
+  --training-root artifacts/train_broader_tolerance \
   --data data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --training-artifact-root artifacts/train_primary \
-  --artifact-root artifacts/eval_primary \
   --cores 15
 ```
 
-The evaluator automatically evaluates every registered response column. The diagonal uses the normal primary evaluation; off-diagonal conditions use the same 1200-work-unit / 0.05% protocol. The experiment-level holdout cache reuses identical realized-oracle and BOOKED solves across training rows and reuses projected benchmarks when the response condition/provenance is identical. Cached bounds are never reused on a provenance mismatch.
+The matrix engine solves the realized oracle and BOOKED map once, deduplicates exactly identical duration maps, checkpoints every completed week/map job, and replays those checkpoints through the reviewed Stage-2 reporting code. The row-by-row `evaluate` command remains available for individual repeatable evaluations, but it is not the efficient engine for the paper response matrix.
 
-If a matrix evaluation is interrupted, rerun the same matrix command with `--resume`; compatible completed week/map checkpoints are reused. A fresh evaluation can also be started intentionally because holdout access is not a one-shot lock.\n\nThe matrix runner writes combined `RESPONSE_MATRIX_WEEKLY.csv` and `RESPONSE_MATRIX_SUMMARY.csv` under both the experiment root and `holdout_matrix/`, using one experiment-wide oracle bracket for cross-row comparisons.
+If a matrix evaluation is interrupted, rerun the same matrix command with `--resume`. Compatible completed week/map checkpoints are reused even across provenance-only commits when the solver-relevant mathematical source is unchanged. A fresh evaluation can also be started intentionally because holdout access is not a one-shot lock.
+
+The matrix runner writes combined `RESPONSE_MATRIX_WEEKLY.csv` and `RESPONSE_MATRIX_SUMMARY.csv` under both the experiment root and `holdout_matrix/`, using one experiment-wide oracle bracket for cross-row comparisons.
 
 ## Numerical accounting
 
@@ -100,4 +103,4 @@ The exact reconstructed assignment is independently reevaluated and that feasibl
 min(0.5, max(0.1, 2e-6 * scale))
 ```
 
-where `scale=max(1, |recomputed Phi|, |solver-summed Phi|)`. This accepts both observed solver-feasibility roundoff failures from the long Stage-1 runs while a one-cost-unit discrepancy still fails. The 0.5 cap is far below the 10-per-minute idle-cost quantum.
+where `scale=max(1, |recomputed Phi|, |solver-summed Phi|)`. Under the current numeric policy, finite solver-versus-reconstruction differences are diagnostic warnings rather than live kill switches; the independently recomputed feasible Phi is authoritative. Certificate validity is protected separately by rejecting a solver lower bound that exceeds the feasible objective beyond numerical tolerance.
