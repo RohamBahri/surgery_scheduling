@@ -94,3 +94,62 @@ def test_protocol_numeric_guard_survives_stage_reinstallation() -> None:
     numeric.assert_phi_accounting_close(21074.0, 21073.0, context="material-diagnostic")
     with __import__("pytest").raises(AssertionError, match="lower bound exceeds"):
         numeric.assert_lower_bound_valid(1000.0, 1001.0, context="invalid-certificate")
+
+
+def test_evaluation_bundle_verifier_accepts_compatible_older_training_head(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "train"
+    root.mkdir()
+    freeze = {
+        "status": "TRAINING_COMPLETE_HOLDOUT_LOCKED",
+        "scientific_spec_version": science.SCIENTIFIC_SPEC_VERSION,
+        "runtime_fixes_version": runtime.RUNTIME_FIXES_VERSION,
+        "git_head": "older-compatible-head",
+        "artifact_fingerprints": {},
+    }
+    (root / "TRAINING_FREEZE.json").write_text(__import__("json").dumps(freeze), encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(
+        evaluation.protocol,
+        "assert_training_math_compatible",
+        lambda head: seen.setdefault("head", head) or {},
+    )
+    monkeypatch.setattr(evaluation, "_tracked_tree_is_dirty", lambda: False)
+
+    out = evaluation._verify_training_bundle(root)
+    assert out["git_head"] == "older-compatible-head"
+    assert seen["head"] == "older-compatible-head"
+
+
+def test_seal_wrapper_does_not_rewrite_frozen_training_bundles(monkeypatch, tmp_path) -> None:
+    train = tmp_path / "train"
+    shared_root = tmp_path / "shared"
+    exp = tmp_path / "exp"
+    train.mkdir(); shared_root.mkdir()
+    observed = {}
+
+    monkeypatch.setattr(
+        wrapper,
+        "_write_shared_provenance",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("seal must not rewrite provenance")),
+    )
+    monkeypatch.setattr(
+        wrapper,
+        "_fingerprint_protocol_artifacts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("seal must not rewrite fingerprints")),
+    )
+    monkeypatch.setattr(wrapper.audit, "write_report", lambda root, roots: root / "COMPARABILITY_REPORT.json")
+    monkeypatch.setattr(
+        wrapper.protocol,
+        "seal_experiment",
+        lambda root, roots, shared: {
+            "status": "SEALED_BEFORE_HOLDOUT",
+            "registry_sha256": "r",
+            "accepted_training_bundles": {"primary": {}},
+        },
+    )
+
+    wrapper._seal([
+        "--experiment-root", str(exp),
+        "--shared-plans-root", str(shared_root),
+        "--training-root", str(train),
+    ])
