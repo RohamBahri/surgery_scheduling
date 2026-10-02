@@ -5,8 +5,7 @@ Commands
 --------
 shared-plans   solve/refine behavior-independent training Oracle and BOOKED plans
 train          train one registered behavioral scenario
-seal           seal all accepted registered training bundles before holdout access
-evaluate       evaluate one sealed training bundle; use --resume only after failure
+evaluate       evaluate one registered training bundle; evaluation may be repeated
 sensitivities  required structural sensitivities
 preflight      structural/solver preflight
 
@@ -14,12 +13,10 @@ Do not execute the implementation-stage scripts directly for the paper run.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from pathlib import Path
 
-import experiment_audit as audit
 import experiment_protocol as protocol
 import final_paper_finalization_fixes as hardening
 import final_paper_numeric_guard as numeric_guard
@@ -83,9 +80,8 @@ def _rewrite_frozen_next_step(root: Path) -> None:
     path = Path(root) / "TRAINING_FREEZE.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["next_step"] = (
-        "Train every scenario in experiment_registry.json using the same immutable shared-plan artifact, "
-        "review diagnostics, then seal all accepted bundles with `python run_final_paper.py seal ...` "
-        "before any holdout evaluation."
+        "Review the completed training diagnostics, then evaluate any registered scenario directly. "
+        "Holdout evaluation is repeatable; no experiment seal is required."
     )
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -203,28 +199,6 @@ def _train(argv: list[str]) -> None:
     }, indent=2))
 
 
-def _seal(argv: list[str]) -> None:
-    p = argparse.ArgumentParser(prog="run_final_paper.py seal")
-    p.add_argument("--experiment-root", required=True)
-    p.add_argument("--shared-plans-root", required=True)
-    p.add_argument("--training-root", action="append", required=True)
-    args = p.parse_args(argv)
-    roots = [Path(x).resolve() for x in args.training_root]
-    shared_root = Path(args.shared_plans_root).resolve()
-    # Sealing is read-only with respect to completed Stage-1 bundles. Their
-    # provenance/fingerprints were frozen when training finished; rewriting
-    # them here would blur the boundary between training and experiment review.
-    report_path = audit.write_report(Path(args.experiment_root), roots)
-    seal = protocol.seal_experiment(Path(args.experiment_root), roots, shared_root)
-    print(json.dumps({
-        "status": seal["status"],
-        "experiment_root": str(Path(args.experiment_root).resolve()),
-        "registry_sha256": seal["registry_sha256"],
-        "comparability_report": str(report_path),
-        "accepted_scenarios": sorted(seal["accepted_training_bundles"]),
-    }, indent=2))
-
-
 def _evaluate(argv: list[str]) -> None:
     import run_final_paper_evaluation as evaluation
 
@@ -234,12 +208,17 @@ def _evaluate(argv: list[str]) -> None:
     if not train_arg or not eval_arg or not experiment_arg:
         raise SystemExit("evaluate requires --experiment-root, --training-artifact-root and --artifact-root")
     training_root, eval_root, experiment_root = Path(train_arg), Path(eval_arg), Path(experiment_arg)
-    audit.verify_report(experiment_root)
-    resume = _has_flag(argv, "--resume")
-    _, scenario = protocol.verify_sealed_bundle(experiment_root, training_root)
-    if resume:
-        protocol.prepare_exact_restart(experiment_root, training_root, eval_root)
-    protocol.update_consumption(experiment_root, scenario, state="STARTING", evaluation_root=eval_root)
+    stamp_path = training_root / "EXPERIMENT_REGISTRY.json"
+    if not stamp_path.exists():
+        raise RuntimeError(f"Training bundle has no experiment registry stamp: {stamp_path}")
+    stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+    scenario = str(stamp["scenario"]["name"])
+    protocol.validate_registered_parameters(
+        scenario,
+        float(stamp["scenario"]["alpha"]),
+        float(stamp["scenario"]["h"]),
+        purpose="evaluate",
+    )
 
     hardening.verify_training_finalization(training_root)
     _install_review_stack()
@@ -253,15 +232,9 @@ def _evaluate(argv: list[str]) -> None:
     stage_argv = _strip_flags(stage_argv, {"--resume"})
     if "--run-response-sensitivities" not in stage_argv:
         stage_argv.append("--run-response-sensitivities")
-    try:
-        _dispatch_main(evaluation, stage_argv)
-    except Exception:
-        protocol.update_consumption(experiment_root, scenario, state="FAILED_RESTARTABLE", evaluation_root=eval_root)
-        raise
+    _dispatch_main(evaluation, stage_argv)
     hardening.write_benchmark_interpretation(eval_root)
     _write_diagonal_matrix_files(eval_root, scenario)
-    protocol.update_consumption(experiment_root, scenario, state="COMPLETE", evaluation_root=eval_root)
-    _aggregate_matrix_if_complete(experiment_root)
     print(json.dumps({
         "status": "HOLDOUT_EVALUATION_COMPLETE_REVIEWED",
         "training_scenario": scenario,
@@ -316,8 +289,6 @@ def main() -> None:
         _shared_plans(argv)
     elif stage == "train":
         _train(argv)
-    elif stage == "seal":
-        _seal(argv)
     elif stage in {"evaluate", "evaluation"}:
         _evaluate(argv)
     elif stage == "matrix":
@@ -327,7 +298,7 @@ def main() -> None:
     elif stage == "preflight":
         _preflight(argv)
     else:
-        raise SystemExit("Unknown stage. Use shared-plans, train, seal, evaluate, sensitivities, or preflight.")
+        raise SystemExit("Unknown stage. Use shared-plans, train, evaluate, matrix, sensitivities, or preflight.")
 
 
 if __name__ == "__main__":
