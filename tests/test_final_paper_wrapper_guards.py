@@ -69,7 +69,6 @@ def test_evaluate_wrapper_accepts_registered_bundle_without_seal_and_installs_pr
     monkeypatch.setattr(wrapper.shared, "verify_shared_plan_provenance", lambda root: None)
     monkeypatch.setattr(wrapper.hardening, "write_benchmark_interpretation", lambda root: None)
     monkeypatch.setattr(wrapper, "_write_diagonal_matrix_files", lambda *args, **kwargs: None)
-    monkeypatch.setattr(wrapper, "_aggregate_matrix_if_complete", lambda *args, **kwargs: None)
 
     wrapper._evaluate([
         "--experiment-root", str(experiment_root),
