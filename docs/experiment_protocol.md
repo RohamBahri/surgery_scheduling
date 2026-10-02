@@ -68,21 +68,12 @@ Repeat for `lower_responsiveness`, `narrower_tolerance`, and `broader_tolerance`
 
 All registered scenarios use the same declared Stage-1 wall budget/stopping rules. Different VF iteration counts or termination reasons do not automatically invalidate comparisons; they are recorded as budget-limited algorithm outcomes and are not convergence/optimality certificates.
 
-## Pre-holdout seal
+## Evaluation policy
 
-After reviewing all four training bundles, seal the experiment **before any holdout evaluation**:
-
-```bash
-python run_final_paper.py seal \
-  --experiment-root artifacts/experiment_v1 \
-  --shared-plans-root artifacts/shared_plans_v2 \
-  --training-root artifacts/train_primary \
-  --training-root artifacts/train_lower_responsiveness \
-  --training-root artifacts/train_narrower_tolerance \
-  --training-root artifacts/train_broader_tolerance
-```
-
-Sealing requires a clean tracked tree, the same Git commit for all bundles, the same shared-plan manifest, the committed registry hash, and matching data/features/regularization/settings invariants. It writes `COMPARABILITY_REPORT.json`, `EXPERIMENT_SEAL.json`, and `EXPERIMENT_CONSUMPTION.json`. After sealing, additions/substitutions are forbidden.
+There is no pre-holdout seal and no single-consumption rule. Completed training
+bundles may be evaluated repeatedly, including after inspecting earlier holdout
+results. Scientific provenance and training-bundle compatibility checks remain
+in force, but they do not prevent additional holdout analysis.
 
 ## Holdout evaluation
 
@@ -99,7 +90,7 @@ python run_final_paper.py evaluate \
 
 The evaluator automatically evaluates every registered response column. The diagonal uses the normal primary evaluation; off-diagonal conditions use the same 1200-work-unit / 0.05% protocol. The experiment-level holdout cache reuses identical realized-oracle and BOOKED solves across training rows and reuses projected benchmarks when the response condition/provenance is identical. Cached bounds are never reused on a provenance mismatch.
 
-If an evaluation fails after holdout consumption starts, use `--resume` with the **same** sealed training bundle and **same** evaluation directory. The restart mechanism rejects substitutions and rebuilds the failed output deterministically from the same frozen inputs.
+If an evaluation fails after holdout consumption starts, use `--resume` with the **same** training bundle and **same** evaluation directory. The restart mechanism rejects substitutions and rebuilds the failed output deterministically from the same frozen inputs.
 
 After every registered training row completes, the coordinator writes the combined `RESPONSE_MATRIX_SUMMARY.csv` under the experiment root.
 
