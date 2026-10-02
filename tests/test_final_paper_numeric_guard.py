@@ -82,3 +82,28 @@ def test_supported_crossfit_has_no_penalty_futurewarning() -> None:
     assert np.isfinite(metrics["brier"])
     penalty_warnings = [w for w in caught if issubclass(w.category, FutureWarning) and "penalty" in str(w.message).lower()]
     assert not penalty_warnings
+
+
+def test_verify_training_bundle_accepts_reviewed_legacy_v5(tmp_path) -> None:
+    root = tmp_path
+    note = root / "NUMERIC_GUARD.json"
+    note.write_text('{"version":"phi_accounting_2026_09_25_v5"}', encoding="utf-8")
+    freeze = {
+        "numeric_guard_version": "phi_accounting_2026_09_25_v5",
+        "artifact_fingerprints": {"NUMERIC_GUARD.json": base.sha256_file(note)},
+    }
+    (root / "TRAINING_FREEZE.json").write_text(__import__("json").dumps(freeze), encoding="utf-8")
+    guard.verify_training_bundle(root)
+
+
+def test_verify_training_bundle_rejects_unknown_numeric_guard(tmp_path) -> None:
+    root = tmp_path
+    note = root / "NUMERIC_GUARD.json"
+    note.write_text('{"version":"unknown"}', encoding="utf-8")
+    freeze = {
+        "numeric_guard_version": "unknown",
+        "artifact_fingerprints": {"NUMERIC_GUARD.json": base.sha256_file(note)},
+    }
+    (root / "TRAINING_FREEZE.json").write_text(__import__("json").dumps(freeze), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unreviewed numeric-accounting guard"):
+        guard.verify_training_bundle(root)
