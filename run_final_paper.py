@@ -65,6 +65,7 @@ def _dispatch_main(module, argv: list[str]) -> None:
 
 
 def _install_review_stack() -> None:
+    shared.install_flexible_behavior_validation()
     shared.install_spawn_safe_weekly_logging()
     protocol.install_numeric_policy()
     protocol.install_behavioral_protocol()
