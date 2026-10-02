@@ -15,7 +15,7 @@ import final_paper_resilience as resilience
 # their runtime hooks.
 resilience.install()
 
-AUDIT_VERSION = "experiment_comparability_2026_09_30_v3"
+AUDIT_VERSION = "experiment_comparability_2026_10_01_v4"
 
 
 def _json(path: Path) -> Any:
@@ -32,6 +32,24 @@ def _settings_signature(root: Path) -> str:
     for key in ("alpha", "h", "artifact_root", "verbose", "data"):
         settings.pop(key, None)
     return _canonical_hash(settings)
+
+
+def _json_signature_ignoring(root: Path, name: str, ignored: tuple[str, ...]) -> str:
+    payload = dict(_json(root / name))
+    for key in ignored:
+        payload.pop(key, None)
+    return _canonical_hash(payload)
+
+
+def _data_freeze_signature(root: Path) -> str:
+    # git_head is provenance only. The cohort/split/data hashes remain frozen.
+    return _json_signature_ignoring(root, "DATA_FREEZE.json", ("git_head",))
+
+
+def _shared_plan_provenance_signature(root: Path) -> str:
+    # The same immutable shared-plan manifest may be consumed by compatible
+    # later commits; only the consuming git_head changes.
+    return _json_signature_ignoring(root, "SHARED_PLAN_PROVENANCE.json", ("git_head",))
 
 
 def _regularization_signature(root: Path) -> str:
@@ -115,6 +133,8 @@ def validate_training_comparability(training_roots: Iterable[Path]) -> dict[str,
     invariant_sets: dict[str, set[str]] = {
         "data_freeze": set(),
         "feature_manifest": set(),
+        "scientific_spec": set(),
+        "sensitivity_plan": set(),
         "regularization_rule": set(),
         "settings_except_scenario": set(),
         "shared_plan_provenance": set(),
@@ -123,11 +143,13 @@ def validate_training_comparability(training_roots: Iterable[Path]) -> dict[str,
         stamp = _json(root / "EXPERIMENT_REGISTRY.json")
         name = str(stamp["scenario"]["name"])
         hashes = {
-            "data_freeze": protocol.sha256_file(root / "DATA_FREEZE.json"),
+            "data_freeze": _data_freeze_signature(root),
             "feature_manifest": protocol.sha256_file(root / "FEATURE_MANIFEST.json"),
+            "scientific_spec": protocol.sha256_file(root / "SCIENTIFIC_SPEC.json"),
+            "sensitivity_plan": protocol.sha256_file(root / "SENSITIVITY_PLAN.json"),
             "regularization_rule": _regularization_signature(root),
             "settings_except_scenario": _settings_signature(root),
-            "shared_plan_provenance": protocol.sha256_file(root / "SHARED_PLAN_PROVENANCE.json"),
+            "shared_plan_provenance": _shared_plan_provenance_signature(root),
         }
         for key, value in hashes.items():
             invariant_sets[key].add(value)
