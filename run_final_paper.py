@@ -234,6 +234,10 @@ def _sensitivities(argv: list[str]) -> None:
     shared.verify_shared_plan_provenance(Path(train_arg))
     hardening.install_sensitivity_fixes(runner)
     _install_review_stack()
+    # The sensitivity hardening hook installs the legacy robust worker first.
+    # Re-select the reviewed numeric worker last so finite solver-vs-recomputed
+    # Phi roundoff remains diagnostic, exactly as in the matrix evaluator.
+    release_guard.install_reviewed_guards(sensitivity_runner_module=runner)
     _dispatch_main(runner, argv)
     print(json.dumps({"status": "REQUIRED_SENSITIVITIES_COMPLETE_REVIEWED", "artifact_root": str(Path(root_arg).resolve())}, indent=2))
 
