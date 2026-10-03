@@ -9,6 +9,7 @@ import final_paper_shared_plans as shared
 import run_final_paper as wrapper
 import run_final_paper_evaluation as evaluation
 import run_final_paper_matrix_evaluation as matrix
+import run_final_paper_required_sensitivities as sensitivity_runner
 import run_final_paper_experiment as final
 import run_final_paper_training as training
 
@@ -186,3 +187,30 @@ def test_matrix_resume_reuses_compatible_legacy_run_sha(monkeypatch, tmp_path) -
     )
     assert resumed == old_run
     assert seen["head"] == "legacy-head"
+
+
+
+def test_sensitivity_wrapper_reselects_numeric_worker_last(monkeypatch, tmp_path) -> None:
+    train_root = tmp_path / "train"
+    out_root = tmp_path / "sens"
+    observed = {}
+
+    monkeypatch.setattr(wrapper.hardening, "verify_training_finalization", lambda root: {})
+    monkeypatch.setattr(wrapper.numeric_guard, "verify_training_bundle", lambda root: None)
+    monkeypatch.setattr(wrapper.release_guard, "verify_training_bundle", lambda root: None)
+    monkeypatch.setattr(wrapper.shared, "verify_shared_plan_provenance", lambda root: None)
+
+    def fake_dispatch(module, argv):
+        observed["module"] = module
+        observed["worker"] = sensitivity_runner.sensitivity._worker
+
+    monkeypatch.setattr(wrapper, "_dispatch_main", fake_dispatch)
+
+    wrapper._sensitivities([
+        "--training-artifact-root", str(train_root),
+        "--primary-evaluation-root", str(tmp_path / "eval"),
+        "--artifact-root", str(out_root),
+    ])
+
+    assert observed["module"] is sensitivity_runner
+    assert observed["worker"] is numeric.sensitivity_worker
