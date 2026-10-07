@@ -1,32 +1,14 @@
-# generated artifacts
-/artifacts/
-*.zip
-
-# local data only
+/results/
 /data/
-/data/raw/
-/data/interim/
-/data/private/
-*figures/
-
-# logs and debug
+/artifacts/
+*.xlsx
+*.pkl
+*.sqlite*
 *.log
-debug_*.lp
-debug_*.sol
-
-# python / tooling
+*.zip
 __pycache__/
 *.py[cod]
 .pytest_cache/
-venv/
-*.env
-.vscode/
-.idea/
-.ipynb_checkpoints/
-*.patch
 *.egg-info/
-*.egg
-*.bak
-
-# temporary files
-tmp*.*
+.venv/
+.env
