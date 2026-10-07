@@ -1,8 +1,11 @@
 """A resumable experiment for the single UHN workbook."""
 import argparse
+from concurrent.futures.process import BrokenProcessPool
 import hashlib
 import logging
+import os
 import pickle
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -13,9 +16,9 @@ import pandas as pd
 
 from .data import COLUMNS, GROUPS, SCENARIOS, Encoder, build_cohort, build_days
 from .learning import fit_policy, penalty, project, train_shift, train_vf
-from .planner import display_and_duration, metrics, model, optimize, response_oracle, solve_day
+from .planner import display_and_duration, metrics, model, optimize, plan_job, response_oracle, solve_day
 from .reporting import METHODS, historical_checks, summarize
-from .storage import Store, digest, write_json
+from .storage import Store, digest, map_days, write_json
 
 LOG = logging.getLogger('surgery')
 
@@ -95,19 +98,23 @@ def license_check(store, threads):
     return result
 
 
+def seed_day(day, args, store=None):
+    booked = solve_day(day, day.booked, store, seconds=args.seconds, threads=args.threads, tie=args.tie)
+    actual = solve_day(day, day.actual, store, seconds=args.seconds, threads=args.threads,
+                       tie=args.tie, primary_only=True, warm_start=booked.get('assignment'))
+    return day.key, {'booked': booked, 'actual': actual}
+
+
 def seeds_for(days, store, args):
     seeds = {}
-    for i, day in enumerate(days):
-        booked = solve_day(day, day.booked, store, seconds=args.seconds, threads=args.threads, tie=args.tie)
-        actual = solve_day(day, day.actual, store, seconds=args.seconds, threads=args.threads,
-                           tie=args.tie, warm_start=booked.get('assignment'))
-        seeds[day.key] = {'booked': booked, 'actual': actual}
+    for i, (key, result) in enumerate(map_days(seed_day, [(d, args) for d in days], store, args.workers)):
+        seeds[key] = result
         if i % 25 == 0 or i + 1 == len(days):
-            LOG.info('Seed plans: %s, %d/%d days', day.group, i + 1, len(days))
+            LOG.info('Seed plans: %d/%d days', i + 1, len(days))
     return seeds
 
 
-def benchmark(day, alpha, h, seeds, store, args):
+def benchmark(day, alpha, h, seeds, args, store=None):
     key = f'benchmark:{day.key}:{alpha}:{h}'
     saved = store.get(key)
     if (saved and saved.get('lower') is not None and saved.get('upper') is not None
@@ -123,29 +130,33 @@ def pilot(payload, store, args, root):
     rows = []
     for group, bundle in payload['groups'].items():
         ordered = sorted(bundle['days']['train'], key=lambda d: (sum(map(len, d.eligible)), len(d.booked), d.key))
-        indices = sorted(set(np.quantile(np.arange(len(ordered)), [0, .5, .9, 1]).astype(int)))
+        indices = set(np.quantile(np.arange(len(ordered)), [0, .5, .9, 1]).astype(int))
+        indices.update(i for i, d in enumerate(ordered) if group == 'TGH' and d.date in
+                       ('2011-10-03', '2011-12-06', '2012-09-19'))
+        indices = sorted(indices)
         for index in indices:
             day = ordered[index]
-            seeds = {}
-            for name, duration in [('booked', day.booked), ('actual', day.actual)]:
-                start = time.monotonic()
-                result = solve_day(day, duration, store, seconds=args.seconds, threads=args.threads, tie=args.tie)
-                seeds[name] = result
-                rows.append({'pilot': 'P1', 'day': day.key, 'duration': name,
-                             'complete': result['complete'], 'seconds_this_call': time.monotonic() - start,
-                             'solve_seconds': result['seconds'], 'result': result})
-            for alpha, h in SCENARIOS:
-                start = time.monotonic()
-                result = benchmark(day, alpha, h, seeds, store, args)
-                rows.append({'pilot': 'P2', 'day': day.key, 'alpha': alpha, 'h': h,
-                             'seconds_this_call': time.monotonic() - start, **result})
+            with store.day(day.key) as day_store:
+                seeds = {}
+                for name, duration in [('booked', day.booked), ('actual', day.actual)]:
+                    start = time.monotonic()
+                    result = solve_day(day, duration, day_store, seconds=args.seconds, threads=args.threads, tie=args.tie)
+                    seeds[name] = result
+                    rows.append({'pilot': 'P1', 'day': day.key, 'duration': name,
+                                 'complete': result['complete'], 'seconds_this_call': time.monotonic() - start,
+                                 'solve_seconds': result['seconds'], 'result': result})
+                for alpha, h in SCENARIOS:
+                    start = time.monotonic()
+                    result = benchmark(day, alpha, h, seeds, args, day_store)
+                    rows.append({'pilot': 'P2', 'day': day.key, 'alpha': alpha, 'h': h,
+                                 'seconds_this_call': time.monotonic() - start, **result})
             write_json(root / 'pilots_P1_P2.json', rows)
             LOG.info('Pilots P1/P2: %s', day.key)
     return rows
 
 
 def training_checks(payload, store, args, root):
-    all_seeds, oracle_rows, daily_history, history_summary = {}, [], [], []
+    all_seeds, benchmark_rows, daily_history, history_summary = {}, [], [], []
     pending = []
     for group, bundle in payload['groups'].items():
         days = bundle['days']['train']
@@ -155,28 +166,29 @@ def training_checks(payload, store, args, root):
             if not all(p['complete'] for p in seeds[day.key].values()):
                 pending.append(day.key)
                 continue
-            for alpha, h in SCENARIOS:
-                result = benchmark(day, alpha, h, seeds[day.key], store, args)
-                if (result.get('lower') is None or result.get('upper') is None
-                        or result['lower'] > result['upper'] + 1e-6):
-                    pending.append(f'{day.key}:oracle_{alpha}_{h}')
-                oracle_rows.append({'day': day.key, 'group': group, 'alpha': alpha, 'h': h,
-                                    'booked_cost': metrics(day, seeds[day.key]['booked']['assignment'], day.actual)['cost'],
-                                    'actual_oracle': seeds[day.key]['actual']['primary_cost'],
-                                    'lower': result['lower'], 'upper': result['upper'],
-                                    'complete': result['complete']})
-            if len(oracle_rows) % 100 == 0:
-                LOG.info('Training benchmarks: %s', day.key)
+            benchmark_rows.append({'day': day.key, 'group': group,
+                'booked_cost': metrics(day, seeds[day.key]['booked']['assignment'], day.actual)['cost'],
+                'actual_oracle': seeds[day.key]['actual']['primary_cost']})
         rows, summary = historical_checks(days, seeds)
         daily_history.extend(rows); history_summary.extend(summary)
     directory = root / 'checks'
     directory.mkdir(exist_ok=True)
-    pd.DataFrame(oracle_rows).to_csv(directory / 'training_oracles.csv', index=False)
+    pd.DataFrame(benchmark_rows).to_csv(directory / 'training_benchmarks.csv', index=False)
     pd.DataFrame(daily_history).to_csv(directory / 'historical_daily.csv', index=False)
     pd.DataFrame(history_summary).to_csv(directory / 'historical_summary.csv', index=False)
-    write_json(directory / 'status.json', {'ready': not pending, 'pending_checks': pending,
-                                         'oracle_brackets_allowed': True})
+    write_json(directory / 'status.json', {'ready': not pending, 'pending_checks': pending})
     return all_seeds, pending
+
+
+def training_oracles(payload, seeds, store, args, root):
+    rows = []
+    for group, bundle in payload['groups'].items():
+        for alpha, h in SCENARIOS:
+            days = bundle['days']['train']
+            jobs = [(day, alpha, h, seeds[group][day.key], args) for day in days]
+            for day, result in zip(days, map_days(benchmark, jobs, store, args.workers)):
+                rows.append({'day': day.key, 'group': group, 'alpha': alpha, 'h': h, **result})
+    write_json(root / 'checks' / 'optional_training_response_oracles.json', rows)
 
 
 def baselines(payload, store, args, root):
@@ -188,11 +200,11 @@ def baselines(payload, store, args, root):
         if 'penalty' not in state:
             state['penalty'] = penalty(X, len(days), args.seed)
         lam1 = state['penalty']['lambda1']
-        if not state.get('direct_case', {}).get('complete'):
+        if not state.get('direct_case', {}).get('converged'):
             state['direct_case'] = fit_policy(X, b, a, len(days), 1., None, lam1, np.zeros(X.shape[1]),
                                               store, group + '_direct_case', seconds=args.seconds, threads=args.threads)
             store.put('models:' + group, state)
-        if not state['direct_case']['complete']:
+        if not state['direct_case'].get('converged'):
             ready = False
             continue
         for alpha, h in SCENARIOS:
@@ -200,17 +212,18 @@ def baselines(payload, store, args, root):
             scenario = state['scenarios'].setdefault(key, {})
             if not scenario.get('Shift', {}).get('complete'):
                 scenario['Shift'] = train_shift(days, alpha, h, store, seconds=args.seconds,
-                                                threads=args.threads, tie=args.tie, progress=LOG.info)
+                                                threads=args.threads, tie=args.tie, progress=LOG.info, workers=args.workers)
                 store.put('models:' + group, state)
-            if not scenario.get('Case-Error', {}).get('complete'):
+            if not scenario.get('Case-Error', {}).get('converged'):
                 start = project(np.asarray(state['direct_case']['w']) / alpha, X, b)
                 scenario['Case-Error'] = fit_policy(X, b, a, len(days), alpha, h, alpha * lam1,
                                                    start, store, group + '_Case-Error_' + key,
                                                    seconds=args.seconds, threads=args.threads)
                 store.put('models:' + group, state)
-            ready &= scenario['Shift']['complete'] and scenario['Case-Error']['complete']
+            ready &= scenario['Shift']['complete'] and scenario['Case-Error'].get('converged', False)
             LOG.info('Baselines: %s %s', group, key)
         write_json(root / f'models_{group}.json', state)
+    save_training_diagnostics(root, payload, collect_diagnostics(payload, store))
     return ready
 
 
@@ -242,16 +255,16 @@ def vf_stage(payload, seeds, store, args, root, pilot_only=False):
             tag = group + '_' + method + '_' + str(h) + '_' + str(alpha)
             start = time.monotonic()
             result = train_vf(X, b, a, days, alpha, h, alpha * lam1, initial['w'], seeds[group], store,
-                              ('P3_' if pilot_only else '') + tag, seconds=args.seconds,
-                              threads=args.threads, tie=args.tie, max_outer=1 if pilot_only else 15,
-                              progress=LOG.info)
+                              tag, seconds=args.seconds, threads=args.threads, tie=args.tie,
+                              pause_after=1 if pilot_only else None, workers=args.workers, progress=LOG.info)
             timing = {'group': group, 'seconds': time.monotonic() - start +
                       (previous_pilot['seconds'] if previous_pilot else 0.),
-                      'complete': result['complete'], 'outer_iterations': len(result['trajectory'])}
+                      'complete': bool(result['trajectory']) if pilot_only else result['complete'],
+                      'outer_iterations': len(result['trajectory'])}
             timings.append(timing)
             if pilot_only:
                 store.put('pilot_P3:' + group, timing)
-            ready &= result['complete']
+            ready &= timing['complete']
             if not pilot_only:
                 target[method] = result
                 store.put('models:' + group, state)
@@ -262,28 +275,55 @@ def vf_stage(payload, seeds, store, args, root, pilot_only=False):
 
 
 def policy_snapshot(payload, store):
-    snapshot, diagnostics = {}, []
+    snapshot = {}
     for group in GROUPS:
         state = store.get('models:' + group)
         if not state or not state.get('VF-Direct', {}).get('complete'):
-            return None, []
+            return None, collect_diagnostics(payload, store)
         snapshot[group] = {'VF-Direct': state['VF-Direct']['w'], 'scenarios': {}}
-        fits = [('direct_case', None, state['direct_case']), ('VF-Direct', None, state['VF-Direct'])]
         for alpha, h in SCENARIOS:
             key = scenario_key(alpha, h)
             models = state['scenarios'].get(key, {})
-            if any(not models.get(method, {}).get('complete') for method in ('Shift', 'Case-Error', 'VF')):
-                return None, []
+            if (any(not models.get(method, {}).get('complete') for method in ('Shift', 'Case-Error', 'VF'))
+                    or not models['Case-Error'].get('converged')):
+                return None, collect_diagnostics(payload, store)
             snapshot[group]['scenarios'][key] = {'Shift': models['Shift']['shift'],
-                                                **{method: models[method]['w'] for method in ('Case-Error', 'VF')}}
-            fits.extend((method, key, models[method]) for method in ('Case-Error', 'VF'))
+                **{method: models[method]['w'] for method in ('Case-Error', 'VF')}}
+    return snapshot, collect_diagnostics(payload, store)
+
+
+def collect_diagnostics(payload, store):
+    rows = []
+    for group, bundle in payload['groups'].items():
+        state = store.get('models:' + group) or {}
+        counts = bundle['frames']['train'].service.value_counts()
+        reference = min(counts[counts == counts.max()].index)
+        service_index = {service: j + 2 for j, service in enumerate(sorted(set(counts.index) - {reference}))}
+        fits = [('direct_case', None, state.get('direct_case', {})), ('VF-Direct', None, state.get('VF-Direct', {}))]
+        for scenario, models in state.get('scenarios', {}).items():
+            fits.extend((method, scenario, models.get(method, {})) for method in ('Case-Error', 'VF'))
         for method, scenario, fit in fits:
-            diagnostics.append({'group': group, 'method': method, 'scenario': scenario,
-                                'max_abs_coefficient': fit['max_abs_coefficient'],
-                                'coefficient_bound_binds': fit['coefficient_bound_binds'],
-                                'hit_outer_cap': fit.get('hit_outer_cap', False),
-                                'final_bound': fit.get('final_bound'), 'zero_bound': fit.get('zero_bound')})
-    return snapshot, diagnostics
+            if 'w' not in fit:
+                continue
+            rare = [{'service': service, 'training_cases': int(n), 'reference': service == reference,
+                     'coefficient': 0. if service == reference else fit['w'][service_index[service]]}
+                    for service, n in counts.items() if n < 10]
+            rows.append({'group': group, 'method': method, 'scenario': scenario,
+                'complete': fit['complete'], 'converged': fit.get('converged'),
+                'stopping': fit.get('stopping', fit.get('reason', 'outer_cap' if fit.get('hit_outer_cap') else
+                                    ('two_small_improvements' if fit['complete'] else 'pending'))),
+                'hit_inner_cap': fit.get('hit_inner_cap', False),
+                'ever_hit_inner_cap': fit.get('ever_hit_inner_cap', False),
+                'hit_outer_cap': fit.get('hit_outer_cap', False),
+                'inner_iterations': fit.get('inner_iterations'),
+                'outer_iterations': len(fit.get('trajectory', [])),
+                'outer_updates_hitting_inner_cap': sum(r.get('inner_cap', False) for r in fit.get('trajectory', [])),
+                'final_library_size': sum(len(v) for v in fit.get('library', {}).values()),
+                'max_abs_coefficient': fit.get('max_abs_coefficient'),
+                'coefficient_bound_binds': fit.get('coefficient_bound_binds'),
+                'rare_services': rare, 'rare_service_nonzero': any(abs(r['coefficient']) > 1e-6 for r in rare),
+                'final_bound': fit.get('final_bound'), 'zero_bound': fit.get('zero_bound')})
+    return rows
 
 
 def save_training_diagnostics(root, payload, diagnostics):
@@ -313,7 +353,7 @@ def save_training_diagnostics(root, payload, diagnostics):
 def evaluate(payload, store, args, root):
     policies, diagnostics = policy_snapshot(payload, store)
     if policies is None:
-        return {'ready': False, 'reason': 'training is incomplete; no test policies evaluated'}
+        return {'ready': False, 'reason': 'training is incomplete or a Case-Error fit has not converged; no test policies evaluated'}
     fingerprint = digest(policies)
     frozen = store.get('test_freeze')
     if frozen and frozen['fingerprint'] != fingerprint:
@@ -340,10 +380,11 @@ def evaluate(payload, store, args, root):
                     weights = policies[group][method] if method == 'VF-Direct' else policy[method]
                     raw = X @ np.asarray(weights)
                 _, duration = display_and_duration(raw, b, alpha, h)
-                for day in days:
-                    plan = seeds[day.key]['booked'] if method == 'Booked' else solve_day(
-                        day, duration[day.rows], store, seconds=args.seconds, threads=args.threads, tie=args.tie,
-                        warm_start=seeds[day.key]['booked'].get('assignment'))
+                jobs = [(day, duration[day.rows], dict(seconds=args.seconds, threads=args.threads,
+                         tie=args.tie, warm_start=seeds[day.key]['booked'].get('assignment'))) for day in days]
+                plans = (seeds[d.key]['booked'] for d in days) if method == 'Booked' else map_days(
+                    plan_job, jobs, store, args.workers)
+                for day, plan in zip(days, plans):
                     row = {'day': day.key, 'date': day.date, 'group': group, 'alpha': alpha, 'h': h,
                            'method': method, 'complete': plan['complete'], 'cases': len(day.booked)}
                     if plan['complete']:
@@ -353,8 +394,8 @@ def evaluate(payload, store, args, root):
                     daily.append(row)
                     store.put(f'evaluation:{day.key}:{alpha}:{h}:{method}', row)
                 LOG.info('Test evaluation: %s alpha=%s h=%s %s', group, alpha, h, method)
-            for day in days:
-                result = benchmark(day, alpha, h, seeds[day.key], store, args)
+            jobs = [(day, alpha, h, seeds[day.key], args) for day in days]
+            for day, result in zip(days, map_days(benchmark, jobs, store, args.workers)):
                 oracles.append({'day': day.key, 'date': day.date, 'group': group, 'alpha': alpha, 'h': h,
                                 'actual_oracle': seeds[day.key]['actual'].get('primary_cost'),
                                 'lower': result['lower'], 'upper': result['upper'], 'complete': result['complete']})
@@ -365,15 +406,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workbook', type=Path)
     parser.add_argument('--out', type=Path, default=Path('results'))
-    parser.add_argument('--stage', choices=['audit', 'pilot', 'checks', 'baselines', 'pilot-vf', 'train', 'evaluate', 'all'], default='all')
+    parser.add_argument('--stage', choices=['audit', 'pilot', 'checks', 'baselines', 'pilot-vf', 'train', 'training-oracles', 'evaluate', 'all'], default='all')
     parser.add_argument('--seconds', type=float, default=300, help='Budget per daily solve or convex update; pending work is resumable')
     parser.add_argument('--oracle-seconds', type=float, default=30, help='Budget per response-limited oracle day/scenario')
-    parser.add_argument('--threads', type=int, default=1)
-    parser.add_argument('--tie', choices=['squares', 'lexloads'], default='squares')
+    parser.add_argument('--threads', type=int, default=1, help='Solver threads per worker')
+    parser.add_argument('--workers', type=int, default=min(4, os.cpu_count() or 1), help='Independent day processes (default: up to 4)')
+    parser.set_defaults(tie='maxload')
     parser.add_argument('--seed', type=int, default=20261007)
     parser.add_argument('--refine-oracles', action='store_true', help='Spend another budget on unfinished oracle brackets')
     args = parser.parse_args(argv)
-    if args.seconds <= 0 or args.oracle_seconds <= 0 or args.threads < 1:
+    if args.seconds <= 0 or args.oracle_seconds <= 0 or args.threads < 1 or args.workers < 1:
         parser.error('Time budgets and thread count must be positive')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     root, payload, specification = prepare(args.workbook, args.out, args.tie, args.seed)
@@ -394,7 +436,7 @@ def main(argv=None):
                 status['solver'] = check
                 LOG.error('%s: %s', status['reason'], check.get('error', check['status']))
                 return 2
-        if args.stage in ('all', 'pilot', 'checks', 'baselines', 'pilot-vf', 'train'):
+        if args.stage in ('all', 'pilot', 'checks', 'baselines', 'pilot-vf', 'train', 'training-oracles'):
             rows = pilot(payload, store, args, root)
             pending_p1 = [r['day'] for r in rows if r['pilot'] == 'P1' and not r['complete']]
             if pending_p1:
@@ -411,6 +453,10 @@ def main(argv=None):
         if pending:
             status.update(reason='Training checks pending; inspect checks/status.json and resume', pending_days=pending)
             return 2
+        if args.stage == 'training-oracles':
+            training_oracles(payload, seeds, store, args, root)
+            status['ready'] = True
+            return 0
         if args.stage == 'checks':
             status['ready'] = True
             return 0
@@ -440,7 +486,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         status['reason'] = 'Interrupted; completed day and policy checkpoints are saved'
         return 130
-    except (gp.GurobiError, OSError) as exc:
+    except (gp.GurobiError, OSError, sqlite3.Error, BrokenProcessPool) as exc:
         status['reason'] = str(exc)
         LOG.error('Run paused: %s', exc)
         return 2

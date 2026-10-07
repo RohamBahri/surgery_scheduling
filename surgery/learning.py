@@ -4,8 +4,8 @@ import gurobipy as gp
 import numpy as np
 from scipy import sparse
 
-from .planner import display_and_duration, metrics, model, optimize, solve_day
-from .storage import digest
+from .planner import display_and_duration, metrics, model, optimize, plan_job, solve_day
+from .storage import digest, map_days
 
 BOUND = 100.
 
@@ -70,16 +70,18 @@ def fixed_value(w, X, booked, actual, days, alpha, h, lam, S=None):
 def fit_policy(X, booked, actual, days, alpha, h, lam, start, store, tag, *,
                assignments=None, bundles=None, seconds=300, threads=1, iterations=30):
     S = None if assignments is None else room_matrix(bundles, assignments, len(booked))
-    key = 'fit:' + digest([tag, X, booked, actual, days, alpha, h, lam, start, assignments, iterations])
+    key = 'fit:' + digest([tag, X, booked, actual, days, alpha, h, lam, start, assignments])
     saved = store.get(key) if store else None
-    if saved and saved['complete']:
+    if saved and saved['complete'] and (saved.get('converged') or assignments is not None):
         return saved
     current = project(saved['w'] if saved else start, X, booked)
     history = saved['history'] if saved else []
     value = fixed_value(current, X, booked, actual, days, alpha, h, lam, S)
     result = {'complete': False, 'w': current.tolist(), 'history': history, 'objective': value,
               'alpha': alpha, 'h': h, 'lambda': lam, 'training_days': days,
-              'training_cases': len(booked), 'loss_normalization': 'training_days'}
+              'training_cases': len(booked), 'loss_normalization': 'training_days',
+              'converged': False, 'hit_inner_cap': False,
+              'ever_hit_inner_cap': bool(saved and saved.get('ever_hit_inner_cap'))}
     n, p = X.shape
     with model(tag, seconds, threads) as m:
         active = np.any(np.abs(X) > 1e-12, axis=0).astype(float)
@@ -108,7 +110,11 @@ def fit_policy(X, booked, actual, days, alpha, h, lam, start, store, tag, *,
         m.addConstr(absw >= w[1:]); m.addConstr(absw >= -w[1:])
         G += lam * absw.sum()
         gamma = 0. if h is None else 1e-4
-        for iteration in range(sum(row['solver_optimal'] for row in history), iterations):
+        completed = sum(row['solver_optimal'] for row in history)
+        limit = (saved['iteration_limit'] if saved and not saved.get('hit_inner_cap')
+                 else completed + iterations)
+        result['iteration_limit'] = limit
+        for iteration in range(completed, limit):
             _, _, Pp, Np = dc_parts(X @ current, alpha, h)
             slope = (1.75 * Pp + Np) if S is None else 2.75 * (Pp + Np)
             gradient = X.T @ slope / days
@@ -134,12 +140,15 @@ def fit_policy(X, booked, actual, days, alpha, h, lam, start, store, tag, *,
                     store.put(key, result)
                 break
             converged = h is None or not accepted or (improvement < 1e-7 and step < 1e-3)
-            result.update(complete=converged or iteration + 1 == iterations,
-                          stopping='converged' if converged else 'inner_cap')
+            capped = not converged and iteration + 1 == limit
+            result.update(complete=converged or capped, converged=converged, hit_inner_cap=capped,
+                          ever_hit_inner_cap=result['ever_hit_inner_cap'] or capped,
+                          stopping='converged' if converged else ('inner_cap' if capped else 'iterating'))
             if store:
                 store.put(key, result)
             if result['complete']:
                 break
+    result['inner_iterations'] = sum(row['solver_optimal'] for row in history)
     result['coefficient_bound_binds'] = bool(np.max(np.abs(current)) >= BOUND - 1e-5)
     result['max_abs_coefficient'] = float(np.max(np.abs(current)))
     if store:
@@ -166,7 +175,7 @@ def library_bound(w, X, booked, actual, days, library, oracle_bounds, alpha, h, 
 
 
 def train_vf(X, booked, actual, days, alpha, h, lam, start, seeds, store, tag, *,
-             seconds=300, threads=1, tie='squares', max_outer=15, inner=10, progress=None):
+             seconds=300, threads=1, tie='maxload', max_outer=15, inner=10, progress=None, workers=1, pause_after=None):
     key = 'vf:' + digest([tag, X, booked, actual, alpha, h, lam, start, tie, max_outer, inner])
     state = store.get(key) if store else None
     if state and state['complete']:
@@ -181,10 +190,10 @@ def train_vf(X, booked, actual, days, alpha, h, lam, start, seeds, store, tag, *
     def enrich(weights, phase):
         _, duration = display_and_duration(X @ weights, booked, alpha, h)
         pending = []
-        for i, day in enumerate(days):
-            warm = min(library[day.key], key=lambda a: metrics(day, a, duration[day.rows])['cost'])
-            result = solve_day(day, duration[day.rows], store, seconds=seconds, threads=threads,
-                               tie=tie, warm_start=warm)
+        jobs = [(day, duration[day.rows], dict(seconds=seconds, threads=threads, tie=tie,
+                 primary_only=True, warm_start=min(library[day.key],
+                     key=lambda a: metrics(day, a, duration[day.rows])['cost']))) for day in days]
+        for i, (day, result) in enumerate(zip(days, map_days(plan_job, jobs, store, workers))):
             if result['complete']:
                 a = result['assignment']
                 if a not in library[day.key]:
@@ -202,7 +211,8 @@ def train_vf(X, booked, actual, days, alpha, h, lam, start, seeds, store, tag, *
             store.put(key, state)
         if pending:
             return state
-    for outer in range(len(state['trajectory']) + 1, max_outer + 1):
+    last = min(max_outer, pause_after) if pause_after is not None else max_outer
+    for outer in range(len(state['trajectory']) + 1, last + 1):
         current = np.asarray(state['w'])
         anchor, fixed = library_bound(current, X, booked, actual, days, library, oracle_bounds, alpha, h, lam)
         fit = state.get('candidate_fit')
@@ -240,7 +250,7 @@ def train_vf(X, booked, actual, days, alpha, h, lam, start, seeds, store, tag, *
         state['trajectory'].append({'outer': outer, 'before': anchor, 'after': final,
                                     'relative_improvement': improvement, 'accepted': accepted,
                                     'library_size': sum(len(v) for v in library.values()),
-                                    'inner_stopping': fit['stopping']})
+                                    'inner_stopping': fit['stopping'], 'inner_cap': fit['hit_inner_cap']})
         state['w'] = candidate.tolist()
         state['stagnant'] = state['stagnant'] + 1 if improvement < .001 else 0
         state.pop('candidate_fit', None); state.pop('anchor_bound', None)
@@ -263,37 +273,43 @@ def train_vf(X, booked, actual, days, alpha, h, lam, start, seeds, store, tag, *
     return state
 
 
-def train_shift(days, alpha, h, store, *, seconds=300, threads=1, tie='squares', progress=None):
-    trials, pending, warm = [], [], {}
-    scope = digest([(d.signature(), d.booked, d.actual) for d in days])
+def shift_day(day, alpha, h, options, store=None):
+    trials, warm = [], None
+    scope = digest([day.signature(), day.booked, day.actual, options['tie']])
     for shift in range(-int(round(alpha * h)), int(round(alpha * h)) + 1):
-        key = 'shift:' + digest([scope, alpha, shift, tie])
+        # Reachable constant shifts stay on the response's adoption branch, including the floor.
+        duration = day.booked + np.maximum(shift, alpha * (1 - day.booked))
+        key = 'shift_day:' + digest([scope, duration])
         saved = store.get(key) if store else None
         if saved and saved['complete']:
-            trials.append(saved)
-            continue
-        cost = 0.
-        missing = []
-        for day in days:
-            _, duration = display_and_duration(np.full(len(day.booked), shift / alpha), day.booked, alpha, h)
-            plan = solve_day(day, duration, store, seconds=seconds, threads=threads, tie=tie,
-                             warm_start=warm.get(day.key))
-            if plan.get('assignment') is not None:
-                warm[day.key] = plan['assignment']
-            if plan['complete']:
-                cost += metrics(day, plan['assignment'], day.actual)['cost']
-            else:
-                missing.append(day.key)
-        result = {'shift': shift, 'cost': cost if not missing else None, 'complete': not missing,
-                  'pending_days': missing}
-        if store:
-            store.put(key, result)
-        trials.append(result)
-        pending.extend(missing)
+            row = dict(saved, shift=shift)
+            warm = saved['assignment']
+        else:
+            plan = solve_day(day, duration, store, warm_start=warm, **options)
+            warm = plan['assignment']
+            row = {'shift': shift, 'complete': plan['complete'], 'assignment': warm,
+                   'cost': metrics(day, warm, day.actual)['cost'] if plan['complete'] else None}
+            if store:
+                store.put(key, row)
+        trials.append(row)
+    return day.key, trials
+
+
+def train_shift(days, alpha, h, store, *, seconds=300, threads=1, tie='maxload', progress=None, workers=1):
+    options = dict(seconds=seconds, threads=threads, tie=tie)
+    by_day = {}
+    for key, rows in map_days(shift_day, [(d, alpha, h, options) for d in days], store, workers):
+        by_day[key] = rows
         if progress:
-            progress(f'Shift alpha={alpha} h={h}: shift {shift:+d}; {len(missing)} pending days')
+            progress(f'Shift alpha={alpha} h={h}: {len(by_day)}/{len(days)} days')
+    trials, pending = [], set()
+    for j, shift in enumerate(range(-int(round(alpha * h)), int(round(alpha * h)) + 1)):
+        missing = [day for day, rows in by_day.items() if not rows[j]['complete']]
+        pending.update(missing)
+        trials.append({'shift': shift, 'complete': not missing, 'pending_days': missing,
+                       'cost': None if missing else sum(rows[j]['cost'] for rows in by_day.values())})
     if pending:
-        return {'complete': False, 'trials': trials, 'pending_days': sorted(set(pending))}
+        return {'complete': False, 'trials': trials, 'pending_days': sorted(pending)}
     best_cost = min(t['cost'] for t in trials)
     best = min((t for t in trials if abs(t['cost'] - best_cost) <= 1e-6),
                key=lambda t: (abs(t['shift']), -t['shift']))

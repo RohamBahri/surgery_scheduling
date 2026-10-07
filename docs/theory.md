@@ -26,6 +26,18 @@ Release, nonempty candidate sets, and eligibility fallback make the feasible ass
 
 The ratio 1.75 is a modeling input supported by Dexter and Macario (2004), not an estimate of UHN staffing costs. Room-opening formulations, including Wang et al. (2019, 2024) and Deng, Shen, and Denton (2019), provide related modeling context; operational decision timing and release feasibility remain application assumptions.
 
+## Exact room patterns and deterministic ties
+
+For a nonempty subset S of surgeon-days sharing an eligible room r, define its load as the sum of their case durations plus 30 times (case count minus one), and its cost by the same idle/overtime function. A binary variable selects this subset for r. Every surgeon-day is covered exactly once and each room selects at most one subset. This is an exact set-partitioning formulation of the daily assignment problem.
+
+If U is the cost of any feasible assignment, every room in a solution of cost at most U has cost at most U, since all room costs are nonnegative. In particular its load is at most 480 + U/1.75. Enumerating all eligible subsets below this load bound therefore preserves every optimum and every cost-optimal tie. There is no cardinality restriction. An incomplete enumeration cannot establish an optimum. Rooms with identical eligibility columns can be represented by one type with capacity equal to their count. During alphabetical tie resolution, already named rooms are separated from the remaining interchangeable capacity; compatible patterns cover all surgeons already fixed to that room. This preserves precisely the feasible completions of each assignment prefix.
+
+Before the integer solve, solve the complete pattern LP. For any dual-feasible solution with lower bound L and nonnegative reduced costs r_j, selecting binary pattern j costs at least L+r_j. Thus a pattern with L+r_j>U can be removed without losing any optimum or cost-optimal tie. The implementation shifts equality duals outward to restore dual feasibility before applying this test, and retains a numerical margin. This is a mathematical screening bound, not a cap on pattern counts.
+
+The maximum-load optimum lies among finitely many pattern loads. Threshold feasibility is monotone, allowing binary search. The lexicographic assignment is obtained by checking surgeon/room prefixes in order. A validated feasible witness establishes a feasible threshold/prefix even if a search stops early; only a proven infeasibility can rule one out. No unfinished search without a witness can justify such exclusion.
+
+The deployment order is primary cost, largest planned room load, then the lexicographically smallest assignment under canonical surgeon and room ordering. It is independent of realized durations. The compact and pattern formulations apply exactly this order. Library enrichment needs only a primary-cost optimum: the value-function bound uses that minimum value and is valid regardless of which cost-optimal plan enters the library. Shift and evaluation still apply every deployment tie stage.
+
 ## Response and reachable oracle
 
 For displayed correction u, adoption alpha, radius h, and skepticism intensity one,

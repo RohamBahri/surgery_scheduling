@@ -8,7 +8,7 @@ from test_optimization import make_day
 
 def test_ratio_bounds_and_zero_denominator():
     assert opportunity_interval(100, 70, 40, 60)[:2] == (.5, .75)
-    assert opportunity_interval(100, 70, 40, 100)[:2] == (.5, 1.)
+    assert opportunity_interval(100, 70, 40, 100)[2] == 'denominator_may_be_zero'
     assert opportunity_interval(100, 110, 40, 60)[:2] == (-.25, -1 / 6)
     assert opportunity_interval(100, 100, 100, 100)[0] is None
 
@@ -43,3 +43,15 @@ def test_shared_week_resamples_comparator_percentages_and_incomplete_guard(tmp_p
     daily[0]['complete'] = False
     assert not summarize(tmp_path / 'pending', daily, oracles, days)['ready']
     assert not (tmp_path / 'pending' / 'methods.csv').exists()
+
+
+def test_methods_share_the_best_daily_oracle_upper_bound(tmp_path):
+    days, daily, oracles = fixture_rows()
+    for row in oracles:
+        row['upper'] = 100.
+    assert summarize(tmp_path, daily, oracles, days)['ready']
+    bounds = pd.read_csv(tmp_path / 'daily_oracles.csv')
+    assert bounds.upper.eq(80).all() and bounds.solver_upper.eq(100).all()
+    methods = pd.read_csv(tmp_path / 'methods.csv')
+    assert methods.groupby(['group', 'alpha', 'h']).response_oracle_upper.nunique().eq(1).all()
+    assert methods[methods.method.eq('VF')].opportunity_captured_upper.eq(1).all()

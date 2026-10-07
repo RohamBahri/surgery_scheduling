@@ -13,7 +13,7 @@ METHODS = ('Booked', 'Shift', 'Case-Error', 'VF-Direct', 'VF')
 
 def opportunity_interval(booked, cost, lower, upper):
     numerator = booked - cost
-    upper = min(upper, cost, booked)
+    upper = min(upper, booked)
     big, small = booked - lower, booked - upper
     if big <= 1e-6:
         return None, None, 'zero_or_unresolved_opportunity'
@@ -43,6 +43,16 @@ def summarize(root, daily, oracles, expected, seed=20261007):
               'missing_or_invalid_oracle_brackets': len(required_oracles - bounded),
               'unfinished_oracle_days': sum(not r['complete'] for r in oracles),
               'bootstrap_seed': seed, 'bootstrap_resamples': 10000}
+    if status['ready']:
+        keys = ['day', 'alpha', 'h']
+        witness = data.groupby(keys).cost.min().rename('method_upper')
+        oracle = oracle.join(witness, on=keys)
+        oracle['solver_upper'] = oracle.upper
+        oracle['upper'] = np.minimum(oracle.upper, oracle.method_upper)
+        inconsistent = oracle.lower > oracle.upper + 1e-6
+        status['ready'] = not bool(inconsistent.any())
+        status['missing_or_invalid_oracle_brackets'] += int(inconsistent.sum())
+        oracle.to_csv(root / 'daily_oracles.csv', index=False)
     write_json(root / 'status.json', status)
     if not status['ready']:
         (root / 'README.md').write_text(
@@ -115,7 +125,7 @@ def summarize(root, daily, oracles, expected, seed=20261007):
         'Percentages use the comparator total cost. All groups and methods use the same 10,000 '
         'calendar-week resamples, including weeks with zero retained activity in a group. '
         'The opportunity ratio uses both oracle bounds; each evaluated feasible method also supplies '
-        'a valid upper bound. Undefined ratios are empty, not zero.\n\n'
+        'a valid upper bound. The best daily witness supplies one common bracket for every method. Undefined ratios are empty, not zero.\n\n'
         'A direction shared by all four scenarios applies to these four modeled scenarios only. '
         'These are retained elective workloads, not complete hospital workloads or measured cash savings.\n')
     return status
