@@ -51,17 +51,23 @@ def score_frame():
 
 def test_training_scores_leave_out_own_date_and_test_uses_training_only():
     train = score_frame()
+    date = pd.Timestamp('2011-07-04')
+    own = train.date.eq(date)
+    changed = train.copy()
+    changed.loc[own & changed.procedure.eq('a'), 'actual'] += 1000
+
+    # The date-specific category statistics exclude the whole case date. The two
+    # global shrinkage constants are deliberately estimated from full training.
+    summary = Encoder._summary(train.loc[~own])
+    changed_summary = Encoder._summary(changed.loc[~own])
+    assert summary == changed_summary
+    probe = Encoder()
+    probe.shrinkage = {'procedure': 1., 'surgeon': 1.}
+    np.testing.assert_allclose(probe._scores(train.loc[own], summary),
+                               probe._scores(changed.loc[own], changed_summary))
+
     first = Encoder()
     first.fit_transform(train)
-    changed = train.copy()
-    mask = changed.date.eq(pd.Timestamp('2011-07-04')) & changed.procedure.eq('a')
-    changed.loc[mask, 'actual'] += 1000
-    second = Encoder()
-    second.fit_transform(changed)
-    own = train.date.eq(pd.Timestamp('2011-07-04')).to_numpy()
-    np.testing.assert_allclose(first.training_scores[own], second.training_scores[own])
-    assert np.any(first.training_scores[~own] != second.training_scores[~own])
-
     test = train.iloc[:2].copy()
     before = first.transform(test)
     test.actual += 5000
