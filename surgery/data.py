@@ -176,6 +176,11 @@ def build_cohort(raw):
     extreme = d[(d.actual < 10) | (d.actual > 720)][
         ['case_id', 'group', 'date', 'surgeon', 'service', 'booked', 'actual']].copy()
     extreme['date'] = extreme.date.dt.strftime('%Y-%m-%d')
+    surgeon_days = d.groupby(['group', 'date', 'surgeon']).agg(
+        cases=('case_id', 'size'), booked_minutes=('booked', 'sum'),
+        actual_minutes=('actual', 'sum')).reset_index()
+    extreme_surgeon_days = surgeon_days[surgeon_days.actual_minutes > 720].copy()
+    extreme_surgeon_days['date'] = extreme_surgeon_days.date.dt.strftime('%Y-%m-%d')
 
     audit = {
         'flow': flow,
@@ -201,6 +206,7 @@ def build_cohort(raw):
         'specialty_room_day_concentration': block_summary,
         'specialty_room_weekday_blocks': weekday_blocks,
         'extreme_cases': extreme.to_dict('records'),
+        'extreme_surgeon_days': extreme_surgeon_days.to_dict('records'),
     }
     return d, audit, pd.concat(excluded, ignore_index=True), quality
 
