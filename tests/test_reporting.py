@@ -23,7 +23,8 @@ def fixture_rows():
                 for method in METHODS:
                     daily.append({'day': day.key, 'group': group, 'date': date, 'alpha': alpha, 'h': h,
                                   'method': method, 'complete': True, 'cost': 80 if method == 'VF' else 100,
-                                  'overtime': 10, 'idle': 20, 'rooms': 1, 'cases': 1, 'absolute_error': 5,
+                                  'overtime': 10, 'idle': 20, 'rooms': 1, 'candidate_rooms': 1,
+                                  'rooms_released': 0, 'cases': 1, 'absolute_error': 5,
                                   'signed_error': 1, 'squared_error': 25, 'underestimation_minutes': 3,
                                   'overestimation_minutes': 2, 'within_15': 1, 'within_30': 1,
                                   'underestimated_cases': 1, 'absolute_display': 4, 'absolute_implemented': 2,
