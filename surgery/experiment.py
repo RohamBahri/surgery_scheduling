@@ -446,6 +446,8 @@ def evaluate(payload, store, args, root):
                         planned = metrics(day, plan['assignment'], day_duration)
                         row.update(realized)
                         row.update({
+                            'candidate_rooms': day.n_rooms,
+                            'rooms_released': day.n_rooms - realized['rooms'],
                             'planned_cost': planned['cost'], 'planned_overtime': planned['overtime'],
                             'planned_idle': planned['idle'], 'planned_max_load': planned['max_load'],
                             'absolute_error': float(np.abs(errors).sum()),
