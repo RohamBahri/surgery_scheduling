@@ -1,0 +1,74 @@
+# Experiment specification
+
+## Cohort
+
+Training is July 2011–December 2012; test is January–June 2013. The workbook is the sole source. Room labels are normalized by removing whitespace and uppercasing, then matched to explicit lists:
+
+- TGH: OR1–OR17, OR19, OR21.
+- TWH main: OR101–OR111, OR114, OR115.
+- TWH day surgery: DS101–DS104.
+
+A case must be noncancelled; cancellation means a nonempty cancellation reason or a recorded cancellation date. Require all four timestamps, `room entry <= surgical start < surgical stop <= room exit`, and room duration strictly between zero and 1,440 minutes. The raw booking must be positive; the duration used is raw booking plus one. The raw five-minute-minus-one grid is checked before learning.
+
+Require a weekday that is not a closure date. A morning list is a distinct room with at least one noncancelled case entering between 07:00 inclusive and 12:00 exclusive. Combined TGH/TWH-main morning room counts are computed on the complete weekday calendar. A closure has fewer than 25% of the training-period median count; the supplied workbook yields a training median of 25 and 26 closure dates. The fixed training threshold is also used on the test calendar.
+
+Scheduled eligibility means room entry between 07:00 inclusive and 17:00 exclusive, or a decision-to-treat calendar date at least one day before surgery. Exclude records labelled emergency. Check every pair of retained-scope, timestamp-valid cases in the same room/date; an overlap strictly greater than 15 minutes flags both cases, including nested intervals.
+
+Only an otherwise eligible invalid record can contaminate its room-group–surgeon–date. Remove the whole such surgeon-day after finding timestamp failures and overlaps. Date identification uses the first usable timestamp in this order: room entry, surgical start, surgical stop, room exit. This fallback identifies an invalid record's contamination key; it does not repair that record. A record with no usable date is removed without inventing a date. TWH main and day surgery have separate contamination keys.
+
+The row manifest is authoritative. Excel rows are numbered from 2, including the header offset. No count-matching search, weekly size filter, booking cap, room-prefix selection, or case rescheduling across dates is used.
+
+| Group | Training cases | Test cases | Training days | Test days |
+|---|---:|---:|---:|---:|
+| TGH | 9,055 | 3,086 | 372 | 123 |
+| TWH main | 11,183 | 4,158 | 372 | 123 |
+| TWH day surgery | 4,268 | 1,530 | 354 | 117 |
+| Total | 24,506 | 8,774 | 1,098 | 363 |
+
+PMH is outside the main analysis because contradictory timestamps concentrated in one room and the removal of affected surgeon-days materially alter its two-room workloads. This exclusion does not establish that PMH staffing was irrevocably fixed. Cleaning also removes workload in the included groups; daily case, booking, surgeon, and room losses are exported. Historical comparisons use matched retained cases and can understate load in rooms shared with removed surgeon-days.
+
+## Information and planning
+
+One instance is one room group on one date. Candidate rooms are those with retained cases that day. A surgeon's cases within this group/date form one indivisible assignment unit. Cross-group surgeon-days are separate; the model does not coordinate their clock times. All open rooms are occupied, and rooms may be released in all three groups. There are no hard overtime limits, lunch breaks, opening charges, downstream resources, or day-to-day case moves. Sessions are 480 minutes with 30 minutes between consecutive cases.
+
+Room eligibility is learned from training only. First intersect the candidate rooms with rooms used by every service in the surgeon-day on the same weekday during training. If that set is empty, repeat the intersection using each service's rooms over all training weekdays. Only if that also fails are all candidate rooms allowed. The two fallback levels are reported separately. Release and the final nonempty eligibility set imply assignability without needing enough surgeons to fill every candidate room.
+
+The planner minimizes cost, then the largest planned room load, then the surgeon-to-room assignment lexicographically. Surgeon identifiers and room labels use ascending string order. Ties do not consult realized durations. Exactness requires a proven primary optimum and completed proofs of both tie stages under the recorded numerical tolerances: relative MIP gap zero, absolute gap 1e-8, feasibility/integrality/optimality tolerances 1e-9, and final cost validation 1e-6. Solver tolerances are numerical tolerances, not claims of symbolic arithmetic.
+
+The production planner uses one exact Gurobi set-partitioning formulation. A pattern is a nonempty set of surgeon-days that can share one named room. Every surgeon-day is covered exactly once and each room selects at most one pattern. A feasible incumbent gives the safe load bound `480 + incumbent_cost/1.75`; no surgeon-count cutoff is used. Enumeration that exhausts its budget remains pending. The primary integer program minimizes room cost, the second stage minimizes the largest selected pattern load, and chunked lexicographic objectives fix the alphabetical assignment. The compact Gurobi assignment model is retained only for independent validation tests.
+
+Historical-one-room assigns each surgeon-day to an eligible room maximizing the number of its retained cases left in their recorded room, breaking ties by the same room order. This minimizes moved cases. It is a diagnostic projection, not a cost-trained competitor. Load percentiles pool occupied room-days; costs include only their retained workloads.
+
+## Features and response
+
+Each group has one training-fitted encoder. Inputs are booked duration; all training service indicators with the most frequent service omitted as reference; procedure-within-service and surgeon-within-service bias scores; and matching spread scores. Spread is the average absolute difference between two booking errors from the same category. A category with fewer than two usable observations has zero spread score. The spread score uses the same count-based reliability weight as its matching bias score. All penalized columns are standardized with training means and population standard deviations; constant columns have scale one and unidentifiable zero columns receive coefficient zero. The intercept is unpenalized.
+
+For a training case on date (t), all four outcome-derived scores use every training date except (t). The two global shrinkage constants are estimated once from the complete training sample and reused for the matching spread scores. Test scores use the complete training sample; test outcomes never enter the encoder. This treats surgeon/procedure effects as offline training estimates while preventing a training date from constructing its own features. Unseen procedure/surgeon pairs score zero. No patient identifier enters the policy.
+
+For every scenario, the displayed correction is bounded by 180 minutes and the displayed duration is at least one minute. The response has skepticism intensity one. Training follows the manuscript's convex coefficient domain: absolute coefficients at most 100 and every training display inside its bounds. Test displays are clipped before the response. The response formula and reachable interval are in the theory notes.
+
+## Learning and checkpoints
+
+The shared penalty is noise-calibrated with 1,000 draws, exact quantile 7/11, and recorded seed 20261007. Each group has one lambda1; Case-Error and VF use alpha times lambda1 and VF-Direct uses lambda1. Losses are divided by that group's training days. This is a calibration rule motivated by quantile regression, not a statistical guarantee for nonconvex VF.
+
+Shift evaluates every integer implemented shift in `[-alpha*h, alpha*h]`. It displays shift/alpha, applies the duration floor and display cap, then the response. Thus a short booking may receive a smaller downward correction. Minimize summed realized training cost, breaking ties by smallest absolute shift and then positive sign. A search is complete only when every trial has exact daily plans. Each day runs its shifts in sequence with warm starts; days run in independent worker processes. Equal exact duration vectors share cached plans. The 97 integer shifts in the union do not always imply 97 duration vectors: a short booking can hit the display floor differently at the two adoption levels.
+
+The direct case-error initializer solves the asymmetric case loss with linear response. Case-Error uses proximal difference-of-convex updates on its response-aware asymmetric loss; its feasible starting point is the direct fit divided by alpha and projected into the training display domain. VF starts at Case-Error. VF-Direct starts at the direct case-error fit and is trained once per group. They are local policy fits, not certified global solutions of the nonconvex learning problem.
+
+Each VF fit owns group-day libraries seeded by exact Booked and realized-duration plans. It adds primary-cost-optimal plans at the initial policy, selects the cheapest stored plan per day, improves the resulting fixed-plan majorizer, and adds primary-cost-optimal candidate-policy plans. These library additions and realized-duration oracle seeds omit deployment tie stages; Booked seeds, Shift trials, and all test methods retain the full rule. A candidate is accepted only when the computed regularized bound does not increase. There are at most 10 convex updates per outer iteration; Case-Error runs in blocks of 30. A cap produces a usable checkpoint with `converged=false`, `hit_inner_cap=true`, and its stopping reason; another invocation continues from that checkpoint. Baselines and test evaluation are ready only after Case-Error convergence. No comparison silently treats a capped comparator as converged. The proximal coefficient is 1e-4 for nonlinear responses; direct-response subproblems are convex and use zero. Inner stopping, solver status, coefficient-bound activity, and accepted updates are recorded.
+
+VF stops after two successive outer iterations each improve the regularized training bound by less than 0.1%, or at 15 iterations. Reaching iteration 15 is explicitly recorded. Final learned and zero-policy bounds use the same final libraries and oracle lower bounds. A coefficient at its 100 bound is reported; the code never silently enlarges that scientific setting. The summary includes convergence, current and past inner-cap flags, outer-cap flags, iteration counts, total final library size, and learned/zero certificates. Every service with fewer than 10 training cases is listed with its fitted coefficient; a nonzero value is flagged, not forced to zero or made a late-run exception.
+
+Every optimizer call is logged. Completed solves and policy updates are saved transactionally. Each day has a separate SQLite database with one writer, and duplicate jobs for that day are grouped in one process. The run-level database stores fitted models. Rollback journaling avoids shared WAL sidecars. A lost worker or transient checkpoint I/O failure retries unfinished day jobs with fewer workers. A persistent failure pauses with saved progress. Active fallback models record their dimensions before optimization, so a killed worker leaves a diagnostic record. An interrupted convex solve can retain a feasible improving candidate, but its fit remains pending until resumed. Incomplete daily plans cannot enter exact results. Incomplete response-oracle solves retain their valid brackets and cuts. No opportunity threshold aborts a run. The full-model license probe runs before expensive learning preparations.
+
+## Pilots and evaluation
+
+P1/P2 use training days at the minimum, median, 90th percentile, and maximum eligible-assignment counts within each group, with deterministic date ordering, plus TGH 2011-10-03, 2011-12-06, and 2012-09-19. P1 times Booked and realized-duration plans; P2 runs all four response-oracle scenarios. P3 times one full outer iteration at `(0.8, 60)` in each group, starting from its fitted Case-Error policy. The main VF fit resumes P3's exact state, library, and first iteration. All training-day Booked, realized-duration oracle, and historical checks precede learning. P2 supplies the training response-reachable opportunity check. A full training response-oracle sweep is an optional stage and is absent from the required learning path; the full sweep is performed on the test set.
+
+Test weights and shifts are frozen before evaluation. Repeating evaluation resumes the same policies and instances; a changed policy fingerprint is rejected before test solves. All five methods pass through each scenario response. Daily method results must be complete before publication summaries are emitted. No method-specific dropping of difficult days is permitted.
+
+Report cost and savings relative to Booked, overtime, Idle time, occupied room-days, post-review MAE, signed bias, RMSE, under/overestimation minutes, simple accuracy bands, recommendation magnitude, and room-load diagnostics. Case-level and occupied-room-day test tables are saved so additional descriptive metrics can be computed without rerunning optimization. Report the realized-duration oracle and the response-limited oracle's lower/upper bounds. Use both bounds in opportunity ratios; first tighten each day/scenario upper bound with the minimum realized cost across all five completed methods, then use that one common bracket for every method and aggregate it across days. This uses already evaluated feasible witnesses and does not refit or select test policies. A zero or unresolved zero denominator is reported as undefined, not zero.
+
+For VF versus Case-Error, Shift, and VF-Direct, report mean calendar-week cost difference, percentage relative to the comparator's total cost, 95% percentile intervals from 10,000 shared week resamples, and weeks favoring VF. The same 26 calendar weeks and bootstrap indices are used across every group, method, and scenario. Aggregate costs within a resampled week before calculating percentages. Results are not averaged across scenarios, and a common direction is described only across the four modeled scenarios.
+
+Interpret the results in order: perfect-information opportunity; response-reachable opportunity; opportunity captured; the three comparisons. The assumptions do not establish causal hospital savings, changes in surgical pace, feasibility for downstream resources, or generality beyond the stated scenarios.
