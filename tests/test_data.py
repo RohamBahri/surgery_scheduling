@@ -1,13 +1,14 @@
 import numpy as np
 import pandas as pd
 
-from surgery.data import COLUMNS, Encoder, build_cohort, overlap_flags
+from surgery.data import COLUMNS, Encoder, build_cohort, build_days, overlap_flags, pairwise_spread
 
 
 def raw_case(day='2011-07-04', room='OR1', surgeon='a', rin='08:00:00', **changes):
     row = {c: None for c in COLUMNS}
     row.update(Operating_Room=room, Surgeon_Code=surgeon, Main_Procedure_Id='p', Case_Service='s',
-               Decision_Date=pd.Timestamp(day) - pd.Timedelta(days=2), Patient_Type='ELECTIVE')
+               Patient_ID='patient', Decision_Date=pd.Timestamp(day) - pd.Timedelta(days=2),
+               Patient_Type='ELECTIVE')
     row['Booked Time (Minutes)'] = 59
     for stem, clock in [('Enter Room', rin), ('Actual Start', '08:10:00'),
                         ('Actual Stop', '08:40:00'), ('Leave Room', '09:00:00')]:
@@ -40,18 +41,27 @@ def test_nested_intervals_and_strict_overlap_threshold():
     assert overlap_flags(rows).tolist() == [True, True, True, False]
 
 
-def test_training_scores_do_not_use_same_or_future_date_outcomes():
+def score_frame():
     dates = pd.to_datetime(['2011-07-04'] * 4 + ['2011-07-05'] * 4 + ['2011-07-06'] * 4)
-    train = pd.DataFrame({'date': dates, 'service': ['s'] * 12, 'procedure': ['a', 'a', 'b', 'b'] * 3,
-                          'surgeon': ['x', 'x', 'y', 'y'] * 3, 'booked': [60] * 12,
-                          'actual': [59, 61, 79, 81, 58, 62, 78, 82, 50, 70, 90, 100]})
-    first, second = Encoder(), Encoder()
+    return pd.DataFrame({'date': dates, 'service': ['s'] * 12,
+                         'procedure': ['a', 'a', 'b', 'b'] * 3,
+                         'surgeon': ['x', 'x', 'y', 'y'] * 3, 'booked': [60] * 12,
+                         'actual': [59, 61, 79, 81, 58, 62, 78, 82, 50, 70, 90, 100]})
+
+
+def test_training_scores_leave_out_own_date_and_test_uses_training_only():
+    train = score_frame()
+    first = Encoder()
     first.fit_transform(train)
     changed = train.copy()
-    changed.loc[4:, 'actual'] += 1000
+    mask = changed.date.eq(pd.Timestamp('2011-07-04')) & changed.procedure.eq('a')
+    changed.loc[mask, 'actual'] += 1000
+    second = Encoder()
     second.fit_transform(changed)
-    np.testing.assert_allclose(first.training_scores[:8], second.training_scores[:8])
-    assert np.any(first.training_scores[4:8] != 0)
+    own = train.date.eq(pd.Timestamp('2011-07-04')).to_numpy()
+    np.testing.assert_allclose(first.training_scores[own], second.training_scores[own])
+    assert np.any(first.training_scores[~own] != second.training_scores[~own])
+
     test = train.iloc[:2].copy()
     before = first.transform(test)
     test.actual += 5000
@@ -60,16 +70,40 @@ def test_training_scores_do_not_use_same_or_future_date_outcomes():
     assert np.all(first._scores(test) == 0)
 
 
-def test_unequal_size_anova_and_full_shrinkage():
-    encoder = Encoder()
-    rows = pd.DataFrame({'service': ['s'] * 5, 'procedure': ['a', 'a', 'b', 'b', 'b'],
+def test_pairwise_spread_and_full_training_shrinkage():
+    assert pairwise_spread([4]) == 0
+    assert pairwise_spread([1, 4]) == 3
+    assert np.isclose(pairwise_spread([1, 3, 8]), 14 / 3)
+
+    rows = pd.DataFrame({'date': pd.to_datetime(['2011-07-04'] * 5),
+                         'service': ['s'] * 5, 'procedure': ['a', 'a', 'b', 'b', 'b'],
                          'surgeon': ['x', 'x', 'y', 'y', 'y'], 'booked': [60] * 5,
                          'actual': [60, 62, 69, 70, 71]})
-    encoder._update(rows)
     within = 4 / 3
     between = 2 * (1 - 6.4) ** 2 + 3 * (10 - 6.4) ** 2
     expected = within / ((between - within) / 2.4)
-    assert np.isclose(encoder.shrinkage['procedure'], expected)
+    assert np.isclose(Encoder._shrinkage(rows, 'procedure'), expected)
     rows.actual = [59, 61, 59, 60, 61]
-    flat = Encoder(); flat._update(rows)
-    assert flat.shrinkage['procedure'] is None
+    assert Encoder._shrinkage(rows, 'procedure') is None
+
+
+def test_weekday_eligibility_and_both_fallback_levels():
+    train = pd.DataFrame({
+        'group': ['TGH'] * 4,
+        'date': pd.to_datetime(['2011-07-04', '2011-07-04', '2011-07-05', '2011-07-05']),
+        'room': ['OR1', 'OR2', 'OR2', 'OR1'],
+        'service': ['A', 'B', 'C', 'B'],
+        'surgeon': ['a', 'b', 'c', 'b'],
+        'case_id': [2, 3, 4, 5], 'booked': [60.] * 4, 'actual': [60.] * 4})
+    test = pd.DataFrame({
+        'group': ['TGH'] * 3, 'date': pd.to_datetime(['2013-01-07'] * 3),
+        'room': ['OR1', 'OR2', 'OR1'], 'service': ['A', 'C', 'D'],
+        'surgeon': ['a', 'c', 'd'], 'case_id': [6, 7, 8],
+        'booked': [60.] * 3, 'actual': [60.] * 3})
+    day = build_days(test, train)[0]
+    assert day.eligibility_source == ('weekday', 'all_week_fallback', 'candidate_room_fallback')
+    assert tuple(day.rooms[r] for r in day.eligible[0]) == ('OR1',)
+    assert tuple(day.rooms[r] for r in day.eligible[1]) == ('OR2',)
+    assert tuple(day.rooms[r] for r in day.eligible[2]) == ('OR1', 'OR2')
+    assert day.weekday_fallback_surgeons == 2
+    assert day.fallback_surgeons == 1
