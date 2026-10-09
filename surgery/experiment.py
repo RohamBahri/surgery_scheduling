@@ -62,6 +62,8 @@ def prepare(workbook, output, tie, seed):
     pd.DataFrame(audit['booking_distribution']).to_csv(audit_dir / 'booking_distribution.csv', index=False)
     pd.DataFrame(audit['specialty_room_weekday_blocks']).to_csv(audit_dir / 'specialty_blocks.csv', index=False)
     pd.DataFrame(audit['extreme_cases']).to_csv(audit_dir / 'extreme_cases.csv', index=False)
+    pd.DataFrame(audit['extreme_surgeon_days']).to_csv(
+        audit_dir / 'extreme_surgeon_days.csv', index=False)
     payload, feasibility, eligibility_rows = {'groups': {}, 'audit': audit}, [], []
     for group in GROUPS:
         frames = {split: cohort[cohort.group.eq(group) & cohort.split.eq(split)].reset_index(drop=True)
