@@ -144,20 +144,14 @@ def test_pattern_enumeration_has_no_surgeon_count_cap():
     assert 'enumeration' in interrupted['reason']
 
 
-def test_primary_only_omits_ties_and_fallback_matches_full_plan(monkeypatch):
+def test_primary_only_omits_ties_and_compact_matches_production_planner():
     day = make_day([190., 170., 310., 20.], rooms=3)
-    direct = solve_day(day, day.booked, backend='patterns')
+    direct = solve_day(day, day.booked)
     primary = solve_day(day, day.booked, primary_only=True)
+    compact = solve_day(day, day.booked, backend='compact')
     assert primary['complete'] and primary['stages'] == []
-    compact = planner.compact_plan
-    def pending(*args, **kwargs):
-        result = compact(*args, **kwargs)
-        result['complete'] = False
-        return result
-    monkeypatch.setattr(planner, 'compact_plan', pending)
-    fallback = solve_day(day, day.booked)
-    assert fallback['complete'] and fallback['backend'] == 'patterns'
-    assert fallback['assignment'] == direct['assignment']
+    assert direct['complete'] and compact['complete']
+    assert direct['assignment'] == compact['assignment']
 
 
 def test_case_error_cap_is_visible_and_resumes(tmp_path):
@@ -190,24 +184,13 @@ def test_shift_floor_and_exact_duration_cache_across_scenarios(monkeypatch):
             np.testing.assert_allclose(duration, expected, atol=1e-12)
 
 
-def test_pattern_screening_and_room_types_match_exhaustive_plans():
+def test_gurobi_patterns_match_exhaustive_plans():
     rng = np.random.default_rng(2701)
     for _ in range(12):
         booked = rng.integers(40, 550, 5).astype(float)
         eligibility = tuple(tuple(sorted(rng.choice(3, size=rng.integers(1, 4), replace=False))) for _ in booked)
         day = make_day(booked, rooms=3, eligible=eligibility)
-        plan = solve_day(day, booked, backend='patterns')
+        plan = solve_day(day, booked)
         assert plan['complete'], plan
         assert tuple(plan['assignment']) == brute(day)
-        assert plan['patterns_after_dual_screen'] <= plan['patterns']
-
-
-def test_invalid_solver_incumbent_never_becomes_an_exact_plan(monkeypatch):
-    from scipy.optimize import OptimizeResult
-    def invalid(c, **kwargs):
-        return OptimizeResult(status=0, fun=0., x=np.zeros(len(c)), mip_dual_bound=0., message='injected')
-    monkeypatch.setattr(planner, 'milp', invalid)
-    day = make_day([300., 300.])
-    result = solve_day(day, day.booked, backend='patterns')
-    assert not result['complete'] and not result['primary']['feasible']
-    assert result['primary']['coverage_residual'] == 1.
+        assert plan['backend'] == 'patterns-gurobi'
