@@ -92,15 +92,22 @@ def prepare(workbook, output, tie, seed):
                                     'fallback_cases': day.fallback_cases,
                                     'assignable': all(bool(e) for e in day.eligible)})
                 for s, surgeon in enumerate(day.surgeon_ids):
+                    historical = set(day.historical[day.case_surgeon == s])
                     eligibility_rows.append({'group': group, 'split': split, 'date': day.date,
                         'surgeon': surgeon, 'source': day.eligibility_source[s],
                         'eligible_rooms': len(day.eligible[s]),
-                        'rooms': ';'.join(day.rooms[r] for r in day.eligible[s])})
+                        'rooms': ';'.join(day.rooms[r] for r in day.eligible[s]),
+                        'historical_rooms_allowed': historical.issubset(set(day.eligible[s]))})
     pd.DataFrame(feasibility).to_csv(audit_dir / 'daily_feasibility.csv', index=False)
-    pd.DataFrame(eligibility_rows).to_csv(audit_dir / 'room_eligibility.csv', index=False)
+    eligibility_table = pd.DataFrame(eligibility_rows)
+    eligibility_table.to_csv(audit_dir / 'room_eligibility.csv', index=False)
     audit['weekday_fallback_surgeon_days'] = sum(r['weekday_fallback_surgeons'] for r in feasibility)
     audit['fallback_surgeon_days'] = sum(r['fallback_surgeons'] for r in feasibility)
     audit['all_days_assignable'] = all(r['assignable'] for r in feasibility)
+    audit['historical_room_compatibility'] = [
+        {'group': group, 'split': split, 'surgeon_days': len(rows),
+         'share': float(rows.historical_rooms_allowed.mean())}
+        for (group, split), rows in eligibility_table.groupby(['group', 'split'])]
     write_json(audit_dir / 'audit.json', audit)
     write_json(root / 'manifest.json', specification)
     temporary = cache.with_suffix('.tmp')
@@ -488,8 +495,8 @@ def evaluate(payload, store, args, root):
                                 'case_id': int(case.case_id), 'group': group, 'date': day.date,
                                 'alpha': alpha, 'h': h, 'method': method, 'service': case.service,
                                 'surgeon': case.surgeon, 'procedure': case.procedure,
-                                'patient_id': case.patient_id, 'booked': float(day.booked[local]),
-                                'actual': float(day.actual[local]), 'raw_display': float(day_raw[local]),
+                                'booked': float(day.booked[local]), 'actual': float(day.actual[local]),
+                                'raw_display': float(day_raw[local]),
                                 'displayed_correction': u, 'implemented_correction': implemented,
                                 'planned_duration': float(day_duration[local]),
                                 'historical_room': day.rooms[int(day.historical[local])],
