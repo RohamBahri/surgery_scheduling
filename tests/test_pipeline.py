@@ -11,8 +11,10 @@ from surgery.storage import Store
 
 def test_penalty_uses_training_days_and_fixed_seed():
     X = np.column_stack([np.ones(10), np.linspace(-1, 1, 10)])
-    first = penalty(X, 2, seed=17)
-    assert first == penalty(X, 2, seed=17)
+    errors = np.linspace(-2, 2, 10)
+    first = penalty(X, 2, seed=17, errors=errors)
+    assert first == penalty(X, 2, seed=17, errors=errors)
+    assert len(first['zero_pull_over_lambda']) == 1
     assert first['lambda1'] == 2 * penalty(X, 4, seed=17)['lambda1']
     assert first['draws'] == 1000 and first['tau'] == '7/11'
 
@@ -23,6 +25,7 @@ def test_complete_pipeline_and_identical_test_resume(tmp_path, monkeypatch):
         train = pd.DataFrame({'case_id': [2, 3], 'group': [group] * 2,
                               'date': pd.to_datetime(['2011-07-04'] * 2), 'service': ['s'] * 2,
                               'procedure': ['p'] * 2, 'surgeon': ['a', 'b'], 'room': ['A', 'B'],
+                              'patient_id': ['p1', 'p2'],
                               'booked': [120., 200.], 'actual': [140., 200.]})
         test = train.copy(); test.date = pd.Timestamp('2013-01-07')
         encoder = Encoder()
@@ -50,6 +53,17 @@ def test_complete_pipeline_and_identical_test_resume(tmp_path, monkeypatch):
     assert all('hit_inner_cap' in r and 'final_library_size' in r and 'rare_services' in r for r in diagnostics)
     first = evaluate(payload, store, args, tmp_path)
     assert first['ready']
+    case_results = pd.read_csv(tmp_path / 'report' / 'case_results.csv')
+    assert len(case_results) == len(GROUPS) * 2 * 4 * 5
+    assert not case_results.duplicated(['group', 'case_id', 'alpha', 'h', 'method']).any()
+    rooms = pd.read_csv(tmp_path / 'report' / 'room_day_results.csv')
+    calculated = (case_results.groupby(['group', 'date', 'alpha', 'h', 'method', 'assigned_room'])
+                  .planned_duration.agg(['sum', 'count']).reset_index())
+    calculated['expected_load'] = calculated['sum'] + 30 * (calculated['count'] - 1)
+    merged = rooms.merge(calculated,
+                         left_on=['group', 'date', 'alpha', 'h', 'method', 'room'],
+                         right_on=['group', 'date', 'alpha', 'h', 'method', 'assigned_room'])
+    assert np.allclose(merged.planned_load, merged.expected_load)
     solve_count = len(store.solve_rows())
     second = evaluate(payload, store, args, tmp_path)
     assert first == second
