@@ -28,15 +28,19 @@ The ratio 1.75 is a modeling input supported by Dexter and Macario (2004), not a
 
 ## Exact room patterns and deterministic ties
 
-For a nonempty subset S of surgeon-days sharing an eligible room r, define its load as the sum of their case durations plus 30 times (case count minus one), and its cost by the same idle/overtime function. A binary variable selects this subset for r. Every surgeon-day is covered exactly once and each room selects at most one subset. This is an exact set-partitioning formulation of the daily assignment problem.
+For a nonempty subset \(S\) of surgeon-days sharing an eligible named room \(r\), define its load as the sum of their case durations plus 30 times (case count minus one), and its cost by the same idle/overtime function. A binary variable selects each feasible pair \((S,r)\). Every surgeon-day is covered exactly once and each room selects at most one pattern. This is an exact set-partitioning formulation of the daily assignment problem.
 
-If U is the cost of any feasible assignment, every room in a solution of cost at most U has cost at most U, since all room costs are nonnegative. In particular its load is at most 480 + U/1.75. Enumerating all eligible subsets below this load bound therefore preserves every optimum and every cost-optimal tie. There is no cardinality restriction. An incomplete enumeration cannot establish an optimum. Rooms with identical eligibility columns can be represented by one type with capacity equal to their count. During alphabetical tie resolution, already named rooms are separated from the remaining interchangeable capacity; compatible patterns cover all surgeons already fixed to that room. This preserves precisely the feasible completions of each assignment prefix.
+If \(U\) is the cost of any feasible whole-day assignment, every room in a solution of cost at most \(U\) has room cost at most \(U\) because room costs are nonnegative. Hence an overtime-side pattern must satisfy
 
-Before the integer solve, solve the complete pattern LP. For any dual-feasible solution with lower bound L and nonnegative reduced costs r_j, selecting binary pattern j costs at least L+r_j. Thus a pattern with L+r_j>U can be removed without losing any optimum or cost-optimal tie. The implementation shifts equality duals outward to restore dual feasibility before applying this test, and retains a numerical margin. This is a mathematical screening bound, not a cap on pattern counts.
+\[
+L_{Sr}\le 480+U/1.75.
+\]
 
-The maximum-load optimum lies among finitely many pattern loads. Threshold feasibility is monotone, allowing binary search. The lexicographic assignment is obtained by checking surgeon/room prefixes in order. A validated feasible witness establishes a feasible threshold/prefix even if a search stops early; only a proven infeasibility can rule one out. No unfinished search without a witness can justify such exclusion.
+Enumerating every eligible pattern below this safe bound preserves every optimum and every cost-optimal tie; there is no surgeon-count cutoff. The complete model is solved with Gurobi. An incomplete enumeration or unfinished solve is never certified.
 
-The deployment order is primary cost, largest planned room load, then the lexicographically smallest assignment under canonical surgeon and room ordering. It is independent of realized durations. The compact and pattern formulations apply exactly this order. Library enrichment needs only a primary-cost optimum: the value-function bound uses that minimum value and is valid regardless of which cost-optimal plan enters the library. Shift and evaluation still apply every deployment tie stage.
+After proving the minimum primary cost, retain only solutions at that cost and minimize a variable bounding every selected pattern load. After proving that minimum largest load, resolve the remaining assignment tie lexicographically under fixed surgeon and room ordering. The compact assignment formulation is not part of the production experiment; it remains in the tests as an independent exact check.
+
+The deployment order is therefore primary cost, largest planned room load, then lexicographically smallest assignment. It is independent of realized durations. Library enrichment needs only a primary-cost optimum because the value-function bound depends on that minimum value, not on which cost-optimal plan enters the library. Shift and test deployment retain all tie stages.
 
 ## Response and reachable oracle
 
@@ -135,30 +139,48 @@ The code represents hinges and maxima with linear epigraphs, linearizes H at the
 
 Corollary 2 remains a worst-case bound, not a managerial assertion that smaller display caps improve realized cost. The cap is fixed at 180 rather than selected from test performance.
 
-## Historical scores and penalty
+## Offline history scores and penalty
 
-At date t, use only earlier dates in the same room group. For service s and a procedure or surgeon category c, the score is
+Let \(e=a-b\) be booking error. The two bias features compare a procedure or surgeon category \(c\) with its service \(s\):
 
 \[
-\frac{n_{sc}}{n_{sc}+k}\left(\bar e_{sc}-\bar e_s\right).
+q^{\mu}_{sc}=\frac{n_{sc}}{n_{sc}+k}
+(\bar e_{sc}-\bar e_s).
 \]
 
-The service/category cells may have unequal counts. With K observed cells, S services and N observations, compute pooled within-cell MS_W with N-K degrees of freedom and service-centered between-cell MS_B with K-S degrees of freedom. The effective cell size is
+For training cases on date \(t\), all counts and means in this expression exclude the entire date \(t\); test features use the complete training sample. The shrinkage constant \(k\) is estimated once from the full training sample with the same unequal-cell ANOVA calculation used previously. It is a global training hyperparameter; the date-specific category effect itself remains leave-date-out.
+
+The spread statistic for a category with \(n\ge2\) is the average pairwise absolute difference
+
+\[
+G_{sc}=\frac{2}{n_{sc}(n_{sc}-1)}
+\sum_{i<j}|e_i-e_j|.
+\]
+
+Define the service analogue \(G_s\) in the same way and use
+
+\[
+q^{\sigma}_{sc}=\frac{n_{sc}}{n_{sc}+k}(G_{sc}-G_s).
+\]
+
+A category with fewer than two observations has zero spread score. Procedure spread reuses the procedure-bias reliability constant, and surgeon spread reuses the surgeon-bias constant. This is a common count-based reliability adjustment, not a claim that the mean-effect ANOVA constant is an optimal shrinkage estimator for spread.
+
+With \(K\) category cells, \(S\) services and \(N\) observations, the mean-effect shrinkage calculation uses pooled within-cell \(MS_W\), service-centered \(MS_B\), and effective cell size
 
 \[
 n_0=\frac{\sum_s[N_s-\sum_c n_{sc}^2/N_s]}{K-S},\qquad
 \widehat\sigma_B^2=(MS_B-MS_W)/n_0.
 \]
 
-Use k=MS_W/sigma_B^2 when defined and positive; otherwise use full shrinkage to zero. An unseen cell scores zero. The ANOVA moments themselves obey the earlier-date cutoff; final training moments are frozen for test cases.
+Use \(k=MS_W/\widehat\sigma_B^2\) when the variance estimate is positive; otherwise fully shrink the corresponding bias and spread effects to zero.
 
-For standardized nonintercept features, simulate 1,000 independent vectors of uniform draws and take q90 of
+For standardized nonintercept features, simulate 1,000 independent uniform noise vectors and take \(q_{0.90}\) of
 
 \[
 \max_j\left|\sum_i\left(\frac7{11}-1\{U_i\le7/11\}\right)x_{ij}\right|.
 \]
 
-Set lambda1_g=2.75(1.1)q90/D_g, and lambda_g=alpha*lambda1_g. VF-Direct uses alpha=1. Case-Error and VF use the same daily loss normalization and lambda. Belloni and Chernozhukov (2011) motivates this noise calibration; its statistical guarantees are not claimed for the nonconvex VF objective.
+Set \(\lambda_{1,g}=2.75(1.1)q_{0.90}/D_g\), and \(\lambda_g=\alpha\lambda_{1,g}\). VF-Direct uses \(\alpha=1\). The code also reports, for each feature, the magnitude of the asymmetric-loss slope at zero advice divided by \(\lambda_1\); this is a diagnostic, not a feature-selection rule. Belloni and Chernozhukov (2011) motivates the noise calibration; its statistical guarantees are not claimed for the nonconvex VF objective.
 
 ## Sources
 
