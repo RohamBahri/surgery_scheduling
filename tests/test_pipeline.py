@@ -32,7 +32,8 @@ def test_complete_pipeline_and_identical_test_resume(tmp_path, monkeypatch):
         X = encoder.fit_transform(train)
         payload['groups'][group] = {'frames': {'train': train, 'test': test},
                                     'X': {'train': X, 'test': encoder.transform(test)},
-                                    'days': {'train': build_days(train, train), 'test': build_days(test, train)}}
+                                    'days': {'train': build_days(train, train), 'test': build_days(test, train)},
+                                    'feature_names': encoder.names}
     store = Store(tmp_path)
     args = Namespace(seconds=5, oracle_seconds=5, threads=1, workers=1, tie='maxload', seed=7, refine_oracles=False)
     from surgery import experiment
