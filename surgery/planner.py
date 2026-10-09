@@ -1,20 +1,16 @@
 """Daily room assignment, deterministic ties, and response-limited oracle bounds."""
 import math
 import time
-import warnings
 from pathlib import Path
 
 import gurobipy as gp
 import numpy as np
-import scipy
-from scipy import sparse
-from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 from gurobipy import GRB
 
 from .storage import digest
 
 TOL = 1e-6
-MODEL_ID = digest([Path(__file__).read_text(), gp.gurobi.version(), scipy.__version__])
+MODEL_ID = digest([Path(__file__).read_text(), gp.gurobi.version()])
 
 
 def response(display, alpha, h):
@@ -185,215 +181,141 @@ def compact_plan(day, durations, warm, store, deadline, threads, primary_only, k
 
 
 def pattern_plan(day, durations, warm, store, deadline, threads, primary_only, key):
-    """Complete subsets with interchangeable rooms represented by a capacity, not duplicate columns."""
+    """Exact set partitioning over feasible surgeon-day bundles, solved entirely with Gurobi."""
     weights = np.bincount(day.case_surgeon, weights=durations + 30, minlength=day.n_surgeons)
     upper = metrics(day, warm, durations)['cost']
     limit = 510 + (upper + TOL) / 1.75
-    types = {}
-    for r in range(day.n_rooms):
-        members = tuple(s for s, rooms in enumerate(day.eligible) if r in rooms)
-        types.setdefault(members, []).append(r)
-    rooms_by_type = list(types.values())
-    room_type = {r: t for t, rooms in enumerate(rooms_by_type) for r in rooms}
-    masks = [sum(1 << t for t, members in enumerate(types) if s in members) for s in range(day.n_surgeons)]
-    patterns, loads, costs = [], [], []
-    result = {'complete': False, 'assignment': warm, 'bound': 0., 'stages': [], 'backend': 'patterns'}
+    patterns = []
 
-    def enumerate_subsets(first, members, weight, common):
+    def enumerate_subsets(first, members, total, common_rooms):
         if time.monotonic() >= deadline:
             raise TimeoutError
         for s in range(first, day.n_surgeons):
-            eligible, total = common & masks[s], weight + weights[s]
-            if not eligible or total > limit:
+            rooms = tuple(r for r in common_rooms if r in day.eligible[s])
+            weight = total + weights[s]
+            if not rooms or weight > limit:
                 continue
-            group, load = members + (s,), total - 30
+            group = members + (s,)
+            load = weight - 30
             cost = max(480 - load, 0) + 1.75 * max(load - 480, 0)
             if cost <= upper + TOL:
-                for t in range(len(types)):
-                    if eligible & (1 << t):
-                        patterns.append((group, t)); loads.append(load); costs.append(cost)
-            enumerate_subsets(s + 1, group, total, eligible)
+                patterns.extend((group, r, float(load), float(cost)) for r in rooms)
+            enumerate_subsets(s + 1, group, weight, rooms)
 
+    result = {'complete': False, 'assignment': warm, 'bound': 0., 'stages': [],
+              'backend': 'patterns-gurobi'}
     try:
-        enumerate_subsets(0, (), 0., (1 << len(types)) - 1)
+        enumerate_subsets(0, (), 0., tuple(range(day.n_rooms)))
     except TimeoutError:
         result['reason'] = 'pattern enumeration pending; partial enumeration is never certified'
         return result
-    costs, loads = np.asarray(costs), np.asarray(loads)
-    result.update(patterns=len(patterns), room_types=len(types))
-    active = np.ones(len(patterns), dtype=bool)
+    if not patterns:
+        result['reason'] = 'no feasible room patterns'
+        return result
 
-    def stage(label, prefix=None, maximum=float('inf'), **metadata):
-        begin = time.monotonic()
-        prefix = prefix or {}
-        fixed = {r: {s for s in prefix if prefix[s] == r} for r in set(prefix.values())}
-        free = {t: [r for r in rooms if r not in fixed] for t, rooms in enumerate(rooms_by_type)}
-        buckets = [('fixed', r) for r in sorted(fixed)] + [('free', t) for t in free if free[t]]
-        bucket_id = {value: day.n_surgeons + j for j, value in enumerate(buckets)}
-        allowed, rr, cc = [], [], []
-        for j, (members, t) in enumerate(patterns):
-            if not active[j] or loads[j] > maximum + 1e-8:
-                continue
-            assigned = {prefix[s] for s in members if s in prefix}
-            if len(assigned) > 1:
-                continue
-            if assigned:
-                room = next(iter(assigned))
-                if room_type[room] != t or not fixed[room].issubset(members):
+    result['patterns'] = len(patterns)
+    by_surgeon = [[] for _ in range(day.n_surgeons)]
+    by_room = [[] for _ in range(day.n_rooms)]
+    by_pair = {(s, r): [] for s, rooms in enumerate(day.eligible) for r in rooms}
+    for j, (members, room, _, _) in enumerate(patterns):
+        by_room[room].append(j)
+        for s in members:
+            by_surgeon[s].append(j)
+            by_pair[s, room].append(j)
+
+    with model(day.key + '_patterns', max(.001, deadline - time.monotonic()), threads) as m:
+        z = m.addVars(len(patterns), vtype=GRB.BINARY, name='pattern')
+        for s, ids in enumerate(by_surgeon):
+            m.addConstr(gp.quicksum(z[j] for j in ids) == 1, name=f'cover_{s}')
+        for r, ids in enumerate(by_room):
+            if ids:
+                m.addConstr(gp.quicksum(z[j] for j in ids) <= 1, name=f'room_{r}')
+
+        warm_groups = {r: tuple(s for s, room in enumerate(warm) if room == r)
+                       for r in set(warm)}
+        for j, (members, room, _, _) in enumerate(patterns):
+            z[j].Start = int(warm_groups.get(room) == members)
+
+        cost = gp.quicksum(patterns[j][3] * z[j] for j in range(len(patterns)))
+
+        def extract_patterns():
+            assignment = [-1] * day.n_surgeons
+            for j in range(len(patterns)):
+                if z[j].X <= .5:
                     continue
-                bucket = ('fixed', room)
-            else:
-                bucket = ('free', t)
-                if not free[t]:
-                    continue
-            col = len(allowed)
-            allowed.append(j)
-            rr.extend((*members, bucket_id[bucket])); cc.extend([col] * (len(members) + 1))
-        columns = len(allowed)
-        row = {'label': label, 'day': day.key, 'problem_key': key, **metadata,
-               'variables': columns, 'constraints': day.n_surgeons + len(buckets),
-               'solver': 'HiGHS via SciPy ' + scipy.__version__, 'solutions': 0, 'bound': None,
-               'objective': None, 'optimal': False, 'feasible': False}
-        if not columns:
-            row.update(status=2, message='No compatible patterns')
-        elif time.monotonic() >= deadline:
-            row.update(status=1, message='Daily time budget exhausted')
-        else:
-            A = sparse.csc_matrix((np.ones(len(rr)), (rr, cc)), shape=(row['constraints'], columns))
-            capacity = np.r_[np.ones(day.n_surgeons), [1 if kind == 'fixed' else len(free[v]) for kind, v in buckets]]
-            if 'primary_cost' not in result:
-                # A dual-feasible relaxation removes columns that cannot belong to any incumbent-better plan.
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', message='Unrecognized options detected.*')
-                    relaxed = linprog(costs[allowed], A_ub=A[day.n_surgeons:], b_ub=capacity[day.n_surgeons:],
-                        A_eq=A[:day.n_surgeons], b_eq=np.ones(day.n_surgeons), bounds=(0, None), method='highs',
-                        options={'threads': threads, 'time_limit': max(.001, deadline - time.monotonic()),
-                                 'dual_feasibility_tolerance': 1e-9, 'primal_feasibility_tolerance': 1e-9})
-                lp_row = dict(row, label='planner_pattern_relaxation', status=int(relaxed.status),
-                              optimal=relaxed.status == 0, objective=relaxed.fun, seconds=time.monotonic() - begin)
-                if relaxed.status != 0:
-                    if store:
-                        store.log(lp_row)
-                    return dict(lp_row, feasible=False)
-                dual = np.r_[relaxed.eqlin.marginals, np.minimum(relaxed.ineqlin.marginals, 0)]
-                reduced = costs[allowed] - A.T @ dual
-                dual[:day.n_surgeons] -= max(0., -float(reduced.min())) + 1e-8
-                reduced = costs[allowed] - A.T @ dual
-                lower_bound = float(capacity @ dual)
-                keep = lower_bound + reduced <= upper + TOL
-                lp_row['bound'] = lower_bound
-                if store:
-                    store.log(lp_row)
-                active[np.asarray(allowed)[~keep]] = False
-                allowed = np.asarray(allowed)[keep].tolist()
-                A = A[:, keep]
-                columns = len(allowed)
-                row['variables'] = columns
-                result['patterns_after_dual_screen'] = columns
-            con = [LinearConstraint(A, np.r_[np.ones(day.n_surgeons), np.zeros(len(buckets))], capacity)]
-            objective = costs[allowed]
-            if 'primary_cost' in result:
-                con.append(LinearConstraint(sparse.csc_matrix(objective[None, :]), -np.inf, result['primary_cost'] + 1e-8))
-                objective = np.zeros(columns)
-            row['constraints'] = sum(c.A.shape[0] for c in con)
-            if store:
-                store.put('active_solve:' + key, row)
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', message='Unrecognized options detected.*', category=RuntimeWarning)
-                raw = milp(objective, integrality=np.ones(columns), bounds=Bounds(0, 1), constraints=con,
-                           options={'time_limit': max(.001, deadline - time.monotonic()), 'mip_rel_gap': 0.,
-                                    'mip_abs_gap': 1e-8, 'threads': threads, 'mip_feasibility_tolerance': 1e-9,
-                                    'presolve': 'primary_cost' not in result})
-            finite = lambda v: float(v) if v is not None and np.isfinite(v) else None
-            row.update(status=int(raw.status), optimal=raw.status == 0, objective=finite(raw.fun),
-                       bound=finite(raw.get('mip_dual_bound')), solutions=int(raw.x is not None), message=raw.message)
-            if raw.x is not None:
-                total = A @ np.rint(raw.x)
-                valid = (np.max(np.abs(total[:day.n_surgeons] - 1)) < TOL and
-                         np.all(total <= capacity + TOL) and np.min(raw.x) >= -TOL and
-                         np.max(raw.x) <= 1 + TOL and np.max(np.abs(raw.x - np.rint(raw.x))) < TOL)
-                assignment = [-1] * day.n_surgeons
-                if valid:
-                    chosen = [patterns[allowed[j]] for j in np.flatnonzero(raw.x > .5)]
-                    available = {t: list(rooms) for t, rooms in free.items()}
-                    for members, t in sorted(chosen):
-                        named = {prefix[s] for s in members if s in prefix}
-                        room = next(iter(named)) if named else available[t].pop(0)
-                        for member in members:
-                            assignment[member] = room
-                    valid = is_feasible(day, assignment)
-                if valid:
-                    value = metrics(day, assignment, durations)
-                    valid = (value['max_load'] <= maximum + TOL and
-                             value['cost'] <= result.get('primary_cost', upper) + TOL)
-                if valid:
+                members, room, _, _ = patterns[j]
+                for s in members:
+                    if assignment[s] != -1:
+                        return None
+                    assignment[s] = room
+            return assignment if is_feasible(day, assignment) else None
+
+        def stage(label, objective, **metadata):
+            m.setObjective(objective)
+            m.Params.TimeLimit = max(.001, deadline - time.monotonic())
+            row = optimize(m, store, label, day=day.key, problem_key=key,
+                           patterns=len(patterns), **metadata)
+            if row['solutions']:
+                assignment = extract_patterns()
+                if assignment is None:
+                    row['optimal'] = False
+                    row['feasible'] = False
+                    row['message'] = 'Extracted pattern assignment failed validation'
+                else:
                     result['assignment'] = assignment
                     row['feasible'] = True
-                else:
-                    row.update(optimal=False, message='Extracted pattern assignment failed numerical validation',
-                               extracted=metrics(day, assignment, durations) if is_feasible(day, assignment) else assignment,
-                               integrality_residual=float(np.max(np.abs(raw.x - np.rint(raw.x)))), expected_cost=result.get('primary_cost', upper),
-                               expected_maximum=maximum if np.isfinite(maximum) else None,
-                               coverage_residual=float(np.max(np.abs(total[:day.n_surgeons] - 1))),
-                               capacity_violation=float(np.max(total - capacity)))
-        row['seconds'] = time.monotonic() - begin
-        if store:
-            store.log(row)
-            store.put('active_solve:' + key, None)
-        return row
+            else:
+                row['feasible'] = False
+            return row
 
-    row = stage('planner_pattern_primary')
-    result.update(primary=row, bound=row['bound'] if row['bound'] is not None else 0.)
-    if not row['optimal'] or not row['feasible']:
-        return result
-    result['primary_cost'] = metrics(day, result['assignment'], durations)['cost']
-    if abs(result['primary_cost'] - row['objective']) > TOL:
-        result['reason'] = 'pattern solution failed objective validation'
-        return result
-    if primary_only:
-        result['complete'] = True
-        return result
-    lower = weights.max() - 30
-    upper_load = metrics(day, result['assignment'], durations)['max_load']
-    candidates = np.unique(loads[(loads >= lower - 1e-8) & (loads <= upper_load + 1e-8)])
-    left, right = 0, len(candidates) - 1
-    while left < right:
-        mid = (left + right) // 2
-        row = stage('planner_pattern_max_load', maximum=candidates[mid], threshold=float(candidates[mid]))
-        result['stages'].append(row)
-        if row['feasible']:
-            right = mid
-        elif row['status'] == 2:
-            left = mid + 1
-        else:
+        row = stage('planner_pattern_primary', cost)
+        result.update(primary=row, bound=row['bound'] if row['bound'] is not None else 0.)
+        if not row['optimal'] or not row['feasible']:
             return result
-    maximum = float(candidates[left])
-    result['balance_value'] = maximum
-    prefix = {}
-    for s in range(day.n_surgeons):
-        for room in day.eligible[s]:
-            if room == result['assignment'][s]:
-                prefix[s] = room
-                break
-            if weights[s] + sum(weights[t] for t, r in prefix.items() if r == room) - 30 > maximum + TOL:
-                continue
-            row = stage('planner_pattern_assignment_tie', {**prefix, s: room}, maximum,
-                        surgeon=s, room=room)
+        optimum = metrics(day, result['assignment'], durations)['cost']
+        result['primary_cost'] = optimum
+        if abs(optimum - row['objective']) > TOL:
+            result['reason'] = 'pattern solution failed objective validation'
+            return result
+        if primary_only:
+            result['complete'] = True
+            return result
+
+        m.addConstr(cost <= optimum + 1e-8)
+        peak = m.addVar(lb=float(weights.max() - 30), name='largest_room_load')
+        for j, (_, _, load, _) in enumerate(patterns):
+            m.addConstr(peak >= load * z[j])
+        row = stage('planner_pattern_max_load', peak)
+        result['stages'].append(row)
+        if not row['optimal'] or not row['feasible']:
+            return result
+        maximum = metrics(day, result['assignment'], durations)['max_load']
+        result['balance_value'] = maximum
+        m.addConstr(peak <= maximum + 1e-8)
+
+        for ids, powers in canonical_chunks(day):
+            objective = gp.quicksum(
+                power * room * z[j]
+                for s, power in zip(ids, powers)
+                for room in day.eligible[s]
+                for j in by_pair[s, room])
+            row = stage('planner_pattern_assignment_tie', objective, first_surgeon=ids[0])
             result['stages'].append(row)
-            if row['feasible']:
-                prefix[s] = room
-                break
-            if row['status'] != 2:
+            if not row['optimal'] or not row['feasible']:
                 return result
+            for s in ids:
+                room = result['assignment'][s]
+                m.addConstr(gp.quicksum(z[j] for j in by_pair[s, room]) == 1)
+
     result['complete'] = True
     return result
 
 
 def solve_day(day, durations, store=None, *, seconds=300, threads=1, tie='maxload',
-              primary_only=False, warm_start=None, backend='auto'):
+              primary_only=False, warm_start=None, backend='patterns'):
     durations = np.asarray(durations, float)
     if (len(durations) != len(day.booked) or not np.isfinite(durations).all()
-            or np.any(durations <= 0) or tie != 'maxload' or backend not in ('auto', 'compact', 'patterns')):
+            or np.any(durations <= 0) or tie != 'maxload' or backend not in ('patterns', 'compact')):
         raise ValueError('Invalid daily durations, tie rule, or backend')
     key = 'plan:' + digest([MODEL_ID, day.signature(), durations, tie, primary_only, backend])
     saved = store.get(key) if store else None
@@ -404,21 +326,13 @@ def solve_day(day, durations, store=None, *, seconds=300, threads=1, tie='maxloa
     warm = saved.get('assignment') if saved else warm_start
     if warm is None or not is_feasible(day, warm):
         warm = [rooms[0] for rooms in day.eligible]
-        # A feasible incumbent bounds enumeration; moving one surgeon never compromises eligibility.
         for _ in range(2):
             for s in sorted(range(day.n_surgeons), key=lambda s: -sum(durations[day.case_surgeon == s])):
-                warm[s] = min(day.eligible[s], key=lambda r: metrics(day, warm[:s] + [r] + warm[s + 1:], durations)['cost'])
-    use_patterns = backend == 'patterns'
-    if use_patterns:
-        result = pattern_plan(day, durations, warm, store, deadline, threads, primary_only, key)
-    else:
-        first_deadline = min(deadline, start + min(2., seconds / 4)) if backend == 'auto' and seconds is not None else deadline
-        result = compact_plan(day, durations, warm, store, first_deadline, threads, primary_only, key)
-        if backend == 'auto' and not result['complete'] and time.monotonic() < deadline:
-            first = result
-            result = pattern_plan(day, durations, first['assignment'], store, deadline, threads, primary_only, key)
-            result['compact_attempt'] = first
-            result['bound'] = max(result['bound'], first['bound'])
+                warm[s] = min(day.eligible[s],
+                              key=lambda r: metrics(day, warm[:s] + [r] + warm[s + 1:], durations)['cost'])
+    result = (compact_plan(day, durations, warm, store, deadline, threads, primary_only, key)
+              if backend == 'compact'
+              else pattern_plan(day, durations, warm, store, deadline, threads, primary_only, key))
     result.update(tie=tie, primary_only=primary_only, seconds=time.monotonic() - start)
     result['planned'] = metrics(day, result['assignment'], durations)
     if result['complete']:
@@ -429,8 +343,6 @@ def solve_day(day, durations, store=None, *, seconds=300, threads=1, tie='maxloa
     if store:
         store.put(key, result)
     return result
-
-
 def plan_job(day, durations, options, store=None):
     return solve_day(day, durations, store, **options)
 

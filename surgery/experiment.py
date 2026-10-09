@@ -12,7 +12,9 @@ from pathlib import Path
 
 import gurobipy as gp
 import numpy as np
+import openpyxl
 import pandas as pd
+import scipy
 
 from .data import COLUMNS, GROUPS, SCENARIOS, Encoder, build_cohort, build_days
 from .learning import fit_policy, penalty, project, train_shift, train_vf
@@ -30,8 +32,11 @@ def scenario_key(alpha, h):
 def prepare(workbook, output, tie, seed):
     source = hashlib.sha256(workbook.read_bytes()).hexdigest()
     code = digest({p.name: p.read_text() for p in sorted(Path(__file__).parent.glob('*.py'))})
+    environment = {'python': sys.version.split()[0], 'gurobi': '.'.join(map(str, gp.gurobi.version())),
+                   'numpy': np.__version__, 'pandas': pd.__version__,
+                   'scipy': scipy.__version__, 'openpyxl': openpyxl.__version__}
     specification = {'input_sha256': source, 'code_sha256': code, 'tie': tie, 'seed': seed,
-                     'groups': GROUPS, 'scenarios': SCENARIOS}
+                     'groups': GROUPS, 'scenarios': SCENARIOS, 'environment': environment}
     root = output / digest(specification)[:16]
     root.mkdir(parents=True, exist_ok=True)
     write_json(output / 'current_run.json', {'directory': str(root.resolve()), **specification})
@@ -53,7 +58,11 @@ def prepare(workbook, output, tie, seed):
     quality.to_csv(audit_dir / 'daily_cleaning.csv', index=False)
     pd.DataFrame(audit['flow']).to_csv(audit_dir / 'cohort_flow.csv', index=False)
     pd.DataFrame(audit['counts']).to_csv(audit_dir / 'cohort_counts.csv', index=False)
-    payload, feasibility = {'groups': {}, 'audit': audit}, []
+    pd.DataFrame(audit['cancellation_reasons']).to_csv(audit_dir / 'cancellation_reasons.csv', index=False)
+    pd.DataFrame(audit['booking_distribution']).to_csv(audit_dir / 'booking_distribution.csv', index=False)
+    pd.DataFrame(audit['specialty_room_weekday_blocks']).to_csv(audit_dir / 'specialty_blocks.csv', index=False)
+    pd.DataFrame(audit['extreme_cases']).to_csv(audit_dir / 'extreme_cases.csv', index=False)
+    payload, feasibility, eligibility_rows = {'groups': {}, 'audit': audit}, [], []
     for group in GROUPS:
         frames = {split: cohort[cohort.group.eq(group) & cohort.split.eq(split)].reset_index(drop=True)
                   for split in ('train', 'test')}
@@ -63,7 +72,8 @@ def prepare(workbook, output, tie, seed):
         X = {'train': encoder.fit_transform(frames['train'])}
         X['test'] = encoder.transform(frames['test'])
         days = {split: build_days(frame, frames['train']) for split, frame in frames.items()}
-        payload['groups'][group] = {'frames': frames, 'X': X, 'days': days}
+        payload['groups'][group] = {'frames': frames, 'X': X, 'days': days,
+                                    'feature_names': encoder.names}
         write_json(audit_dir / f'encoder_{group}.json', encoder.metadata())
         np.savez_compressed(audit_dir / f'features_{group}.npz', X_train=X['train'], X_test=X['test'],
                             training_scores=encoder.training_scores,
@@ -74,10 +84,19 @@ def prepare(workbook, output, tie, seed):
                 feasibility.append({'group': group, 'split': split, 'date': day.date,
                                     'cases': len(day.booked), 'surgeon_days': day.n_surgeons,
                                     'candidate_rooms': day.n_rooms,
+                                    'weekday_fallback_surgeons': day.weekday_fallback_surgeons,
+                                    'weekday_fallback_cases': day.weekday_fallback_cases,
                                     'fallback_surgeons': day.fallback_surgeons,
                                     'fallback_cases': day.fallback_cases,
                                     'assignable': all(bool(e) for e in day.eligible)})
+                for s, surgeon in enumerate(day.surgeon_ids):
+                    eligibility_rows.append({'group': group, 'split': split, 'date': day.date,
+                        'surgeon': surgeon, 'source': day.eligibility_source[s],
+                        'eligible_rooms': len(day.eligible[s]),
+                        'rooms': ';'.join(day.rooms[r] for r in day.eligible[s])})
     pd.DataFrame(feasibility).to_csv(audit_dir / 'daily_feasibility.csv', index=False)
+    pd.DataFrame(eligibility_rows).to_csv(audit_dir / 'room_eligibility.csv', index=False)
+    audit['weekday_fallback_surgeon_days'] = sum(r['weekday_fallback_surgeons'] for r in feasibility)
     audit['fallback_surgeon_days'] = sum(r['fallback_surgeons'] for r in feasibility)
     audit['all_days_assignable'] = all(r['assignable'] for r in feasibility)
     write_json(audit_dir / 'audit.json', audit)
@@ -198,7 +217,8 @@ def baselines(payload, store, args, root):
         b, a = frame.booked.to_numpy(), frame.actual.to_numpy()
         state = store.get('models:' + group) or {'scenarios': {}}
         if 'penalty' not in state:
-            state['penalty'] = penalty(X, len(days), args.seed)
+            state['penalty'] = penalty(X, len(days), args.seed, a - b)
+            state['penalty']['feature_names'] = bundle['feature_names'][1:]
         lam1 = state['penalty']['lambda1']
         if not state.get('direct_case', {}).get('converged'):
             state['direct_case'] = fit_policy(X, b, a, len(days), 1., None, lam1, np.zeros(X.shape[1]),
@@ -220,10 +240,15 @@ def baselines(payload, store, args, root):
                                                    start, store, group + '_Case-Error_' + key,
                                                    seconds=args.seconds, threads=args.threads)
                 store.put('models:' + group, state)
+            if (not scenario['Case-Error'].get('converged')
+                    and scenario['Case-Error'].get('inner_iterations', 0) >= 300):
+                LOG.warning('Case-Error has not converged after %d updates: %s %s',
+                            scenario['Case-Error']['inner_iterations'], group, key)
             ready &= scenario['Shift']['complete'] and scenario['Case-Error'].get('converged', False)
             LOG.info('Baselines: %s %s', group, key)
         write_json(root / f'models_{group}.json', state)
     save_training_diagnostics(root, payload, collect_diagnostics(payload, store))
+    save_penalty_diagnostics(root, payload, store)
     return ready
 
 
@@ -326,6 +351,18 @@ def collect_diagnostics(payload, store):
     return rows
 
 
+def save_penalty_diagnostics(root, payload, store):
+    rows = []
+    for group, bundle in payload['groups'].items():
+        state = store.get('models:' + group) or {}
+        info = state.get('penalty', {})
+        for name, ratio in zip(bundle['feature_names'][1:], info.get('zero_pull_over_lambda', [])):
+            rows.append({'group': group, 'feature': name, 'q90': info.get('q90'),
+                         'lambda1': info.get('lambda1'), 'zero_pull_over_lambda': ratio})
+    if rows:
+        pd.DataFrame(rows).to_csv(root / 'penalty_diagnostics.csv', index=False)
+
+
 def save_training_diagnostics(root, payload, diagnostics):
     write_json(root / 'training_diagnostics.json', diagnostics)
     rows = []
@@ -363,7 +400,9 @@ def evaluate(payload, store, args, root):
         store.put('test_freeze', frozen)
         write_json(root / 'frozen_test_policies.json', frozen)
     save_training_diagnostics(root, payload, diagnostics)
-    daily, oracles, expected = [], [], []
+    save_penalty_diagnostics(root, payload, store)
+
+    daily, oracles, case_rows, room_rows, expected = [], [], [], [], []
     for group, bundle in payload['groups'].items():
         frame, X, days = bundle['frames']['test'], bundle['X']['test'], bundle['days']['test']
         expected.extend(days)
@@ -379,29 +418,94 @@ def evaluate(payload, store, args, root):
                 else:
                     weights = policies[group][method] if method == 'VF-Direct' else policy[method]
                     raw = X @ np.asarray(weights)
-                _, duration = display_and_duration(raw, b, alpha, h)
+                shown, duration = display_and_duration(raw, b, alpha, h)
                 jobs = [(day, duration[day.rows], dict(seconds=args.seconds, threads=args.threads,
                          tie=args.tie, warm_start=seeds[day.key]['booked'].get('assignment'))) for day in days]
                 plans = (seeds[d.key]['booked'] for d in days) if method == 'Booked' else map_days(
                     plan_job, jobs, store, args.workers)
+
                 for day, plan in zip(days, plans):
                     row = {'day': day.key, 'date': day.date, 'group': group, 'alpha': alpha, 'h': h,
                            'method': method, 'complete': plan['complete'], 'cases': len(day.booked)}
                     if plan['complete']:
-                        row.update(metrics(day, plan['assignment'], day.actual))
-                        row['absolute_error'] = float(np.abs(day.actual - duration[day.rows]).sum())
+                        idx = day.rows
+                        day_duration = duration[idx]
+                        day_display = shown[idx]
+                        day_raw = raw[idx]
+                        errors = day.actual - day_duration
+                        realized = metrics(day, plan['assignment'], day.actual)
+                        planned = metrics(day, plan['assignment'], day_duration)
+                        row.update(realized)
+                        row.update({
+                            'planned_cost': planned['cost'], 'planned_overtime': planned['overtime'],
+                            'planned_idle': planned['idle'], 'planned_max_load': planned['max_load'],
+                            'absolute_error': float(np.abs(errors).sum()),
+                            'signed_error': float(errors.sum()),
+                            'squared_error': float((errors * errors).sum()),
+                            'underestimation_minutes': float(np.maximum(errors, 0).sum()),
+                            'overestimation_minutes': float(np.maximum(-errors, 0).sum()),
+                            'within_15': int((np.abs(errors) <= 15).sum()),
+                            'within_30': int((np.abs(errors) <= 30).sum()),
+                            'underestimated_cases': int((errors > 0).sum()),
+                            'absolute_display': float(np.abs(day_display).sum()),
+                            'absolute_implemented': float(np.abs(day_duration - day.booked).sum()),
+                            'clipped_displays': int((np.abs(day_raw - day_display) > 1e-8).sum()),
+                        })
+                        case_room = np.asarray(plan['assignment'], int)[day.case_surgeon]
+                        row['rooms_overrun'] = 0
+                        row['rooms_over_60'] = 0
+                        for r in sorted(set(case_room)):
+                            mask = case_room == r
+                            planned_load = float(day_duration[mask].sum() + 30 * (mask.sum() - 1))
+                            actual_load = float(day.actual[mask].sum() + 30 * (mask.sum() - 1))
+                            row['rooms_overrun'] += int(actual_load > 480 + 1e-8)
+                            row['rooms_over_60'] += int(actual_load > 540 + 1e-8)
+                            room_rows.append({
+                                'day': day.key, 'date': day.date, 'group': group, 'alpha': alpha, 'h': h,
+                                'method': method, 'room': day.rooms[r], 'cases': int(mask.sum()),
+                                'surgeon_days': int(len(set(day.case_surgeon[mask]))),
+                                'planned_load': planned_load, 'actual_load': actual_load,
+                                'planned_overtime': max(planned_load - 480, 0.),
+                                'planned_idle': max(480 - planned_load, 0.),
+                                'actual_overtime': max(actual_load - 480, 0.),
+                                'actual_idle': max(480 - actual_load, 0.),
+                            })
+                        for local, frame_index in enumerate(idx):
+                            case = frame.iloc[int(frame_index)]
+                            u = float(day_display[local])
+                            implemented = float(day_duration[local] - day.booked[local])
+                            if abs(u) <= 1e-8:
+                                response_state = 'zero'
+                            elif abs(u) <= h + 1e-8:
+                                response_state = 'adoption'
+                            elif abs(implemented) <= 1e-8:
+                                response_state = 'rejected'
+                            else:
+                                response_state = 'attenuated'
+                            case_rows.append({
+                                'case_id': int(case.case_id), 'group': group, 'date': day.date,
+                                'alpha': alpha, 'h': h, 'method': method, 'service': case.service,
+                                'surgeon': case.surgeon, 'procedure': case.procedure,
+                                'patient_id': case.patient_id, 'booked': float(day.booked[local]),
+                                'actual': float(day.actual[local]), 'raw_display': float(day_raw[local]),
+                                'displayed_correction': u, 'implemented_correction': implemented,
+                                'planned_duration': float(day_duration[local]),
+                                'historical_room': day.rooms[int(day.historical[local])],
+                                'assigned_room': day.rooms[int(case_room[local])],
+                                'display_clipped': bool(abs(day_raw[local] - u) > 1e-8),
+                                'response_state': response_state})
                         row.pop('loads')
                     daily.append(row)
                     store.put(f'evaluation:{day.key}:{alpha}:{h}:{method}', row)
                 LOG.info('Test evaluation: %s alpha=%s h=%s %s', group, alpha, h, method)
+
             jobs = [(day, alpha, h, seeds[day.key], args) for day in days]
             for day, result in zip(days, map_days(benchmark, jobs, store, args.workers)):
                 oracles.append({'day': day.key, 'date': day.date, 'group': group, 'alpha': alpha, 'h': h,
                                 'actual_oracle': seeds[day.key]['actual'].get('primary_cost'),
                                 'lower': result['lower'], 'upper': result['upper'], 'complete': result['complete']})
-    return summarize(root / 'report', daily, oracles, expected, args.seed)
-
-
+    return summarize(root / 'report', daily, oracles, expected, args.seed,
+                     case_results=case_rows, room_results=room_rows)
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workbook', type=Path)

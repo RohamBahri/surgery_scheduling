@@ -14,15 +14,24 @@ def theta(error):
     return 1.75 * np.maximum(error, 0) + np.maximum(-error, 0)
 
 
-def penalty(X, days, seed=20261007):
+def penalty(X, days, seed=20261007, errors=None):
     rng = np.random.default_rng(seed)
     maxima = []
     for _ in range(10):
         noise = 7 / 11 - (rng.random((100, len(X))) <= 7 / 11)
         maxima.extend(np.abs(noise @ X[:, 1:]).max(axis=1))
     q90 = float(np.quantile(maxima, .9, method='linear'))
-    return {'lambda1': 2.75 * 1.1 * q90 / days, 'q90': q90,
-            'days': days, 'draws': 1000, 'seed': seed, 'tau': '7/11'}
+    lam = 2.75 * 1.1 * q90 / days
+    if not np.isfinite(lam) or lam <= 0:
+        raise ValueError('Noise-calibrated penalty must be finite and positive')
+    result = {'lambda1': lam, 'q90': q90, 'days': days, 'draws': 1000,
+              'seed': seed, 'tau': '7/11'}
+    if errors is not None:
+        errors = np.asarray(errors, float)
+        slope = np.where(errors > 0, -1.75, np.where(errors < 0, 1., 0.))
+        pull = np.abs(X[:, 1:].T @ slope) / days
+        result['zero_pull_over_lambda'] = (pull / lam).tolist()
+    return result
 
 
 def project(w, X, booked):

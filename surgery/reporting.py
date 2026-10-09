@@ -25,7 +25,7 @@ def opportunity_interval(booked, cost, lower, upper):
     return min(values), max(values), 'bounded'
 
 
-def summarize(root, daily, oracles, expected, seed=20261007):
+def summarize(root, daily, oracles, expected, seed=20261007, case_results=None, room_results=None):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     data, oracle = pd.DataFrame(daily), pd.DataFrame(oracles)
@@ -43,6 +43,15 @@ def summarize(root, daily, oracles, expected, seed=20261007):
               'missing_or_invalid_oracle_brackets': len(required_oracles - bounded),
               'unfinished_oracle_days': sum(not r['complete'] for r in oracles),
               'bootstrap_seed': seed, 'bootstrap_resamples': 10000}
+    if case_results is not None:
+        cases = pd.DataFrame(case_results)
+        expected_case_rows = sum(len(d.case_ids) for d in expected) * len(SCENARIOS) * len(METHODS)
+        duplicate_keys = ['group', 'case_id', 'alpha', 'h', 'method']
+        valid_cases = len(cases) == expected_case_rows and not cases.duplicated(duplicate_keys).any()
+        status['case_rows'] = len(cases)
+        status['expected_case_rows'] = expected_case_rows
+        status['case_rows_valid'] = bool(valid_cases)
+        status['ready'] &= bool(valid_cases)
     if status['ready']:
         keys = ['day', 'alpha', 'h']
         witness = data.groupby(keys).cost.min().rename('method_upper')
@@ -59,6 +68,10 @@ def summarize(root, daily, oracles, expected, seed=20261007):
             'Evaluation is incomplete. Daily checkpoints are saved. Resume evaluation to fill the missing '
             'method days or oracle brackets; publication tables are not produced from a selected subset.\n')
         return status
+    if case_results is not None:
+        pd.DataFrame(case_results).to_csv(root / 'case_results.csv', index=False)
+    if room_results is not None:
+        pd.DataFrame(room_results).to_csv(root / 'room_day_results.csv', index=False)
     data['week'] = pd.to_datetime(data.date).dt.to_period('W-SUN').dt.start_time
     calendar = pd.date_range('2012-12-31', '2013-06-24', freq='W-MON')
     rng = np.random.default_rng(seed)
@@ -85,6 +98,20 @@ def summarize(root, daily, oracles, expected, seed=20261007):
                     'overtime': selected.overtime.sum(), 'idle': selected.idle.sum(),
                     'room_days': int(selected.rooms.sum()), 'cases': int(selected.cases.sum()),
                     'post_review_mae': selected.absolute_error.sum() / selected.cases.sum(),
+                    'post_review_bias': selected.signed_error.sum() / selected.cases.sum(),
+                    'post_review_rmse': float(np.sqrt(selected.squared_error.sum() / selected.cases.sum())),
+                    'underestimation_minutes': selected.underestimation_minutes.sum(),
+                    'overestimation_minutes': selected.overestimation_minutes.sum(),
+                    'share_within_15': selected.within_15.sum() / selected.cases.sum(),
+                    'share_within_30': selected.within_30.sum() / selected.cases.sum(),
+                    'share_underestimated': selected.underestimated_cases.sum() / selected.cases.sum(),
+                    'mean_absolute_display': selected.absolute_display.sum() / selected.cases.sum(),
+                    'mean_absolute_implemented': selected.absolute_implemented.sum() / selected.cases.sum(),
+                    'display_clip_share': selected.clipped_displays.sum() / selected.cases.sum(),
+                    'rooms_overrun_share': selected.rooms_overrun.sum() / selected.rooms.sum(),
+                    'rooms_over_60': int(selected.rooms_over_60.sum()),
+                    'max_planned_load': selected.planned_max_load.max(),
+                    'max_realized_load': selected.max_load.max(),
                     'realized_oracle': bounds.actual_oracle.sum(),
                     'response_oracle_lower': lower, 'response_oracle_upper': upper,
                     'response_oracle_exact': bool(bounds.complete.all()),

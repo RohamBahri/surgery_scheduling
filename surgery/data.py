@@ -1,4 +1,4 @@
-"""UHN cohort, chronological features, and room-group/day instances."""
+"""UHN cohort, offline cross-fitted features, and room-group/day instances."""
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,13 +14,23 @@ SCENARIOS = ((0.5, 30), (0.5, 60), (0.8, 30), (0.8, 60))
 TIMESTAMPS = {'Enter Room': 'rin', 'Actual Start': 'start',
               'Actual Stop': 'stop', 'Leave Room': 'rout'}
 COLUMNS = ['Operating_Room', 'Surgeon_Code', 'Main_Procedure_Id', 'Case_Service',
-           'Booked Time (Minutes)', 'Decision_Date', 'Patient_Type',
+           'Booked Time (Minutes)', 'Decision_Date', 'Patient_Type', 'Patient_ID',
            'Case_Cancelled_Reason', 'Case Cancel Date'] + [
                stem + suffix for stem in TIMESTAMPS for suffix in (' Date', ' Time')]
 
 
 def identifier(series):
     return series.fillna('').astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+
+
+def pairwise_spread(values):
+    """Average |X-X'| over distinct pairs; zero when fewer than two observations exist."""
+    values = np.sort(np.asarray(values, float))
+    n = len(values)
+    if n < 2:
+        return 0.
+    coefficients = 2 * np.arange(n) - n + 1
+    return float(2 * (coefficients @ values) / (n * (n - 1)))
 
 
 def overlap_flags(frame):
@@ -33,6 +43,15 @@ def overlap_flags(frame):
     return flagged
 
 
+def _booking_summary(frame, label):
+    x = frame.booked.to_numpy(float)
+    q = np.quantile(x, [.01, .05, .25, .5, .75, .95, .99])
+    return {'group': label, 'cases': len(x), 'min': float(x.min()),
+            **{f'p{p}': float(v) for p, v in zip((1, 5, 25, 50, 75, 95, 99), q)},
+            'max': float(x.max()), 'booked_le_15': int((x <= 15).sum()),
+            'booked_le_30': int((x <= 30).sum()), 'booked_gt_480': int((x > 480).sum())}
+
+
 def build_cohort(raw):
     missing = set(COLUMNS) - set(raw.columns)
     if missing:
@@ -42,8 +61,9 @@ def build_cohort(raw):
     d['room'] = raw.Operating_Room.fillna('').str.upper().str.replace(r'\s+', '', regex=True)
     d['group'] = d.room.map({r: g for g, rooms in ROOMS.items() for r in rooms})
     for source, target in [('Surgeon_Code', 'surgeon'), ('Main_Procedure_Id', 'procedure'),
-                           ('Case_Service', 'service')]:
+                           ('Case_Service', 'service'), ('Patient_ID', 'patient_id')]:
         d[target] = identifier(raw[source])
+    d['patient_type'] = raw.Patient_Type.fillna('').astype(str).str.strip()
     booking = pd.to_numeric(raw['Booked Time (Minutes)'], errors='coerce')
     d['booked'] = booking + 1
     for source, target in TIMESTAMPS.items():
@@ -55,8 +75,11 @@ def build_cohort(raw):
     d['actual'] = (d.rout - d.rin).dt.total_seconds() / 60
     d['dtt'] = pd.to_datetime(raw.Decision_Date, errors='coerce').dt.normalize()
     d['emergency'] = raw.Patient_Type.fillna('').str.upper().str.contains('EMERGENCY')
-    cancelled = (raw.Case_Cancelled_Reason.fillna('').astype(str).str.strip().ne('')
-                 | raw['Case Cancel Date'].notna())
+    cancel_reason = raw.Case_Cancelled_Reason.fillna('').astype(str).str.strip()
+    cancelled = cancel_reason.ne('') | raw['Case Cancel Date'].notna()
+    source = d.copy()
+    source['cancelled'] = cancelled
+    source['cancel_reason'] = cancel_reason
     flow, excluded = [], []
 
     def retain(mask, rule):
@@ -103,6 +126,7 @@ def build_cohort(raw):
         raise ValueError('Cohort is empty or retained cases lack surgeon/service identifiers')
     d['split'] = np.where(d.date < pd.Timestamp('2013-01-01'), 'train', 'test')
     d = d.sort_values(['group', 'date', 'surgeon', 'case_id']).reset_index(drop=True)
+
     quality = eligible.groupby(['group', 'date']).agg(
         eligible_cases=('case_id', 'size'), eligible_booked=('booked', 'sum'),
         eligible_rooms=('room', 'nunique'), eligible_surgeons=('surgeon', 'nunique'))
@@ -111,8 +135,51 @@ def build_cohort(raw):
         retained_rooms=('room', 'nunique'), retained_surgeons=('surgeon', 'nunique'))
     quality = quality.join(after).fillna(0).reset_index()
     quality['damaged'] = quality.eligible_cases.ne(quality.retained_cases)
+
+    cancellation_scope = source[source.group.notna() & source.cancelled].copy()
+    cancellation_scope['cancel_reason'] = cancellation_scope.cancel_reason.replace('', 'Cancellation date only')
+    cancellation_reasons = [{'reason': str(k), 'cases': int(v)}
+                            for k, v in cancellation_scope.cancel_reason.value_counts().items()]
+
+    patients = d[d.patient_id.ne('')]
+    patient_counts = patients.groupby('patient_id').size()
+    repeat = patient_counts[patient_counts.gt(1)]
+    split_counts = patients.groupby('patient_id').split.nunique()
+
+    retained_pairs = set(zip(d.surgeon, d.date))
+    retained_ids = set(d.case_id)
+    extras = source[~source.cancelled & source.date.notna() & source.surgeon.ne('')].copy()
+    extras = extras[[((s, dt) in retained_pairs and case_id not in retained_ids)
+                     for s, dt, case_id in zip(extras.surgeon, extras.date, extras.case_id)]]
+
+    training = d[d.split.eq('train')].copy()
+    training['weekday'] = training.date.dt.weekday
+    block = training.groupby(['group', 'date', 'room', 'service']).size().rename('cases').reset_index()
+    totals = block.groupby(['group', 'date', 'room']).cases.transform('sum')
+    dominant = block.assign(share=block.cases / totals).groupby(
+        ['group', 'date', 'room'], as_index=False).share.max()
+    block_summary = []
+    for group, rows in dominant.groupby('group'):
+        block_summary.append({'group': group, 'room_days': len(rows),
+                              'single_service_share': float((rows.share >= 1 - 1e-12).mean()),
+                              'dominant_service_ge_80_share': float((rows.share >= .8).mean())})
+    weekday_counts = training.groupby(['group', 'room', 'weekday', 'service']).size().rename('cases').reset_index()
+    weekday_totals = weekday_counts.groupby(['group', 'room', 'weekday']).cases.transform('sum')
+    weekday_counts['share'] = weekday_counts.cases / weekday_totals
+    weekday_blocks = []
+    for (group, room, weekday), rows in weekday_counts.groupby(['group', 'room', 'weekday']):
+        best = rows.sort_values(['share', 'service'], ascending=[False, True]).iloc[0]
+        weekday_blocks.append({'group': group, 'room': room, 'weekday': int(weekday),
+                               'dominant_service': str(best.service),
+                               'dominant_share': float(best.share), 'cases': int(rows.cases.sum())})
+
+    extreme = d[(d.actual < 10) | (d.actual > 720)][
+        ['case_id', 'group', 'date', 'surgeon', 'service', 'booked', 'actual']].copy()
+    extreme['date'] = extreme.date.dt.strftime('%Y-%m-%d')
+
     audit = {
-        'flow': flow, 'counts': d.groupby(['group', 'split']).size().rename('cases').reset_index().to_dict('records'),
+        'flow': flow,
+        'counts': d.groupby(['group', 'split']).size().rename('cases').reset_index().to_dict('records'),
         'closures': [str(x.date()) for x in closures], 'closure_training_median': median,
         'invalid_records_without_usable_date': unknown_dates,
         'booking_grid_verified': bool(booking.notna().all() and booking.mod(5).eq(4).all()),
@@ -120,20 +187,59 @@ def build_cohort(raw):
         'multi_room_group_surgeon_dates': int(d.groupby(keys).room.nunique().gt(1).sum()),
         'time_window': '07:00 <= room entry < 17:00; otherwise DTT calendar date <= surgery date - 1 day',
         'invalid_date_key': 'First usable timestamp: room entry, surgical start, surgical stop, room exit',
+        'cancellation_reasons': cancellation_reasons,
+        'patient_type_counts': [{'patient_type': str(k) if str(k) else 'BLANK', 'cases': int(v)}
+                                for k, v in d.patient_type.value_counts(dropna=False).items()],
+        'patient_recurrence': {'unique_patients': int(patient_counts.size),
+                               'patients_with_multiple_cases': int(repeat.size),
+                               'cases_from_repeat_patients': int(repeat.sum()),
+                               'patients_in_both_train_and_test': int(split_counts.gt(1).sum())},
+        'same_day_extra_non_cancelled_cases': int(len(extras)),
+        'same_day_extra_surgeon_dates': int(extras.groupby(['surgeon', 'date']).ngroups),
+        'booking_distribution': [_booking_summary(d, 'All')] +
+                                [_booking_summary(rows, group) for group, rows in d.groupby('group')],
+        'specialty_room_day_concentration': block_summary,
+        'specialty_room_weekday_blocks': weekday_blocks,
+        'extreme_cases': extreme.to_dict('records'),
     }
     return d, audit, pd.concat(excluded, ignore_index=True), quality
 
 
 class Encoder:
-    """Service/category error moments are updated only after a whole date is encoded."""
+    """Offline training effects; each training date is scored from all other training dates."""
 
     def __init__(self):
-        self.history = {'service': {}, 'procedure': {}, 'surgeon': {}}
         self.shrinkage = {'procedure': None, 'surgeon': None}
 
-    def _shrinkage(self, name):
-        cells = self.history[name]
-        services = self.history['service']
+    @staticmethod
+    def _summary(frame):
+        local = frame.copy()
+        local['_error'] = local.actual - local.booked
+        service = {}
+        for key, rows in local.groupby('service', sort=False):
+            values = rows._error.to_numpy(float)
+            service[key] = (len(values), float(values.mean()), pairwise_spread(values))
+        category = {}
+        for name in ('procedure', 'surgeon'):
+            cells = {}
+            for key, rows in local.groupby(['service', name], sort=False):
+                values = rows._error.to_numpy(float)
+                cells[key] = (len(values), float(values.mean()), pairwise_spread(values))
+            category[name] = cells
+        return {'service': service, **category}
+
+    @staticmethod
+    def _shrinkage(frame, name):
+        local = frame.copy()
+        local['_error'] = local.actual - local.booked
+        cells = {}
+        for key, rows in local.groupby(['service', name], sort=False):
+            values = rows._error.to_numpy(float)
+            cells[key] = (len(values), float(values.sum()), float(values @ values))
+        services = {}
+        for key, rows in local.groupby('service', sort=False):
+            values = rows._error.to_numpy(float)
+            services[key] = (len(values), float(values.sum()), float(values @ values))
         n = sum(v[0] for v in cells.values())
         k, s = len(cells), len(services)
         if n <= k or k <= s:
@@ -149,45 +255,41 @@ class Encoder:
         variance = (between - within) / effective if effective > 0 else 0
         return within / variance if variance > 0 else None
 
-    def _scores(self, frame):
-        result = np.zeros((len(frame), 2))
+    def _scores(self, frame, summary=None):
+        summary = self.full_summary if summary is None else summary
+        result = np.zeros((len(frame), 4))
         for i, row in enumerate(frame.itertuples()):
-            ns, total, _ = self.history['service'].get(row.service, (0, 0., 0.))
-            for j, name in enumerate(['procedure', 'surgeon']):
-                n, error, _ = self.history[name].get((row.service, getattr(row, name)), (0, 0., 0.))
+            ns, service_mean, service_spread = summary['service'].get(row.service, (0, 0., 0.))
+            for j, name in enumerate(('procedure', 'surgeon')):
+                n, mean, spread = summary[name].get((row.service, getattr(row, name)), (0, 0., 0.))
                 k = self.shrinkage[name]
                 if n and ns and k is not None:
-                    result[i, j] = (error - n * total / ns) / (n + k)
+                    weight = n / (n + k)
+                    result[i, j] = weight * (mean - service_mean)
+                    if n >= 2 and ns >= 2:
+                        result[i, j + 2] = weight * (spread - service_spread)
         return result
-
-    def _update(self, frame):
-        for row in frame.itertuples():
-            error = row.actual - row.booked
-            for name in self.history:
-                key = row.service if name == 'service' else (row.service, getattr(row, name))
-                n, total, q = self.history[name].get(key, (0, 0., 0.))
-                self.history[name][key] = n + 1, total + error, q + error * error
-        self.shrinkage = {name: self._shrinkage(name) for name in ['procedure', 'surgeon']}
 
     def _raw(self, frame, scores):
         return np.column_stack([frame.booked.to_numpy(float),
                                 *[frame.service.eq(s).to_numpy(float) for s in self.services], scores])
 
     def fit_transform(self, train):
-        self.__init__()
-        counts = train.service.value_counts()
-        self.reference = min(counts[counts == counts.max()].index)
-        self.services = sorted(set(train.service) - {self.reference})
         local = train.reset_index(drop=True)
-        self.training_scores = np.zeros((len(local), 2))
-        for _, rows in local.groupby('date', sort=True):
-            self.training_scores[rows.index] = self._scores(rows)
-            self._update(rows)
+        counts = local.service.value_counts()
+        self.reference = min(counts[counts == counts.max()].index)
+        self.services = sorted(set(local.service) - {self.reference})
+        self.shrinkage = {name: self._shrinkage(local, name) for name in ('procedure', 'surgeon')}
+        self.full_summary = self._summary(local)
+        self.training_scores = np.zeros((len(local), 4))
+        for date, rows in local.groupby('date', sort=True):
+            history = local[local.date.ne(date)]
+            self.training_scores[rows.index] = self._scores(rows, self._summary(history))
         raw = self._raw(local, self.training_scores)
         self.mean, self.scale = raw.mean(axis=0), raw.std(axis=0)
         self.scale[self.scale < 1e-12] = 1
         self.names = ['intercept', 'booked', *[f'service:{s}' for s in self.services],
-                      'procedure_score', 'surgeon_score']
+                      'procedure_bias', 'surgeon_bias', 'procedure_spread', 'surgeon_spread']
         return np.column_stack([np.ones(len(local)), (raw - self.mean) / self.scale])
 
     def transform(self, test):
@@ -196,8 +298,12 @@ class Encoder:
 
     def metadata(self):
         return {'names': self.names, 'reference_service': self.reference,
-                'mean': self.mean, 'scale': self.scale, 'final_shrinkage': self.shrinkage,
-                'score_cutoff': 'strictly earlier dates, including shrinkage estimation'}
+                'mean': self.mean, 'scale': self.scale, 'shrinkage': self.shrinkage,
+                'training_score_columns': ['procedure_bias', 'surgeon_bias',
+                                           'procedure_spread', 'surgeon_spread'],
+                'score_construction': 'training: all training dates except own date; test: all training data',
+                'spread': 'average pairwise absolute error difference; singleton category spread score is zero',
+                'spread_reliability': 'reuses the matching mean-effect shrinkage constant'}
 
 
 @dataclass
@@ -214,8 +320,11 @@ class Day:
     actual: np.ndarray
     historical: np.ndarray
     rows: np.ndarray
+    weekday_fallback_surgeons: int = 0
+    weekday_fallback_cases: int = 0
     fallback_surgeons: int = 0
     fallback_cases: int = 0
+    eligibility_source: tuple = ()
 
     @property
     def n_surgeons(self):
@@ -231,23 +340,49 @@ class Day:
 
 
 def build_days(frame, training):
-    history = {(g, s): set(rows.room) for (g, s), rows in training.groupby(['group', 'service'])}
+    all_week = {(g, s): set(rows.room) for (g, s), rows in training.groupby(['group', 'service'])}
+    weekday_training = training.assign(weekday=training.date.dt.weekday)
+    by_weekday = {(g, int(w), s): set(rows.room)
+                  for (g, w, s), rows in weekday_training.groupby(['group', 'weekday', 'service'])}
     days = []
     for (group, date), rows in frame.groupby(['group', 'date'], sort=True):
         rooms = tuple(sorted(rows.room.unique()))
         surgeons = tuple(sorted(rows.surgeon.unique()))
-        eligible, nf, nc = [], 0, 0
+        eligible, source = [], []
+        weekday_fallback_surgeons = weekday_fallback_cases = 0
+        fallback_surgeons = fallback_cases = 0
+        weekday = int(date.weekday())
         for surgeon in surgeons:
             cases = rows[rows.surgeon == surgeon]
+            services = cases.service.unique()
+
             allowed = set(rooms)
-            for service in cases.service.unique():
-                allowed &= history.get((group, service), set())
+            for service in services:
+                allowed &= by_weekday.get((group, weekday, service), set())
+            level = 'weekday'
+
             if not allowed:
-                allowed, nf, nc = set(rooms), nf + 1, nc + len(cases)
+                weekday_fallback_surgeons += 1
+                weekday_fallback_cases += len(cases)
+                allowed = set(rooms)
+                for service in services:
+                    allowed &= all_week.get((group, service), set())
+                level = 'all_week_fallback'
+
+            if not allowed:
+                fallback_surgeons += 1
+                fallback_cases += len(cases)
+                allowed = set(rooms)
+                level = 'candidate_room_fallback'
+
             eligible.append(tuple(i for i, room in enumerate(rooms) if room in allowed))
+            source.append(level)
+
         days.append(Day(f'{group}_{date:%Y-%m-%d}', group, str(date.date()), rooms,
                         rows.case_id.to_numpy(), surgeons,
                         np.array([surgeons.index(s) for s in rows.surgeon]), tuple(eligible),
                         rows.booked.to_numpy(float), rows.actual.to_numpy(float),
-                        np.array([rooms.index(r) for r in rows.room]), rows.index.to_numpy(), nf, nc))
+                        np.array([rooms.index(r) for r in rows.room]), rows.index.to_numpy(),
+                        weekday_fallback_surgeons, weekday_fallback_cases,
+                        fallback_surgeons, fallback_cases, tuple(source)))
     return days
