@@ -23,7 +23,12 @@ def fixture_rows():
                 for method in METHODS:
                     daily.append({'day': day.key, 'group': group, 'date': date, 'alpha': alpha, 'h': h,
                                   'method': method, 'complete': True, 'cost': 80 if method == 'VF' else 100,
-                                  'overtime': 10, 'idle': 20, 'rooms': 1, 'cases': 1, 'absolute_error': 5})
+                                  'overtime': 10, 'idle': 20, 'rooms': 1, 'cases': 1, 'absolute_error': 5,
+                                  'signed_error': 1, 'squared_error': 25, 'underestimation_minutes': 3,
+                                  'overestimation_minutes': 2, 'within_15': 1, 'within_30': 1,
+                                  'underestimated_cases': 1, 'absolute_display': 4, 'absolute_implemented': 2,
+                                  'clipped_displays': 0, 'rooms_overrun': 0, 'rooms_over_60': 0,
+                                  'planned_max_load': 460, 'max_load': 470})
                 oracles.append({'day': day.key, 'group': group, 'date': date, 'alpha': alpha, 'h': h,
                                 'lower': 40, 'upper': 60, 'complete': False, 'actual_oracle': 30})
     return days, daily, oracles
