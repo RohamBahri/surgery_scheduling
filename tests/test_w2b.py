@@ -116,3 +116,35 @@ def test_solver_objective_reconciliation_is_strict_but_numerically_robust():
     # Do not silently accept an incorrect MILP graph/objective.
     with pytest.raises(AssertionError, match="reconstructed"):
         _reconcile_objective(-1264.5, -1265.0, "test")
+
+
+def test_numpy_weekday_values_have_stable_cache_keys(tmp_path):
+    import json
+    from w2b.planner import plan_hash
+
+    week = toy()
+    # pandas/numpy groupby derives NumPy integer weekdays, unlike toy Python ints.
+    week.allowed_days = ((np.int64(0), np.int64(1)),
+                         (np.int64(0), np.int64(1)))
+    week.slots = tuple((np.int64(day), room) for day, room in week.slots)
+    week.move_budget = np.int64(1)
+    predicted = week.booked.copy()
+    first = plan_hash(week, "planner", predicted, np.float64(2),
+                      np.float64(0), True)
+    # Semantically identical native Python numbers must hash identically.
+    week.allowed_days = ((0, 1), (0, 1))
+    week.slots = tuple((int(day), room) for day, room in week.slots)
+    week.move_budget = 1
+    second = plan_hash(week, "planner", predicted, 2., 0., True)
+    assert first == second
+    assert len(first) == 24
+    assert json.loads(json.dumps({"hash": first}))["hash"] == second
+
+    # Exercise the user-facing cache path, not just plan_hash().
+    from w2b.planner import cached_solve
+    week.allowed_days = ((np.int64(0), np.int64(1)),
+                         (np.int64(0), np.int64(1)))
+    week.move_budget = np.int64(1)
+    answer = cached_solve(tmp_path, week, predicted, seconds=20.)
+    assert answer.optimal
+    assert (tmp_path / (first + ".json")).is_file()
