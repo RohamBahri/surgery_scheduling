@@ -135,7 +135,8 @@ def solve_week(week, durations, *, seconds=120., threads=1,
     m.setObjective(cost, GRB.MINIMIZE)
     m.optimize()
     status = int(m.Status)
-    bestbound = float(m.ObjBound) if m.IsMIP else None
+    elapsed = float(m.Runtime)
+    bestbound = float(m.ObjBound) if m.IsMIP and status not in (GRB.INFEASIBLE, GRB.INF_OR_UNBD) else None
     incumbent = float(m.ObjVal) if m.SolCount else None
     assignment = ([next(j for j in range(len(week.slots)) if (i, j) in x
                         and x[i, j].X > .5) for i in range(week.n)]
@@ -163,9 +164,10 @@ def solve_week(week, durations, *, seconds=120., threads=1,
             # Primary optimum value is valid even after tie stage.
             if not (deterministic_tie and abs(checked - incumbent) < 1e-3):
                 raise AssertionError(f"Reconstructed planner cost {checked} vs {incumbent}")
+    elapsed += float(m.Runtime) if deterministic_tie and incumbent is not None and status == GRB.OPTIMAL else 0.
     m.dispose()
     return Solve(assignment, incumbent, bestbound, incumbent, optimal, status,
-                 float(seconds))
+                 elapsed)
 
 
 def solve_adversary(week, predicted, *, gamma=2., seconds=120.,
@@ -183,6 +185,7 @@ def solve_adversary(week, predicted, *, gamma=2., seconds=120.,
     m.setObjective(actual - gamma * plan, GRB.MAXIMIZE)
     m.optimize()
     status = int(m.Status)
+    elapsed = float(m.Runtime)
     value = float(m.ObjVal) if m.SolCount else None
     bound = float(m.ObjBound) if m.SolCount or status == GRB.TIME_LIMIT else None
     assignment = None
@@ -196,12 +199,15 @@ def solve_adversary(week, predicted, *, gamma=2., seconds=120.,
             raise AssertionError(f"Loss-augmented objective mismatch {exact} vs {value}")
     m.dispose()
     return Solve(assignment, value, value, bound, status == GRB.OPTIMAL,
-                 status, float(seconds))
+                 status, elapsed)
 
 
 def plan_hash(week, mode, duration, gamma, move_penalty, tie):
     payload = [week.group, week.monday, week.cases.tolist(), week.slots,
-               week.arcs, mode, np.asarray(duration).round(8).tolist(),
+               week.arcs, week.surgeon.tolist(), week.original_day.tolist(),
+               week.days_required.tolist(), week.allowed_days,
+               (week.actual.round(8).tolist() if mode == "adversary" else None),
+               mode, np.asarray(duration).round(8).tolist(),
                gamma, move_penalty, tie]
     return sha256(json.dumps(payload).encode()).hexdigest()[:24]
 
