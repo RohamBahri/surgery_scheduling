@@ -106,3 +106,13 @@ def test_weekly_case_move_budget_enforced():
     assert adv.optimal
     assert sum(w.slots[j][0] != int(w.original_day[i])
                for i, j in enumerate(adv.assignment)) <= 1
+
+def test_solver_objective_reconciliation_is_strict_but_numerically_robust():
+    from w2b.planner import _reconcile_objective
+
+    # Observed macOS Gurobi 13.0.1 mismatch: model -1264.999725 vs
+    # independently computed -1265.0 is floating-point solver noise.
+    assert _reconcile_objective(-1264.999725, -1265.0, "test") == -1265.0
+    # Do not silently accept an incorrect MILP graph/objective.
+    with pytest.raises(AssertionError, match="reconstructed"):
+        _reconcile_objective(-1264.5, -1265.0, "test")
