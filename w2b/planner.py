@@ -233,7 +233,21 @@ def plan_hash(week, mode, duration, gamma, move_penalty, tie):
                (week.actual.round(8).tolist() if mode == "adversary" else None),
                mode, np.asarray(duration).round(8).tolist(),
                gamma, move_penalty, tie]
-    return sha256(json.dumps(payload).encode()).hexdigest()[:24]
+    def numpy_scalar(value):
+        # Training-week weekday sets originate in pandas/NumPy groupby operations.
+        # Preserve numbers as numbers: default=str would silently change hashes.
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            return float(value)
+        if isinstance(value, np.bool_):
+            return bool(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        raise TypeError(f"Unsupported cache-key type: {type(value).__name__}")
+
+    encoded = json.dumps(payload, default=numpy_scalar, separators=(",", ":"))
+    return sha256(encoded.encode()).hexdigest()[:24]
 
 
 def cached_solve(cache_dir, week, duration, *, adversary=False, gamma=2.,
