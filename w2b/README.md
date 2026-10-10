@@ -9,7 +9,8 @@ Only `w2b/`, `run_w2b.py`, one test, and packaging were added.
 * Each individual case can move between the weekdays its surgeon **actually
   operated in that week** and the surgeon's **top two weekdays learned from
   training history**. Only a destination on/after the recorded decision date
-  is allowed, except the original date. Use `--max-move-days` to restrict moves.
+  is allowed, except the original date. Use `--max-move-days` to restrict moves,
+  or `--max-moves` to cap the total number of cases changing weekdays per week.
 * Preserve the **historically observed number of surgeon operating days**
   `k_s` in each week. A surgeon works in **one room per selected weekday**,
   with at least one case on each selected day. Cases can be repartitioned
@@ -86,6 +87,8 @@ The default is deliberately small (`--group TWH-day --weeks 2
 --max-cases 70`). `--weeks 0` and `--max-cases 0` lift those
 limits. Run each of the three room groups and behavioral scenarios separately.
 `--max-move-days 0` disallows case date moves but still uses a weekly model.
+`--max-moves 12` allows at most 12 cases to change weekday in each week;
+`--max-moves -1` (default) is unrestricted.
 `--move-penalty` prices weekday changes, independently of duration.
 
 For identical initialization to the previous daily experiment, pass
