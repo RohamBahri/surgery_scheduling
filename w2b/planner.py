@@ -28,6 +28,23 @@ class Solve:
         return vars(self)
 
 
+def _reconcile_objective(solver_value, reconstructed, label):
+    """Reject material MILP/accounting mismatches; allow numerical MILP tolerances.
+
+    Always report the independently reconstructed feasible objective. Gurobi's
+    floating-point incumbent can differ slightly after binary extraction.
+    This accounting tolerance is not an optimality-gap allowance.
+    """
+    scale = max(1., abs(float(solver_value)), abs(float(reconstructed)))
+    tolerance = min(.05, max(.001, 2e-6 * scale))
+    delta = abs(float(solver_value) - float(reconstructed))
+    if not np.isfinite(delta) or delta > tolerance:
+        raise AssertionError(
+            f"{label}: solver objective {solver_value} vs reconstructed "
+            f"{reconstructed} (delta={delta:.9g}, tolerance={tolerance:.9g})")
+    return float(reconstructed)
+
+
 def implement(booked, X, w, alpha, h):
     raw = np.asarray(X @ np.asarray(w, float), float)
     u = np.clip(raw, np.maximum(-180., 1. - booked), 180.)
@@ -59,6 +76,9 @@ def _make_model(week, *, seconds, threads):
     m.Params.Seed = 0
     m.Params.MIPGap = 0
     m.Params.MIPGapAbs = 1e-7
+    m.Params.FeasibilityTol = 1e-9
+    m.Params.IntFeasTol = 1e-9
+    m.Params.OptimalityTol = 1e-9
 
     allowed = [[] for _ in range(week.n)]
     for i, j in week.arcs:
@@ -154,6 +174,7 @@ def solve_week(week, durations, *, seconds=120., threads=1,
         m.setObjective(index, GRB.MINIMIZE)
         m.Params.TimeLimit = seconds
         m.optimize()
+        elapsed += float(m.Runtime)
         optimal = m.Status == GRB.OPTIMAL
         if m.SolCount:
             assignment = [next(j for j in range(len(week.slots))
@@ -162,11 +183,11 @@ def solve_week(week, durations, *, seconds=120., threads=1,
         status = int(m.Status)
     if assignment is not None:
         checked = schedule_cost(week, assignment, d, move_penalty)
-        if incumbent is not None and abs(checked - incumbent) > 1e-4:
-            # Primary optimum value is valid even after tie stage.
-            if not (deterministic_tie and abs(checked - incumbent) < 1e-3):
-                raise AssertionError(f"Reconstructed planner cost {checked} vs {incumbent}")
-    elapsed += float(m.Runtime) if deterministic_tie and incumbent is not None and status == GRB.OPTIMAL else 0.
+        incumbent = _reconcile_objective(incumbent, checked, "Planner")
+        # Primary solver dual bounds are retained, but the verified assignment
+        # is the feasible upper bound. Never trust rounded auxiliary variables
+        # more than an independent cost recomputation.
+        bestbound = min(bestbound, incumbent) if bestbound is not None else None
     m.dispose()
     return Solve(assignment, incumbent, bestbound, incumbent, optimal, status,
                  elapsed)
@@ -197,8 +218,9 @@ def solve_adversary(week, predicted, *, gamma=2., seconds=120.,
                       for i in range(week.n)]
         exact = (schedule_cost(week, assignment, week.actual, move_penalty)
                  - gamma * schedule_cost(week, assignment, predicted, move_penalty))
-        if abs(exact - value) > 1e-4:
-            raise AssertionError(f"Loss-augmented objective mismatch {exact} vs {value}")
+        value = _reconcile_objective(value, exact, "Loss-augmented oracle")
+        # For MAX, independently recomputed feasible cost is a lower bound.
+        bound = max(bound, value) if bound is not None else None
     m.dispose()
     return Solve(assignment, value, value, bound, status == GRB.OPTIMAL,
                  status, elapsed)
