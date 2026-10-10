@@ -16,7 +16,7 @@ test = ["pytest>=8"]
 uhn-experiment = "surgery.experiment:main"
 
 [tool.setuptools.packages.find]
-include = ["surgery*"]
+include = ["surgery*", "w2b*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
