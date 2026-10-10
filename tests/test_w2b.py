@@ -76,3 +76,20 @@ def test_one_room_per_surgeon_day_and_fixed_day_count():
     assert set(weekdays) == {0, 1}
     for day in (0, 1):
         assert len({rooms[i] for i in range(3) if weekdays[i] == day}) == 1
+
+
+def test_three_learning_methods_smoke(tmp_path):
+    from w2b.learning import train_method
+    w = toy()
+    for method in ("vf", "gap", "spo"):
+        run = train_method(
+            method, [w], start=np.zeros(2), alpha=.8, h=30.,
+            gamma=2., lam=.1, outer=1, inner_evals=30,
+            seconds=15., adversary_seconds=15., threads=1,
+            cache=tmp_path, move_penalty=0.)
+        assert len(run["iterations"]) == 2
+        assert run["status"] == "heuristic_library_MM"
+        for iteration in run["iterations"]:
+            assert np.isfinite(iteration["library_proxy"])
+            assert np.isfinite(iteration["evaluation"]["realized"])
+        assert run["iterations"][-1]["evaluation"]["certified"]
