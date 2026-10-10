@@ -24,6 +24,8 @@ def main(argv=None):
     p.add_argument("--max-cases", type=int, default=70,
                    help="Exclude weeks above N cases; 0 means no limit")
     p.add_argument("--max-move-days", type=int, default=4)
+    p.add_argument("--max-moves", type=int, default=-1,
+                   help="Maximum cases shifted to another weekday per week; -1 = unlimited")
     p.add_argument("--move-penalty", type=float, default=0.)
     p.add_argument("--gamma", type=float, default=2.,
                    help="Gamma >= 1 for gap and SPO-style losses")
@@ -41,7 +43,7 @@ def main(argv=None):
     alpha, h = args.scenario
     if not (0 < alpha <= 1 and h > 0 and args.gamma >= 1
             and args.weeks >= 0 and args.max_cases >= 0
-            and 0 <= args.max_move_days <= 4
+            and 0 <= args.max_move_days <= 4 and args.max_moves >= -1
             and args.move_penalty >= 0 and args.outer >= 0
             and args.seconds > 0 and args.adversary_seconds > 0
             and args.threads >= 1 and args.inner_evals >= 1):
@@ -52,7 +54,7 @@ def main(argv=None):
     scientific = dict(group=args.group, alpha=alpha, h=h,
                       weeks=args.weeks, max_cases=args.max_cases,
                       move_penalty=args.move_penalty,
-                      max_move_days=args.max_move_days,
+                      max_move_days=args.max_move_days, max_moves=args.max_moves,
                       workbook_sha=fingerprint, gamma=args.gamma,
                       l1=args.lambda_l1,
                       initial_weights=str(args.init_weights) if args.init_weights else "estimated")
@@ -62,7 +64,7 @@ def main(argv=None):
     print("W2b output directory:", root.resolve(), flush=True)
     selected, meta = load_weeks(args.workbook, group=args.group, weeks=args.weeks,
                                 max_cases=args.max_cases,
-                                max_move_days=args.max_move_days)
+                                max_move_days=args.max_move_days, max_moves=args.max_moves)
     (root / "specification.json").write_text(
         json.dumps({"scientific": scientific, "cohort": meta}, indent=2) + "\n")
     cache = root / "cache"
