@@ -28,6 +28,7 @@ class Week:
     slots: tuple                 # (weekday 0..4, named room)
     arcs: tuple                  # (case index, slot index)
     compatibility_fallbacks: int
+    move_budget: int | None = None  # Optional weekly cap on cases changing weekday
 
     @property
     def n(self):
@@ -81,7 +82,7 @@ def _compatibility(train):
     return weekday, allweek
 
 
-def make_week(rows, X, roster, usual, compatibility, max_move_days=4):
+def make_week(rows, X, roster, usual, compatibility, max_move_days=4, max_moves=-1):
     rows = rows.reset_index(drop=True)
     group = str(rows.group.iloc[0])
     monday = pd.Timestamp(rows.date.min()).normalize() - pd.Timedelta(
@@ -139,11 +140,11 @@ def make_week(rows, X, roster, usual, compatibility, max_move_days=4):
                 rows.booked.to_numpy(float), rows.actual.to_numpy(float),
                 np.asarray(X, float), surgeon, original,
                 np.asarray(required, int), tuple(allowed_days), slots,
-                tuple(arcs), fallbacks)
+                tuple(arcs), fallbacks, None if max_moves < 0 else max_moves)
 
 
 def load_weeks(workbook: Path, *, group: str, split="train", weeks=2,
-               max_cases=70, max_move_days=4):
+               max_cases=70, max_move_days=4, max_moves=-1):
     """Return training-fitted features and weeks. weeks=0 / max_cases=0 means all."""
     if group not in GROUPS:
         raise ValueError(f"Unknown group: {group}")
@@ -180,7 +181,7 @@ def load_weeks(workbook: Path, *, group: str, split="train", weeks=2,
     result = []
     for _, rows in chunks:
         result.append(make_week(rows, X[rows.index.to_numpy()], roster, usual,
-                                compatible, max_move_days))
+                                compatible, max_move_days, max_moves))
     meta = {"group": group, "split": split, "source_rows": len(raw),
             "retained_train": int(len(train)), "retained_test": int(
                 cohort.split.eq("test").sum()), "group_cases": int(len(target)),
@@ -189,5 +190,6 @@ def load_weeks(workbook: Path, *, group: str, split="train", weeks=2,
                 str(d): list(roster[group, d]) for d in range(5)},
             "availability": "observed surgeon weekdays OR top-two training weekdays; "
                             "case decision date <= destination date except original",
-            "staffing": "training-median active rooms per weekday; proxy, not observed roster"}
+            "staffing": "training-median active rooms per weekday; proxy, not observed roster",
+            "weekly_move_budget": max_moves}
     return result, meta
