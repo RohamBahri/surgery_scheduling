@@ -93,3 +93,16 @@ def test_three_learning_methods_smoke(tmp_path):
             assert np.isfinite(iteration["library_proxy"])
             assert np.isfinite(iteration["evaluation"]["realized"])
         assert run["iterations"][-1]["evaluation"]["certified"]
+
+
+def test_weekly_case_move_budget_enforced():
+    w = toy()
+    w.move_budget = 0
+    plan = solve_week(w, w.booked, seconds=20.)
+    assert plan.optimal
+    assert all(w.slots[j][0] == 0 for j in plan.assignment)
+    w.move_budget = 1
+    adv = solve_adversary(w, w.booked, gamma=2., seconds=20.)
+    assert adv.optimal
+    assert sum(w.slots[j][0] != int(w.original_day[i])
+               for i, j in enumerate(adv.assignment)) <= 1
