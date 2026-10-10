@@ -95,6 +95,8 @@ def _make_model(week, *, seconds, threads):
         m.addConstr(occupied[j] <= count)
     shift = gp.quicksum(x[i, j] for i, j in week.arcs
                         if week.slots[j][0] != int(week.original_day[i]))
+    if week.move_budget is not None:
+        m.addConstr(shift <= week.move_budget, name="case_date_move_budget")
     return m, x, occupied, slot_cases, shift
 
 
@@ -205,7 +207,7 @@ def solve_adversary(week, predicted, *, gamma=2., seconds=120.,
 def plan_hash(week, mode, duration, gamma, move_penalty, tie):
     payload = [week.group, week.monday, week.cases.tolist(), week.slots,
                week.arcs, week.surgeon.tolist(), week.original_day.tolist(),
-               week.days_required.tolist(), week.allowed_days,
+               week.days_required.tolist(), week.allowed_days, week.move_budget,
                (week.actual.round(8).tolist() if mode == "adversary" else None),
                mode, np.asarray(duration).round(8).tolist(),
                gamma, move_penalty, tie]
