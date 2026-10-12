@@ -4,6 +4,7 @@ No opening, deferral, or sequencing. Gurobi is imported only when solving.
 The primary scheduling objective is never contaminated with realized durations.
 """
 from dataclasses import asdict, dataclass
+import math
 import time
 
 import numpy as np
@@ -179,11 +180,11 @@ def _feasible_duration(week, duration):
 
 
 def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
-    """Minimize predicted cost, then moved cases, then an outcome-blind index.
+    """Minimize predicted cost, moved cases, then case-wise lexicographic slots.
 
-    A tertiary linear rank is deterministic with fixed ordering/seed; distinct
-    assignments can share the same rank. No realized cost enters any tie stage.
-    If any stage is uncertified, complete=False; incumbents remain available.
+    Chunked mixed-radix objectives avoid unsafe exponential coefficient growth.
+    No realized cost enters the planner or ties. Any uncertified stage returns
+    complete=False, retaining the best feasible incumbent and primary bound.
     """
     from gurobipy import GRB
 
@@ -228,23 +229,35 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
                           elapsed, True, False, primary_elapsed, elapsed-primary_elapsed)
         best_moves = int(round(m.ObjVal))
         m.addConstr(moved <= best_moves)
-        # Stable, outcome-blind rank. Do not use exponential weights.
-        canonical = sum(
-            (i + 1) * (j + 1) * x[i, j]
-            for i in range(week.n) for j in week.allowed[int(week.surgeon[i])]
-        )
-        m.setObjective(canonical, GRB.MINIMIZE)
-        m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
-        m.optimize()
-        if m.SolCount:
-            a = _assignment(week, x)
-        done = m.Status == GRB.OPTIMAL
+        # Exactly lexicographic over case_id-ordered slot assignments.
+        # Keep each integer score <1e6 to avoid Gurobi numeric instability.
+        base = week.k + 1
+        chunk_size = max(1, int(math.log(1e6) / math.log(base)))
+        canonical_complete = True
+        for first in range(0, week.n, chunk_size):
+            ids = list(range(first, min(week.n, first + chunk_size)))
+            canonical = sum(
+                base ** (len(ids) - pos - 1) * j * x[i, j]
+                for pos, i in enumerate(ids)
+                for j in week.allowed[int(week.surgeon[i])]
+            )
+            m.setObjective(canonical, GRB.MINIMIZE)
+            m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
+            m.optimize()
+            if m.SolCount:
+                a = _assignment(week, x)
+            if m.Status != GRB.OPTIMAL:
+                canonical_complete = False
+                break
+            for i in ids:
+                m.addConstr(x[i, int(a[i])] == 1)
         checked = evaluate(week, a, d)["cost"]
         if checked > optimum + 2 * _objective_tolerance(optimum):
             raise AssertionError("Lexicographic tie changed the primary cost materially")
         elapsed = time.monotonic() - start
-        return Result(a, checked, bound, done, str(m.Status),
-                      elapsed, True, done, primary_elapsed, elapsed-primary_elapsed)
+        return Result(a, checked, bound, canonical_complete, str(m.Status),
+                      elapsed, True, canonical_complete,
+                      primary_elapsed, elapsed-primary_elapsed)
     finally:
         m.dispose()
 
