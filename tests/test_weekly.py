@@ -216,3 +216,16 @@ def test_raw_operating_evidence_excludes_cancellations_and_emergencies():
     assert evidence.case_id.tolist() == [2]
     assert evidence.weekday.tolist() == [2]
     assert evidence.room.tolist() == ["OR2"]
+
+
+def test_true_canonical_tie_uses_case_order_not_weighted_score():
+    w = toy()
+    w.booked[:] = [300., 300., 200.]
+    plan = solve_week(w, w.booked, seconds=20)
+    assert plan.complete, plan
+    # Moving either A case gives the same minimum cost and number of moves.
+    # Lexicographically, the earlier case keeps the lower slot index.
+    assert plan.assignment == [0, 1, 1]
+    assert plan.primary_seconds >= 0
+    assert plan.tie_seconds >= 0
+    assert plan.value == pytest.approx(267.5)
