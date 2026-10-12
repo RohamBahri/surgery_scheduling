@@ -229,3 +229,25 @@ def test_true_canonical_tie_uses_case_order_not_weighted_score():
     assert plan.primary_seconds >= 0
     assert plan.tie_seconds >= 0
     assert plan.value == pytest.approx(267.5)
+
+
+def test_balancing_is_a_true_secondary_objective():
+    from surgery.weekly_planner import evaluate
+    n = 6
+    original = np.array([0, 0, 0, 0, 1, 1], dtype=int)
+    w = Week(
+        "TGH", "2012-01-02", ((0, "OR1"), (0, "OR2")),
+        np.arange(n) + 2, tuple(str(i) for i in range(n)),
+        np.arange(n), original, tuple((0, 1) for _ in range(n)),
+        tuple((0,) for _ in range(n)),
+        np.full(n, 400.), np.full(n, 400.), ()
+    ).validate()
+    baseline = solve_week(w, w.booked)
+    balanced = solve_week(w, w.booked, balance=True)
+    assert baseline.complete and balanced.complete
+    assert balanced.value == pytest.approx(baseline.value)
+    assert balanced.assignment != baseline.assignment
+    assert evaluate(w, baseline.assignment, w.booked)["max_room_load"] == 1690.
+    assert evaluate(w, balanced.assignment, w.booked)["max_room_load"] == 1260.
+    assert evaluate(w, baseline.assignment, w.booked)["moved_cases"] == 0
+    assert evaluate(w, balanced.assignment, w.booked)["moved_cases"] == 1
