@@ -1,0 +1,164 @@
+"""Small exact tests; no workbook or unrestricted Gurobi license required."""
+from itertools import product
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from surgery.weekly_data import Week, build_weeks
+from surgery.weekly_planner import evaluate, solve_adversary, solve_week
+
+
+def toy():
+    # Surgeon A: two cases Monday, a supported extra session on Wednesday.
+    # Surgeon B: one Wednesday case in the same physical room-day.
+    return Week("TGH", "2012-01-02", ((0, "OR1"), (2, "OR2")),
+                np.array([2, 3, 4]), ("A", "B"), np.array([0, 0, 1]),
+                np.array([0, 0, 1]), ((0, 1), (1,)), ((0,), (2,)),
+                np.array([400., 200., 200.]), np.array([200., 400., 200.]),
+                (("A", 2, "OR2", "prior_dates"),)).validate()
+
+
+def feasible(week):
+    for candidate in product(*(week.allowed[s] for s in week.surgeon)):
+        try:
+            evaluate(week, candidate, week.booked)
+        except ValueError:
+            continue
+        yield list(candidate)
+
+
+def test_exact_weekly_planner_and_outcome_blind_ties():
+    w = toy()
+    possible = list(feasible(w))
+    p = solve_week(w, w.booked, seconds=20)
+    assert p.complete, p
+    v = min(evaluate(w, a, w.booked)["cost"] for a in possible)
+    assert p.value == pytest.approx(v)
+    assert p.value == pytest.approx(130.)
+    assert evaluate(w, p.assignment, w.booked)["moved_weekdays"] == 1
+    assert evaluate(w, p.assignment, w.actual)["cost"] > p.value
+
+    first = p.assignment[:]
+    w.actual[:] = [800., 100., 200.]
+    second = solve_week(w, w.booked, seconds=20)
+    assert second.complete and first == second.assignment
+
+
+def test_loss_augmented_max_is_exact_not_epigraph_relaxation():
+    w = toy()
+    for gamma in (1., 2., 4.):
+        out = solve_adversary(w, w.booked, gamma=gamma, seconds=20)
+        assert out.complete, out
+        expected = max(
+            evaluate(w, a, w.actual)["cost"] - gamma * evaluate(w, a, w.booked)["cost"]
+            for a in feasible(w)
+        )
+        assert out.value == pytest.approx(expected, abs=.001)
+        assert out.bound >= out.value - .001
+
+
+def test_decomposition_and_zero_choice_have_exact_zero_regret():
+    w = toy()
+    w.allowed = ((0,), (1,))
+    w.added_days = ()
+    components = w.components()
+    assert len(components) == 2
+    assert sum(c.n for c in components) == 3
+    for c in components:
+        p = solve_week(c, c.booked)
+        oracle = solve_week(c, c.actual)
+        adv = solve_adversary(c, c.booked, gamma=2.)
+        assert p.complete and oracle.complete and adv.complete
+        assert p.assignment == oracle.assignment
+        assert evaluate(c, p.assignment, c.actual)["cost"] == pytest.approx(oracle.value)
+        assert adv.value == pytest.approx(oracle.value - 2 * p.value)
+
+
+def test_original_operating_days_cannot_be_emptied():
+    w = toy()
+    with pytest.raises(ValueError, match="emptied"):
+        evaluate(w, [1, 1, 1], w.booked)
+    with pytest.raises(ValueError, match="Ineligible"):
+        evaluate(w, [0, 0, 0], w.booked)
+
+
+def cohort_and_events():
+    monday = pd.Timestamp("2012-01-02")
+    rows = pd.DataFrame({
+        "group": ["TGH"] * 3, "surgeon": ["A", "A", "B"],
+        "date": pd.to_datetime(["2012-01-02", "2012-01-02", "2012-01-04"]),
+        "room": ["OR1", "OR1", "OR2"], "case_id": [2, 3, 4],
+        "booked": [400., 200., 200.], "actual": [200., 400., 200.],
+        "split": ["train"] * 3,
+    })
+    prior = pd.DataFrame({
+        "case_id": [5], "group": ["TGH"], "surgeon": ["A"],
+        "room": ["OR2"], "date": pd.to_datetime(["2011-12-28"]),
+    })
+    current = rows[["case_id", "group", "surgeon", "room", "date"]]
+    events = pd.concat([prior, current], ignore_index=True)
+    events["weekday"] = events.date.dt.weekday
+    events["monday"] = events.date - pd.to_timedelta(events.weekday, unit="D")
+    return rows, events
+
+
+def test_prior_one_date_works_but_future_activity_cannot_leak():
+    rows, events = cohort_and_events()
+    one = build_weeks(rows, events, prior_dates=1)[0]
+    assert one.added_days == (("A", 2, "OR2", "prior_dates"),)
+    assert set(one.allowed[0]) == {0, 1}
+    assert len(one.components()) == 1
+
+    two = build_weeks(rows, events, prior_dates=2)[0]
+    assert two.added_days == ()
+    assert len(two.components()) == 2
+
+    future = events.copy()
+    future.loc[future.case_id.eq(5), "date"] = pd.Timestamp("2012-01-11")
+    future["weekday"] = future.date.dt.weekday
+    future["monday"] = future.date - pd.to_timedelta(future.weekday, unit="D")
+    assert build_weeks(rows, future, prior_dates=1)[0].added_days == ()
+
+
+def test_excluded_performed_day_and_single_case_exception():
+    rows, events = cohort_and_events()
+    events = events[events.case_id.ne(5)].copy()
+    extra = pd.DataFrame({
+        "case_id": [99], "group": ["TGH"], "surgeon": ["A"],
+        "room": ["OR2"], "date": pd.to_datetime(["2012-01-04"]),
+        "weekday": [2], "monday": [pd.Timestamp("2012-01-02")]
+    })
+    events = pd.concat([events, extra], ignore_index=True)
+    w = build_weeks(rows, events, prior_dates=99)[0]
+    assert w.added_days == (("A", 2, "OR2", "excluded_performed"),)
+    rows = rows[rows.case_id.ne(3)]
+    assert build_weeks(rows, events, prior_dates=1)[0].added_days == ()
+
+
+def test_no_cross_room_group_leakage():
+    rows, events = cohort_and_events()
+    events.loc[events.case_id.eq(5), "group"] = "TWH-main"
+    assert build_weeks(rows, events, prior_dates=1)[0].added_days == ()
+
+
+def test_all_sessions_are_paid_even_if_empty():
+    w = toy()
+    # With Wednesday still occupied by B, verify explicit idle minutes there.
+    original = [0, 0, 1]
+    m = evaluate(w, original, w.booked)
+    assert m["cost"] == pytest.approx(542.5)
+    # A paid room-day remains in the sum even if its occupancy becomes zero
+    # when evaluating a week not subject to the day-coverage restriction.
+    w2 = Week("TGH", "2012-01-02", ((0, "OR1"), (2, "OR2")),
+              np.array([2]), ("A",), np.array([0]), np.array([0]),
+              ((0,),), ((0,),), np.array([100.]), np.array([100.]), ())
+    assert evaluate(w2, [0], w2.booked)["idle"] == pytest.approx(860.)
+
+
+def test_invalid_durations_and_gamma():
+    w = toy()
+    with pytest.raises(ValueError):
+        solve_week(w, [0, 20, 30])
+    with pytest.raises(ValueError):
+        solve_adversary(w, w.booked, gamma=.8)
