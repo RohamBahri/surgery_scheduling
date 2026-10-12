@@ -185,3 +185,34 @@ def test_three_surrogate_bounds_and_zero_choice_cancellation():
         oracle = solve_week(c, c.actual)
         maxer = solve_adversary(c, c.booked, gamma=2.)
         assert 2 * booked.value + maxer.value - oracle.value == pytest.approx(0.)
+
+
+def test_raw_operating_evidence_excludes_cancellations_and_emergencies():
+    from surgery.data import COLUMNS
+    from surgery.weekly_data import performed_events
+
+    def row(surgeon, date, *, cancelled=False, emergency=False):
+        item = {name: None for name in COLUMNS}
+        item.update(Operating_Room="OR2", Surgeon_Code=surgeon,
+                    Main_Procedure_Id="X", Case_Service="S",
+                    Patient_Type="EMERGENCY" if emergency else "ELECTIVE",
+                    Case_Cancelled_Reason="cancelled" if cancelled else None,
+                    **{"Booked Time (Minutes)": 59})
+        for col, clock in (
+            ("Enter Room", "08:00:00"), ("Actual Start", "08:10:00"),
+            ("Actual Stop", "08:45:00"), ("Leave Room", "09:00:00")
+        ):
+            item[col + " Date"] = date
+            item[col + " Time"] = clock
+        return item
+
+    raw = pd.DataFrame([
+        row("a", "2011-12-28"),
+        row("a", "2011-12-28", cancelled=True),
+        row("a", "2011-12-28", emergency=True),
+    ])
+    evidence = performed_events(raw)
+    assert len(evidence) == 1
+    assert evidence.case_id.tolist() == [2]
+    assert evidence.weekday.tolist() == [2]
+    assert evidence.room.tolist() == ["OR2"]
