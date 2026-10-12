@@ -179,15 +179,17 @@ def _feasible_duration(week, duration):
     return d
 
 
-def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
-    """Minimize predicted cost, moved cases, then case-wise lexicographic slots.
+def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=False):
+    """Minimize predicted cost; optionally balance peak load; then minimize
+    moved cases and choose the canonical case-wise assignment.
 
-    Chunked mixed-radix objectives avoid unsafe exponential coefficient growth.
-    No realized cost enters the planner or ties. Any uncertified stage returns
-    complete=False, retaining the best feasible incumbent and primary bound.
+    The optional balance stage preserves the primary cost optimum. No realized
+    durations enter any stage. All stages must be certified for complete=True.
     """
     from gurobipy import GRB
 
+    if balance and not tie:
+        raise ValueError("Load balancing requires tie=True")
     d = _feasible_duration(week, duration)
     week.validate()
     start = time.monotonic()
@@ -216,6 +218,29 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
                           primary_seconds=primary_elapsed)
 
         m.addConstr(primary <= float(m.ObjVal) + _objective_tolerance(m.ObjVal))
+        if balance:
+            import gurobipy as gp
+            peak = m.addVar(lb=0., name="max_predicted_room_load")
+            for j, cases in enumerate(by_room):
+                total_load = (
+                    gp.quicksum((float(d[i]) + TURNOVER) * x[i, j] for i in cases)
+                    - TURNOVER * used[j]
+                )
+                m.addConstr(peak >= total_load)
+            m.setObjective(peak, GRB.MINIMIZE)
+            m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
+            m.optimize()
+            if m.SolCount:
+                a = _assignment(week, x)
+            if m.Status != GRB.OPTIMAL:
+                checked = evaluate(week, a, d)["cost"]
+                elapsed = time.monotonic() - start
+                return Result(a, checked, bound, False, "BALANCE_TIE_" + str(m.Status),
+                              elapsed, True, False,
+                              primary_elapsed, elapsed-primary_elapsed)
+            # Keep the optimized peak without allowing movement from its
+            # certified minimum (feasibility allowance for floating point).
+            m.addConstr(peak <= float(m.ObjVal) + .002)
         moved = gp_sum_moves(x, week)
         m.setObjective(moved, GRB.MINIMIZE)
         m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
