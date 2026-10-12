@@ -128,7 +128,7 @@ def main():
             raise ValueError(f"Unrecognized benchmark component {key}")
         if int(row.cases) != instances[key].n:
             raise ValueError(f"Case mismatch at {key}")
-        if row.booked_max_room_load > args.threshold or row.booked_room_days_over_720:
+        if float(row.booked_max_room_load) > args.threshold:
             pending.append((dict(group=row.group, monday=row.monday,
                                  component=int(row.component)),
                             instances[key], {"booked_cost": row.booked_cost},
