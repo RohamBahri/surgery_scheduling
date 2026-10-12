@@ -5,8 +5,10 @@ Deliberately does NOT train a recommendation policy. This isolates the
 scheduling feasible set and the exact ordinary / loss-augmented oracles.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
+import multiprocessing as mp
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,91 @@ import pandas as pd
 from surgery.data import COLUMNS, GROUPS, build_cohort
 from surgery.weekly_data import build_weeks, performed_events
 from surgery.weekly_planner import evaluate, solve_adversary, solve_week
+
+
+def benchmark_component(task):
+    """Solve one independent component; never transfer live Gurobi objects."""
+    index, comp, key, seconds, adversary_seconds, gamma, threads, adversary = task
+    booked = solve_week(comp, comp.booked, seconds=seconds, threads=threads)
+    oracle = solve_week(comp, comp.actual, seconds=seconds, threads=threads,
+                        tie=False)
+    record = {
+        **key,
+        "historical_realized_cost": evaluate(comp, comp.original, comp.actual)["cost"],
+        "booked_complete": booked.complete,
+        "oracle_complete": oracle.complete,
+        "booked_seconds": booked.seconds, "oracle_seconds": oracle.seconds,
+        "booked_primary_seconds": booked.primary_seconds,
+        "booked_tie_seconds": booked.tie_seconds,
+        "booked_status": booked.status, "oracle_status": oracle.status,
+        "booked_predicted_cost": booked.value, "oracle_realized_cost": oracle.value,
+        "oracle_realized_lower": oracle.bound,
+    }
+    if booked.assignment is not None:
+        record.update({"booked_" + k: v for k, v in
+                       evaluate(comp, booked.assignment, comp.actual).items()})
+    if booked.assignment is not None and oracle.value is not None:
+        record["booked_regret"] = record["booked_cost"] - oracle.value
+        if booked.complete and oracle.complete:
+            errors = comp.actual - comp.booked
+            theta = (1.75 * np.maximum(errors, 0.) + np.maximum(-errors, 0.)).sum()
+            record["vf_bound_at_booked"] = booked.value + float(theta) - oracle.value
+    if adversary:
+        adversary = solve_adversary(comp, comp.booked, gamma=gamma,
+                                    seconds=adversary_seconds, threads=threads)
+        record.update(adversary_complete=adversary.complete,
+                      adversary_status=adversary.status,
+                      adversary_seconds=adversary.seconds,
+                      adversary_value=adversary.value, adversary_upper=adversary.bound)
+        if (adversary.complete and booked.complete and oracle.complete):
+            record["gap_vf_bound_at_booked"] = (
+                gamma * booked.value + adversary.value - oracle.value
+            )
+            record["spo_bound_at_booked"] = (
+                gamma * evaluate(comp, oracle.assignment, comp.booked)["cost"]
+                + adversary.value - oracle.value
+            )
+            if record["gap_vf_bound_at_booked"] + .01 < record["booked_regret"]:
+                raise AssertionError("Certified gap-VF bound is below realized regret")
+            if record["spo_bound_at_booked"] + .01 < record["gap_vf_bound_at_booked"]:
+                raise AssertionError("SPO upper bound is below gap-VF")
+    return index, record
+
+
+def _atomic_csv(rows, path):
+    temporary = path.with_suffix(".tmp")
+    pd.DataFrame([rows[i] for i in sorted(rows)]).to_csv(temporary, index=False)
+    temporary.replace(path)
+
+
+def _retry_rows(path, structure, manifest, adversary):
+    """Keep certified rows and rerun uncertified ones on an identical cohort."""
+    source = Path(path)
+    previous_manifest = json.loads((source.parent / "manifest.json").read_text())
+    for key in ("dataset_sha256", "prior_dates", "selected_group_weeks",
+                "selected_cases", "components", "gamma"):
+        if previous_manifest.get(key) != manifest.get(key):
+            raise ValueError(f"Retry artifact mismatches {key}")
+    if previous_manifest.get("stage") != "benchmark":
+        raise ValueError("Retry source was not a benchmark")
+    if adversary and not previous_manifest.get("adversary_enabled", True):
+        raise ValueError("Retry source did not include the adversarial benchmark")
+    previous = pd.read_csv(source).to_dict("records")
+    if len(previous) != len(structure):
+        raise ValueError("Retry source does not cover every component")
+    certified, pending = {}, []
+    for i, (old, new) in enumerate(zip(previous, structure)):
+        for key in ("group", "monday", "component", "cases", "surgeons",
+                    "rooms", "arcs", "extra_days_offered", "original_room_days"):
+            if str(old[key]) != str(new[key]):
+                raise ValueError(f"Retry component {i} mismatches {key}")
+        complete = (old["booked_complete"] == True and old["oracle_complete"] == True
+                    and (not adversary or old["adversary_complete"] == True))
+        if complete:
+            certified[i] = old
+        else:
+            pending.append(i)
+    return certified, pending
 
 
 def main():
@@ -28,15 +115,24 @@ def main():
     p.add_argument("--seconds", type=float, default=60.)
     p.add_argument("--adversary-seconds", type=float, default=60.)
     p.add_argument("--gamma", type=float, default=2.)
-    p.add_argument("--threads", type=int, default=1)
+    p.add_argument("--threads", type=int, default=1,
+                   help="Gurobi threads PER worker; normally keep at 1")
+    p.add_argument("--workers", type=int, default=15,
+                   help="Parallel independent component processes (default: 15)")
+    p.add_argument("--retry-from", type=Path,
+                   help="Existing benchmark.csv; rerun only unresolved components")
     p.add_argument("--adversary", action="store_true",
                    help="Also benchmark exact gap-VF loss-augmented oracle at Booked")
     p.add_argument("--output", type=Path, default=Path("artifacts/weekly_supported_days"))
     args = p.parse_args()
     if args.weeks < 0 or args.prior_dates < 1 or args.seconds <= 0 or args.adversary_seconds <= 0:
         p.error("weeks must be >=0, prior-dates >=1, and solve budgets >0")
-    if args.gamma < 1 or args.threads < 1:
-        p.error("gamma must be >=1 and threads >=1")
+    if args.gamma < 1 or args.threads < 1 or args.workers < 1:
+        p.error("gamma, threads, and workers must be positive")
+    if args.workers * args.threads > 15:
+        p.error("Use at most 15 cores total: workers * threads <= 15")
+    if args.retry_from and args.stage != "benchmark":
+        p.error("--retry-from requires --stage benchmark")
     if args.output.exists() and any(args.output.iterdir()):
         p.error("Output directory must be new/empty; do not overwrite a prior experiment")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -75,7 +171,9 @@ def main():
         "cost": {"capacity": 480, "turnover": 30, "idle": 1, "overtime": 1.75},
         "stage": args.stage, "gamma": args.gamma,
         "solver_budget_seconds": args.seconds, "adversary_budget_seconds": args.adversary_seconds,
-        "threads": args.threads,
+        "threads": args.threads, "workers": args.workers,
+        "adversary_enabled": args.adversary, "retry_from": str(args.retry_from)
+        if args.retry_from else None,
         "cohort_flow": audit["flow"],
     }
     (args.output / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -97,57 +195,39 @@ def main():
     if args.stage == "audit":
         return
 
-    rows = []
     total = len(components)
-    for index, comp in enumerate(components):
-        key = structure[index]
-        booked = solve_week(comp, comp.booked, seconds=args.seconds, threads=args.threads)
-        oracle = solve_week(comp, comp.actual, seconds=args.seconds, threads=args.threads,
-                            tie=False)
-        record = {
-            **key,
-            "historical_realized_cost": evaluate(comp, comp.original, comp.actual)["cost"],
-            "booked_complete": booked.complete,
-            "oracle_complete": oracle.complete,
-            "booked_seconds": booked.seconds, "oracle_seconds": oracle.seconds,
-            "booked_primary_seconds": booked.primary_seconds,
-            "booked_tie_seconds": booked.tie_seconds,
-            "booked_status": booked.status, "oracle_status": oracle.status,
-            "booked_predicted_cost": booked.value, "oracle_realized_cost": oracle.value,
-            "oracle_realized_lower": oracle.bound,
-        }
-        if booked.assignment is not None:
-            record.update({"booked_" + k: v for k, v in
-                           evaluate(comp, booked.assignment, comp.actual).items()})
-        if booked.assignment is not None and oracle.value is not None:
-            record["booked_regret"] = record["booked_cost"] - oracle.value
-            if booked.complete and oracle.complete:
-                errors = comp.actual - comp.booked
-                theta = (1.75 * np.maximum(errors, 0.) + np.maximum(-errors, 0.)).sum()
-                record["vf_bound_at_booked"] = booked.value + float(theta) - oracle.value
-        if args.adversary:
-            adversary = solve_adversary(comp, comp.booked, gamma=args.gamma,
-                                        seconds=args.adversary_seconds, threads=args.threads)
-            record.update(adversary_complete=adversary.complete,
-                          adversary_status=adversary.status,
-                          adversary_seconds=adversary.seconds,
-                          adversary_value=adversary.value, adversary_upper=adversary.bound)
-            if (adversary.complete and booked.complete and oracle.complete):
-                record["gap_vf_bound_at_booked"] = (
-                    args.gamma * booked.value + adversary.value - oracle.value
-                )
-                record["spo_bound_at_booked"] = (
-                    args.gamma * evaluate(comp, oracle.assignment, comp.booked)["cost"]
-                    + adversary.value - oracle.value
-                )
-                if record["gap_vf_bound_at_booked"] + .01 < record["booked_regret"]:
-                    raise AssertionError("Certified gap-VF bound is below realized regret")
-                if record["spo_bound_at_booked"] + .01 < record["gap_vf_bound_at_booked"]:
-                    raise AssertionError("SPO upper bound is below gap-VF")
-        rows.append(record)
-        if (index + 1) % 100 == 0 or index + 1 == total:
-            print(f"Completed {index+1}/{total} components", flush=True)
-            pd.DataFrame(rows).to_csv(args.output / "benchmark.csv", index=False)
+    saved, pending = {}, list(range(total))
+    if args.retry_from is not None:
+        saved, pending = _retry_rows(args.retry_from, structure, metadata, args.adversary)
+        print(f"Retrying {len(pending)} unresolved components; "
+              f"reusing {len(saved)} certified results.", flush=True)
+    rows_by_index = dict(saved)
+    tasks = ((i, components[i], structure[i], args.seconds, args.adversary_seconds,
+              args.gamma, args.threads, args.adversary) for i in pending)
+    completed = 0
+    if args.workers == 1:
+        for i, record in map(benchmark_component, tasks):
+            rows_by_index[i] = record
+            completed += 1
+            if completed % 100 == 0 or completed == len(pending):
+                print(f"Finished {completed}/{len(pending)} pending components", flush=True)
+                _atomic_csv(rows_by_index, args.output / "benchmark.csv")
+    elif pending:
+        # Multiprocessing spawn is safe on macOS: each process owns its Gurobi models.
+        with ProcessPoolExecutor(max_workers=args.workers,
+                                 mp_context=mp.get_context("spawn")) as pool:
+            futures = {pool.submit(benchmark_component, task): task[0] for task in tasks}
+            for future in as_completed(futures):
+                i, record = future.result()
+                if i != futures[future]:
+                    raise AssertionError("Worker returned wrong component")
+                rows_by_index[i] = record
+                completed += 1
+                if completed % 100 == 0 or completed == len(pending):
+                    print(f"Finished {completed}/{len(pending)} pending components", flush=True)
+                    _atomic_csv(rows_by_index, args.output / "benchmark.csv")
+    rows = [rows_by_index[i] for i in range(total)]
+    _atomic_csv(rows_by_index, args.output / "benchmark.csv")
 
     incomplete = [r for r in rows if not r["booked_complete"] or not r["oracle_complete"]
                   or (args.adversary and not r["adversary_complete"])]
