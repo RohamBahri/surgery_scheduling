@@ -98,7 +98,9 @@ def main():
         oracle = solve_week(comp, comp.actual, seconds=args.seconds, threads=args.threads,
                             tie=False)
         record = {
-            **key, "booked_complete": booked.complete,
+            **key,
+            "historical_realized_cost": evaluate(comp, comp.original, comp.actual)["cost"],
+            "booked_complete": booked.complete,
             "oracle_complete": oracle.complete,
             "booked_seconds": booked.seconds, "oracle_seconds": oracle.seconds,
             "booked_status": booked.status, "oracle_status": oracle.status,
@@ -110,6 +112,10 @@ def main():
                            evaluate(comp, booked.assignment, comp.actual).items()})
         if booked.assignment is not None and oracle.value is not None:
             record["booked_regret"] = record["booked_cost"] - oracle.value
+            if booked.complete and oracle.complete:
+                errors = comp.actual - comp.booked
+                theta = (1.75 * np.maximum(errors, 0.) + np.maximum(-errors, 0.)).sum()
+                record["vf_bound_at_booked"] = booked.value + float(theta) - oracle.value
         if args.adversary:
             adversary = solve_adversary(comp, comp.booked, gamma=args.gamma,
                                         seconds=args.adversary_seconds, threads=args.threads)
@@ -117,11 +123,18 @@ def main():
                           adversary_status=adversary.status,
                           adversary_seconds=adversary.seconds,
                           adversary_value=adversary.value, adversary_upper=adversary.bound)
-            if (adversary.value is not None and booked.value is not None
-                    and oracle.value is not None):
+            if (adversary.complete and booked.complete and oracle.complete):
                 record["gap_vf_bound_at_booked"] = (
                     args.gamma * booked.value + adversary.value - oracle.value
                 )
+                record["spo_bound_at_booked"] = (
+                    args.gamma * evaluate(comp, oracle.assignment, comp.booked)["cost"]
+                    + adversary.value - oracle.value
+                )
+                if record["gap_vf_bound_at_booked"] + .01 < record["booked_regret"]:
+                    raise AssertionError("Certified gap-VF bound is below realized regret")
+                if record["spo_bound_at_booked"] + .01 < record["gap_vf_bound_at_booked"]:
+                    raise AssertionError("SPO upper bound is below gap-VF")
         rows.append(record)
         if (index + 1) % 100 == 0 or index + 1 == total:
             print(f"Completed {index+1}/{total} components", flush=True)
@@ -132,6 +145,7 @@ def main():
     totals = {
         "components": total,
         "incomplete_components": len(incomplete),
+        "historical_realized": sum(r["historical_realized_cost"] for r in rows),
         "booked_realized": sum(r.get("booked_cost", 0) for r in rows),
         "oracle_cost": sum(r.get("oracle_realized_cost") or 0 for r in rows),
         "booked_regret": sum(r.get("booked_regret") or 0 for r in rows),
