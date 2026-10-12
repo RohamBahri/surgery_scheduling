@@ -162,3 +162,26 @@ def test_invalid_durations_and_gamma():
         solve_week(w, [0, 20, 30])
     with pytest.raises(ValueError):
         solve_adversary(w, w.booked, gamma=.8)
+
+
+def test_three_surrogate_bounds_and_zero_choice_cancellation():
+    w = toy()
+    b = solve_week(w, w.booked)
+    a = solve_week(w, w.actual, tie=False)
+    adv = solve_adversary(w, w.booked, gamma=2.)
+    assert b.complete and a.complete and adv.complete
+    regret = evaluate(w, b.assignment, w.actual)["cost"] - a.value
+    gap = 2 * b.value + adv.value - a.value
+    spo = 2 * evaluate(w, a.assignment, w.booked)["cost"] + adv.value - a.value
+    error = w.actual - w.booked
+    vf = b.value + np.sum(1.75 * np.maximum(error, 0.) + np.maximum(-error, 0.)) - a.value
+    assert -1e-5 <= regret <= gap + 1e-4 <= spo + 1e-4
+    assert gap <= vf + 1e-4
+
+    w.allowed = ((0,), (1,))
+    w.added_days = ()
+    for c in w.components():
+        booked = solve_week(c, c.booked)
+        oracle = solve_week(c, c.actual)
+        maxer = solve_adversary(c, c.booked, gamma=2.)
+        assert 2 * booked.value + maxer.value - oracle.value == pytest.approx(0.)
