@@ -120,3 +120,60 @@ eligibility and gamma before reusing certified rows. Save to a NEW directory.
 Use this only when the mathematical planner/eligibility sources have not
 changed. Numerical times in retained rows are from the original run, not a
 fresh 15-core benchmark. No existing artifact is silently overwritten.
+
+
+## Workload validation before changing the planning objective
+
+The core benchmark is unchanged. To investigate the room-days above 720
+minutes, rerun only components flagged in the certified full-cohort benchmark,
+using exact Gurobi solves. Compare the existing tie (primary cost, fewest
+moves, canonical) against **primary cost, minimum peak PREDICTED room load,
+fewest moves, canonical**.
+
+```bash
+caffeinate -i python3.14 run_weekly_diagnostics.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --benchmark artifacts/weekly_retry_600/benchmark.csv \
+  --workers 15 --threads 1 --seconds 120 \
+  --output artifacts/weekly_load_audit
+```
+
+The `--benchmark` directory must contain the corresponding `manifest.json`.
+The script reconstructs the cohort and checks the workbook fingerprint and
+baseline realized costs component by component. Output: `components.csv`,
+`rooms.csv`, and `summary.json`. The audit exposes a conservative
+room-specific forced-case load lower bound; it is **not** a full infeasibility
+proof for less constrained cases. Judge balancing by both realized overload
+and realized cost. Balancing is *not* made the default planner rule.
+
+## Learning objective pilot (TRAINING PERIOD ONLY)
+
+Evaluate a common, intentionally small recommendation class
+`u_i = offset + slope * (booked_i-180)/180`, with the same response map,
+grid, training weeks, validation weeks, and exact weekly planner for all methods.
+The methods differ only in their **training objective**: Shift (constant
+advice, case MAE), Case (affine advice, case MAE), original VF, gamma-gap-VF,
+and an SPO-style upper bound. BOOKED is the zero-advice reference. Optimize
+each objective by exhaustive finite-grid selection (not pDCA or end-to-end
+gradient learning) and compare realized regret on strictly *later training
+weeks*. Test data from January–June 2013 are excluded.
+
+```bash
+caffeinate -i python3.14 run_weekly_learning.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --start-week-index 20 --train-weeks 3 --validation-weeks 2 \
+  --alpha .8 --h 30 --gamma 2 \
+  --workers 15 --threads 1 --seconds 60 \
+  --output artifacts/weekly_learning_pilot
+```
+
+Files: `grid_results.csv` (all candidate/period results),
+`policies.csv` (one training-selected policy per method/group), and
+`validation.csv` (matched training and later-week regret/cost summaries).
+Use `--resume` with the identical command/output if interrupted.
+Uncertified solves are never used to select a policy. More demanding runs
+can increase `--train-weeks`, `--validation-weeks`, and grid density
+in a **fresh** output directory. Choose those settings without consulting
+2013 test results. This pilot is *diagnostic*: success would justify
+implementing a richer case-feature policy optimizer, not establish
+publishable out-of-sample gains.
