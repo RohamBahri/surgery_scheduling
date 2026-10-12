@@ -85,3 +85,38 @@ This branch benchmarks planner/oracle tractability before selecting a policy
 optimizer. It **does not** train a new VF, gap-VF, or SPO policy and should not
 be interpreted as demonstrating any learned-policy gains. Keep January–June
 2013 out of model selection.
+
+
+## CPU parallelism and targeted retry
+
+Use **15 total CPU cores**, not 15 Gurobi threads on every small problem.
+For full-cohort experiments run 15 independent spawn-based processes, with
+one Gurobi thread per process (`--workers 15 --threads 1`). Runtime output
+and CSV order are deterministic by component index; model identities, costs,
+and eligibility are unchanged. A worker raises on any numerical inconsistency.
+Solver wall-clock times and optimization trajectories may differ with CPU load.
+
+```bash
+# Future full-cohort benchmarks: 15 concurrent single-threaded oracles.
+caffeinate -i python3.14 run_weekly.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage benchmark --weeks 0 --adversary --gamma 2 \
+  --workers 15 --threads 1 --seconds 60 --adversary-seconds 60 \
+  --output artifacts/weekly_parallel_new
+
+# Resolve only previously uncertified components. One hard MILP can use
+# all 15 threads internally instead of spinning up 15 mostly idle workers.
+caffeinate -i python3.14 run_weekly.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage benchmark --weeks 0 --adversary --gamma 2 \
+  --retry-from artifacts/weekly_benchmark_full/benchmark.csv \
+  --workers 1 --threads 15 --seconds 120 --adversary-seconds 600 \
+  --output artifacts/weekly_retry_600
+```
+
+Retry requires the original `manifest.json` beside the input CSV, and
+verifies the dataset fingerprint, cohort/component structure, prior-date
+eligibility and gamma before reusing certified rows. Save to a NEW directory.
+Use this only when the mathematical planner/eligibility sources have not
+changed. Numerical times in retained rows are from the original run, not a
+fresh 15-core benchmark. No existing artifact is silently overwritten.
