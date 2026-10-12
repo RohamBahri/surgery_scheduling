@@ -25,6 +25,8 @@ class Result:
     seconds: float
     primary_complete: bool = False
     tie_complete: bool = False
+    primary_seconds: float = 0.
+    tie_seconds: float = 0.
 
     def as_dict(self):
         return asdict(self)
@@ -198,16 +200,19 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
         primary = _cost(m, x, used, by_room, d, exact=False, name="plan")
         m.setObjective(primary, GRB.MINIMIZE)
         m.optimize()
+        primary_elapsed = time.monotonic() - start
         optimal = m.Status == GRB.OPTIMAL
         bound = float(m.ObjBound) if m.SolCount or m.Status == GRB.TIME_LIMIT else None
         a = _assignment(week, x) if m.SolCount else None
         if a is None:
-            return Result(None, None, bound, False, str(m.Status), time.monotonic() - start)
+            return Result(None, None, bound, False, str(m.Status), time.monotonic() - start,
+                          primary_seconds=primary_elapsed)
         optimum = _check_reconstruction(m.ObjVal, evaluate(week, a, d)["cost"])
         bound = min(bound, optimum) if bound is not None else None
         if not optimal or not tie:
             return Result(a, optimum, bound, optimal, str(m.Status),
-                          time.monotonic() - start, optimal, not tie and optimal)
+                          time.monotonic() - start, optimal, not tie and optimal,
+                          primary_seconds=primary_elapsed)
 
         m.addConstr(primary <= float(m.ObjVal) + _objective_tolerance(m.ObjVal))
         moved = gp_sum_moves(x, week)
@@ -218,8 +223,9 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
             a = _assignment(week, x)
         if m.Status != GRB.OPTIMAL:
             checked = evaluate(week, a, d)["cost"]
+            elapsed = time.monotonic() - start
             return Result(a, checked, bound, False, "MOVE_TIE_" + str(m.Status),
-                          time.monotonic() - start, True, False)
+                          elapsed, True, False, primary_elapsed, elapsed-primary_elapsed)
         best_moves = int(round(m.ObjVal))
         m.addConstr(moved <= best_moves)
         # Stable, outcome-blind rank. Do not use exponential weights.
@@ -236,8 +242,9 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True):
         checked = evaluate(week, a, d)["cost"]
         if checked > optimum + 2 * _objective_tolerance(optimum):
             raise AssertionError("Lexicographic tie changed the primary cost materially")
+        elapsed = time.monotonic() - start
         return Result(a, checked, bound, done, str(m.Status),
-                      time.monotonic() - start, True, done)
+                      elapsed, True, done, primary_elapsed, elapsed-primary_elapsed)
     finally:
         m.dispose()
 
