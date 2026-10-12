@@ -103,6 +103,8 @@ def main():
             "booked_complete": booked.complete,
             "oracle_complete": oracle.complete,
             "booked_seconds": booked.seconds, "oracle_seconds": oracle.seconds,
+            "booked_primary_seconds": booked.primary_seconds,
+            "booked_tie_seconds": booked.tie_seconds,
             "booked_status": booked.status, "oracle_status": oracle.status,
             "booked_predicted_cost": booked.value, "oracle_realized_cost": oracle.value,
             "oracle_realized_lower": oracle.bound,
@@ -153,6 +155,7 @@ def main():
         "booked_case_moves": sum(r.get("booked_moved_cases", 0) for r in rows),
         "booked_weekday_moves": sum(r.get("booked_moved_weekdays", 0) for r in rows),
         "booked_extra_days_used": sum(r.get("booked_used_extra_days", 0) for r in rows),
+        "booked_tie_seconds_sum": sum(r["booked_tie_seconds"] for r in rows),
         "solver_seconds_sum": sum(r["booked_seconds"] + r["oracle_seconds"]
                                  + r.get("adversary_seconds", 0) for r in rows),
     }
