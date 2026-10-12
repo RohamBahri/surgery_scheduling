@@ -53,8 +53,15 @@ def main():
         weeks.extend(matching[:args.weeks] if args.weeks else matching)
     components = [c for w in weeks for c in w.components()]
     sha = hashlib.sha256(args.workbook.read_bytes()).hexdigest()
+    source_root = Path(__file__).resolve().parent
+    code_hasher = hashlib.sha256()
+    for name in ("run_weekly.py", "surgery/data.py", "surgery/weekly_data.py",
+                 "surgery/weekly_planner.py"):
+        code_hasher.update(name.encode())
+        code_hasher.update((source_root / name).read_bytes())
     metadata = {
-        "dataset_sha256": sha, "source_branch": "daily-experiment",
+        "dataset_sha256": sha, "model_source_sha256": code_hasher.hexdigest(),
+        "source_branch": "daily-experiment",
         "cohort_train_cases": int(cohort.split.eq("train").sum()),
         "cohort_test_cases": int(cohort.split.eq("test").sum()),
         "selected_group_weeks": len(weeks), "selected_cases": sum(w.n for w in weeks),
