@@ -51,3 +51,10 @@ Independent days run in separate processes with \`--workers\`; \`--threads\` is 
 The supplied workbook produces 24,506 training and 8,774 test cases. These are audited outputs, not hard-coded count targets. The analysis concerns retained elective workloads, not complete historical hospital operations.
 
 See \`docs/experiment.md\`, \`docs/theory.md\`, and \`docs/validation.md\`.
+
+## Weekly supported-day research branch
+
+A separate experimental weekly physical-room planner (optional evidence-supported
+second weekdays, exact Gurobi planner and gap-VF oracle) is described in
+[docs/weekly.md](docs/weekly.md). It does not replace the daily pipeline or
+assert learned-policy results.
