@@ -26,10 +26,11 @@ defines optimization; `run_weekly.py` is a **training-only** audit/benchmark.
 - Cost = Idle + 1.75 Overtime over **every staffed room-day**, including
   unused sessions. Load = case room durations + 30 minutes between cases.
 - Planner: minimum predicted cost, then minimum changed room-day assignments,
-  then a fixed outcome-blind index (Gurobi single-thread/seed 0). The tertiary
-  index is deterministic but is **not a mathematically unique lexicographic
-  ordering of each case**: different assignments can share its score.
-  No realized durations enter the planner or tie-breaking.
+  then exact lexicographic ordering of case assignments (sorted case IDs).
+  The canonical stage is solved in bounded mixed-radix chunks to avoid very
+  large coefficients. Gurobi uses one thread and seed 0. No realized durations
+  enter the planner or tie-breaking. The benchmark records primary and
+  tie-stage runtimes separately; extra tie stages are not assumed free.
 - Report both room overload and surgeon-day case-minute overload. The latter
   is a diagnostic only; no surgeon sequencing/overlap guarantee is asserted.
 
