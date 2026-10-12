@@ -213,7 +213,10 @@ def main():
     results_path = args.output / "grid_results.csv"
     existing = []
     if args.resume and results_path.exists():
-        existing = pd.read_csv(results_path).to_dict("records")
+        # Only certified policy/week computations are reusable. A failed row
+        # is replaced by a new attempt rather than poisoning future resumes.
+        existing = [row for row in pd.read_csv(results_path).to_dict("records")
+                    if row.get("complete") == True]
     done = {(r["group"], r["monday"], float(r["offset"]), float(r["slope"]))
             for r in existing if r.get("complete") == True}
     tasks = [
