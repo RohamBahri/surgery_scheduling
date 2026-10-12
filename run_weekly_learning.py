@@ -207,8 +207,19 @@ def main():
                         for j, w in enumerate(window))
     oracle_by_week = {}
     print("Solving shared realized oracles for selected training-period weeks...", flush=True)
-    for week, _ in selected:
-        oracle_by_week[(week.group, week.monday)] = _oracle(week, args.seconds, args.threads)
+    if args.workers == 1:
+        for week, _ in selected:
+            oracle_by_week[(week.group, week.monday)] = _oracle(
+                week, args.seconds, args.threads)
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers,
+                                 mp_context=mp.get_context("spawn")) as pool:
+            futures = {
+                pool.submit(_oracle, week, args.seconds, args.threads):
+                (week.group, week.monday) for week, _ in selected
+            }
+            for future in as_completed(futures):
+                oracle_by_week[futures[future]] = future.result()
 
     results_path = args.output / "grid_results.csv"
     existing = []
