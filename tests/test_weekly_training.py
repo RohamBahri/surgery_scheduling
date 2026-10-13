@@ -11,9 +11,9 @@ from surgery.weekly_planner import evaluate
 from surgery.weekly_training import (
     asymmetric_error, response_with_derivative, fixed_exact,
     fixed_smooth, fit_fixed, fit_case, fixed_room_matrix,
-    planning_task, training_lambda
+    planning_task, training_lambda, fit_vf
 )
-from run_weekly_train import check_week_cases, summarize
+from run_weekly_train import check_week_cases, summarize, evaluate_week
 
 
 def example():
@@ -126,3 +126,44 @@ def test_summary_resamples_calendar_weeks_not_cases(tmp_path):
     assert report["paired_calendar_week_uncertainty"]["VF"]["calendar_weeks"] == 2
     assert report["methods"]["VF"]["group_weeks"] == 6
     assert report["paired_calendar_week_uncertainty"]["VF"]["percent_change"] == pytest.approx(-9.)
+
+
+def test_vf_full_outer_step_certifies_and_never_increases_majorizer(tmp_path):
+    week = example()
+    n = week.n
+    X = np.column_stack((np.ones(n), np.array([-1., 0., 1.])))
+    index = {int(cid): i for i, cid in enumerate(week.case_ids)}
+    settings = {"test": "identical configuration"}
+    state = fit_vf(
+        tmp_path, [week], X, week.booked, week.actual, index,
+        .8, 30., .005, [0., 0.], settings,
+        max_outer=2, iterations=35, seconds=30., threads=1, workers=1)
+    assert state["complete"] is True
+    assert 1 <= len(state["iterations"]) <= 2
+    assert (tmp_path / "vf_progress.json").exists()
+    for entry in state["iterations"]:
+        if entry["accepted"]:
+            assert entry["candidate_fixed_bound_minus_oracle"] < (
+                entry["touching_vf_bound_minus_oracle"])
+    again = fit_vf(
+        tmp_path, [week], X, week.booked, week.actual, index,
+        .8, 30., .005, [0., 0.], settings,
+        max_outer=2, iterations=35, seconds=30., threads=1, workers=1)
+    assert again == state
+
+
+def test_exact_evaluation_worker_shares_hindsight_for_all_four_methods():
+    week = example()
+    policies = {
+        "BOOKED": week.booked.copy(),
+        "LASSO": week.booked.copy(),
+        "CASE": week.booked.copy(),
+        "VF": week.booked.copy(),
+    }
+    rows = evaluate_week((week, policies, 30., 1))
+    assert len(rows) == 4 and all(row["complete"] for row in rows)
+    assert len({row["oracle_assignment_sha256"] for row in rows}) == 1
+    for row in rows:
+        assert row["vf_bound"] + 1e-6 >= row["regret"]
+        assert row["cases"] == week.n
+    assert len({row["realized_cost"] for row in rows}) == 1
