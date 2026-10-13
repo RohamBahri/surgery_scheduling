@@ -62,12 +62,18 @@ caffeinate -i python3.14 run_weekly_rich.py \
   --stage pilot --output artifacts/weekly_rich_v1 \
   --limit-weeks 2 --seconds 120 --threads 1
 
-# To request all development group-weeks, use --limit-weeks 0,
-# with a fresh output directory and an adequate solver budget.
+# To expand to all development group-weeks use --limit-weeks 0;
+# certified results from prior calls in this directory are reused.
 ```
 
+The pilot writes `pilot.csv` after each group-week. To retry uncertified
+solves, rerun **the same command in the same output directory** with a larger
+`--seconds` budget. Certified policy-week results are reused, and
+`pilot_settings.json` prevents mixing scenarios or policies. Use
+`--limit-weeks 0` to expand a pilot to every development group-week.
+
 Files: `manifest.json`, `train.npz`, `validation.npz`,
-`lasso_policy.json`, `pilot.csv`. The feature design and training
+`lasso_policy.json`, `pilot_settings.json`, `pilot.csv`. The feature design and training
 selection record the names, source hash, week windows, and policy coefficients.
 
 ## Method boundary and next phase

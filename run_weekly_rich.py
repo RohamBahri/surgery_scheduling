@@ -176,12 +176,39 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
     selected.sort(key=lambda pair: (pair[1], pair[0].group, pair[0].monday))
     if limit:
         selected = selected[:limit]
-    rows = []
+    settings = {
+        "workbook_sha256": meta["workbook_sha256"],
+        "policy_sha256": hashlib.sha256((root / "lasso_policy.json").read_bytes()).hexdigest(),
+        "alpha": alpha, "h": h, "gamma": gamma, "prior_dates": 1,
+    }
+    identity_path = root / "pilot_settings.json"
+    if identity_path.exists():
+        if json.loads(identity_path.read_text()) != settings:
+            raise ValueError("Pilot inputs or response settings differ; use a fresh output directory")
+    else:
+        identity_path.write_text(json.dumps(settings, indent=2) + "\n")
+    # Reuse only previously certified policy-week results; retry unfinished cells.
+    # Increasing --seconds or --limit-weeks never invalidates certified rows.
+    rows = {}
+    output_csv = root / "pilot.csv"
+    if output_csv.exists():
+        for record in pd.read_csv(output_csv).to_dict("records"):
+            if record.get("complete") == True:
+                key = (str(record["period"]), str(record["group"]),
+                       str(record["monday"]), str(record["method"]))
+                if key in rows:
+                    raise ValueError("Duplicate certified pilot cell")
+                rows[key] = record
     for week, part in selected:
+        if all((part, week.group, week.monday, m) in rows
+               for m in ("BOOKED", "LASSO")):
+            continue
         parts = week.components()
         oracle = [solve_week(c, c.actual, seconds=seconds, threads=threads, tie=False)
                   for c in parts]
         for method in ("BOOKED", "LASSO"):
+            if (part, week.group, week.monday, method) in rows:
+                continue
             aggregate = {key: 0. for key in
                          ("cases", "case_error", "vf", "gap", "spo",
                           "regret", "realized_cost", "oracle_cost")}
@@ -215,15 +242,18 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
                                  ("regret", regret), ("realized_cost", realized),
                                  ("oracle_cost", hindsight.value)):
                     aggregate[key] += float(val)
-            rows.append({"group": week.group, "monday": week.monday,
+            key = (part, week.group, week.monday, method)
+            rows[key] = {"group": week.group, "monday": week.monday,
                          "period": part, "method": method,
                          "complete": completed, **(aggregate if completed else
-                                                  {k: np.nan for k in aggregate})})
-        pd.DataFrame(rows).to_csv(root / "pilot.csv", index=False)
-        print(f"{part} {week.group} {week.monday}: evaluated", flush=True)
-    if not all(row["complete"] for row in rows):
-        raise RuntimeError("Uncertified weekly jobs; inspect pilot.csv and increase time budget")
-    print("Exact scores saved to", root / "pilot.csv")
+                                                  {k: np.nan for k in aggregate})}
+        temporary = output_csv.with_suffix(".tmp")
+        pd.DataFrame([rows[k] for k in sorted(rows)]).to_csv(temporary, index=False)
+        temporary.replace(output_csv)
+        print(f"{part} {week.group} {week.monday}: scored", flush=True)
+    if not all(row["complete"] for row in rows.values()):
+        raise RuntimeError("Some weekly jobs were uncertified; retry the SAME directory with a larger budget")
+    print("Exact scores saved to", output_csv)
 
 
 def main():
@@ -260,8 +290,6 @@ def main():
             parser.error("Penalties must be finite positive values")
         fit_lasso(args.output, penalties)
     else:
-        if (args.output / "pilot.csv").exists():
-            parser.error("Pilot already exists; use a new artifact directory")
         pilot(args.output, args.workbook, args.alpha, args.h, args.gamma,
               args.seconds, args.threads, args.limit_weeks)
 
