@@ -22,6 +22,42 @@ from surgery.rich_features import RichCorrectionEncoder, attach_preoperative_dat
 from surgery.weekly_data import build_weeks, performed_events
 from surgery.weekly_planner import evaluate, solve_adversary, solve_week
 
+# A source change invalidates previously built matrices and policy coefficients.
+SOURCE_FILES = ('run_weekly_rich.py', 'surgery/data.py',
+                'surgery/rich_features.py', 'surgery/planner.py',
+                'surgery/weekly_data.py', 'surgery/weekly_planner.py')
+
+
+def source_fingerprint():
+    root = Path(__file__).resolve().parent
+    h = hashlib.sha256()
+    for filename in SOURCE_FILES:
+        h.update(filename.encode())
+        h.update((root / filename).read_bytes())
+    return h.hexdigest()
+
+
+def verify_bounds(regret, vf, gap, spo):
+    if min(regret, vf - regret, gap - regret, spo - gap) < -0.01:
+        raise AssertionError('Certified upper-bound ordering or nonnegative regret violated')
+
+
+def choose_pilot_weeks(pairs, limit):
+    # The initial three-week pilot must cover validation at ALL three sites.
+    first = []
+    for group in GROUPS:
+        choices = sorted((p for p in pairs if p[1] == 'validation'
+                          and p[0].group == group), key=lambda p: p[0].monday)
+        if choices:
+            first.append(choices[0])
+    seen = {(w.group, w.monday, part) for w, part in first}
+    rest = sorted((p for p in pairs
+                   if (p[0].group, p[0].monday, p[1]) not in seen),
+                  key=lambda p: (p[1] != 'validation', p[0].monday,
+                                 GROUPS.index(p[0].group)))
+    result = first + rest
+    return result[:limit] if limit else result
+
 
 def windows(cohort, start, train_weeks, validation_weeks):
     """Case rows and week identities, preserving all three physical-room groups."""
@@ -58,6 +94,7 @@ def save_features(root, workbook, start, train_weeks, validation_weeks):
         cohort, start, train_weeks, validation_weeks)
     encoder = RichCorrectionEncoder()
     matrices = {"train": encoder.fit_transform(train), "validation": encoder.transform(valid)}
+    matrix_hashes = {}
     for part, frame in (("train", train), ("validation", valid)):
         x = matrices[part]
         if x.shape[0] != len(frame) or not np.isfinite(x).all():
@@ -70,8 +107,11 @@ def save_features(root, workbook, start, train_weeks, validation_weeks):
             group=frame.group.to_numpy(str),
             date=frame.date.dt.strftime("%Y-%m-%d").to_numpy(str),
             monday=frame.monday.dt.strftime("%Y-%m-%d").to_numpy(str))
+        matrix_hashes[part] = hashlib.sha256((root / f"{part}.npz").read_bytes()).hexdigest()
     specification = {
         "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+        "code_sha256": source_fingerprint(),
+        "matrix_sha256": matrix_hashes,
         "start_week_index": start, "train_weeks": train_weeks,
         "validation_weeks": validation_weeks,
         "train_cases": len(train), "validation_cases": len(valid),
@@ -89,8 +129,12 @@ def save_features(root, workbook, start, train_weeks, validation_weeks):
 
 def load_matrices(root):
     meta = json.loads((root / "manifest.json").read_text())
+    if meta.get("code_sha256") != source_fingerprint():
+        raise ValueError("Scientific code changed since matrices were built; rebuild to a NEW output directory")
     frames = {}
     for part in ("train", "validation"):
+        if hashlib.sha256((root / f"{part}.npz").read_bytes()).hexdigest() != meta["matrix_sha256"][part]:
+            raise ValueError(f"{part} feature matrix content has changed")
         with np.load(root / f"{part}.npz") as z:
             frames[part] = {name: z[name].copy() for name in z.files}
         if frames[part]["X"].shape[1] != len(meta["feature_names"]):
@@ -146,7 +190,7 @@ def fit_lasso(root, penalties):
 
 
 def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
-    """Exact certified per-week loss scores for BOOKED and CASE; no model fitting."""
+    """Certified weekly losses for BOOKED and predictive LASSO; no model fitting."""
     meta, frames = load_matrices(root)
     policy = json.loads((root / "lasso_policy.json").read_text())
     if policy["features"] != meta["feature_names"]:
@@ -173,9 +217,7 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
     selected = [(w, part) for w in weeks
                 for part in ("train", "validation")
                 if (part, w.group, w.monday) in period_by_key]
-    selected.sort(key=lambda pair: (pair[1], pair[0].group, pair[0].monday))
-    if limit:
-        selected = selected[:limit]
+    selected = choose_pilot_weeks(selected, limit)
     settings = {
         "workbook_sha256": meta["workbook_sha256"],
         "policy_sha256": hashlib.sha256((root / "lasso_policy.json").read_bytes()).hexdigest(),
@@ -235,8 +277,7 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
                 vf = plan.value + theta - hindsight.value
                 gap = gamma * plan.value + adversary.value - hindsight.value
                 spo = gamma * pred_oracle + adversary.value - hindsight.value
-                if min(vf - regret, gap - regret, spo - gap) < -0.01:
-                    raise AssertionError("Certified upper-bound ordering violated")
+                verify_bounds(regret, vf, gap, spo)
                 for key, val in (("cases", component.n), ("case_error", np.abs(error).sum()),
                                  ("vf", vf), ("gap", gap), ("spo", spo),
                                  ("regret", regret), ("realized_cost", realized),
@@ -270,7 +311,7 @@ def main():
     parser.add_argument("--gamma", type=float, default=2.)
     parser.add_argument("--seconds", type=float, default=120.)
     parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument("--limit-weeks", type=int, default=2)
+    parser.add_argument("--limit-weeks", type=int, default=3)
     args = parser.parse_args()
     if (args.start_week_index < 0 or args.train_weeks < 1 or args.validation_weeks < 1
             or args.seconds <= 0 or not 1 <= args.threads <= 15 or args.gamma < 1
@@ -283,8 +324,8 @@ def main():
         save_features(args.output, args.workbook, args.start_week_index,
                       args.train_weeks, args.validation_weeks)
     elif args.stage == "fit":
-        if (args.output / "case_policy.json").exists():
-            parser.error("Policy already exists; refuse to silently overwrite it")
+        if (args.output / "lasso_policy.json").exists() or (args.output / "pilot_settings.json").exists():
+            parser.error("Fitted policy/pilot already exists; refuse to overwrite it")
         penalties = [float(x) for x in args.penalties.split(",")]
         if not penalties or not all(np.isfinite(a) and a > 0 for a in penalties):
             parser.error("Penalties must be finite positive values")

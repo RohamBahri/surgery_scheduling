@@ -17,7 +17,10 @@ been changed by the feature integration.
   The original leave-one-date-out procedure and shrinkage parameters are
   **unchanged**. The training matrix additionally uses same-date-excluded
   history aggregates, calendar, site, patient type, consultation/decision
-  lead times, and shrunken surgeon–procedure interactions.
+  lead times, shrunken surgeon–procedure interactions, and four
+  hierarchically shrunken proportional-error × booked-duration interactions
+  (service/procedure/surgeon/joint). Annual seasonal sine/cosine and year
+  progress are intentionally excluded.
 - Evaluation historical features use only the **fitted training cohort**,
   even for unseen surgeon, procedure, or combination IDs. Unseen effects
   shrink/fall back to wider service or global histories.
@@ -31,6 +34,22 @@ been changed by the feature integration.
 - For this stage, the regularized **LASSO predictive baseline** is selected
   by training-only BIC. The same X is intended for later direct decision-
   aware optimization. No separate feature models or artificial test split.
+
+## Updating an older local checkout
+
+```bash
+cd /path/to/surgery_scheduling
+git status --short                   # preserve local edits before updating
+git fetch origin
+git switch weekly-supported-days
+git pull --ff-only origin weekly-supported-days
+python3.14 -m pip install -r requirements-lock.txt
+python3.14 -m pip install -e . --no-deps
+python3.14 -m pytest -q
+```
+
+Old rich-feature matrices are incompatible with the revised scientific-code
+fingerprint. Start a **new** artifact directory; do not reuse v1 results.
 
 ## Use
 
@@ -47,43 +66,47 @@ caffeinate -i python3.14 run_weekly_rich.py \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --stage features --start-week-index 0 \
   --train-weeks 60 --validation-weeks 18 \
-  --output artifacts/weekly_rich_v1
+  --output artifacts/weekly_rich_v2
 
 # Fit a single L1-regularized rich predictive correction on training cases only.
 python3.14 run_weekly_rich.py \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage fit --output artifacts/weekly_rich_v1
+  --stage fit --output artifacts/weekly_rich_v2
 
-# Small **exact** pilot: two group-weeks, BOOKED vs LASSO, same response.
+# Small exact pilot: first validation week at each of three sites,
+# BOOKED vs pooled LASSO, same response.
 # Displays case-error/VF/GAP/SPO scores and realized regret; VF/GAP/SPO are NOT
 # claimed as separately optimized policy methods.
 caffeinate -i python3.14 run_weekly_rich.py \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage pilot --output artifacts/weekly_rich_v1 \
-  --limit-weeks 2 --seconds 120 --threads 1
+  --stage pilot --output artifacts/weekly_rich_v2 \
+  --limit-weeks 3 --seconds 120 --threads 1
 
 # To expand to all development group-weeks use --limit-weeks 0;
 # certified results from prior calls in this directory are reused.
 ```
 
-The pilot writes `pilot.csv` after each group-week. To retry uncertified
+The default three-week pilot covers the first validation week at each
+site. The pilot writes `pilot.csv` after each group-week. To retry uncertified
 solves, rerun **the same command in the same output directory** with a larger
 `--seconds` budget. Certified policy-week results are reused, and
 `pilot_settings.json` prevents mixing scenarios or policies. Use
 `--limit-weeks 0` to expand a pilot to every development group-week.
 
 Files: `manifest.json`, `train.npz`, `validation.npz`,
-`lasso_policy.json`, `pilot_settings.json`, `pilot.csv`. The feature design and training
-selection record the names, source hash, week windows, and policy coefficients.
+`lasso_policy.json`, `pilot_settings.json`, `pilot.csv`. The feature design and training selection record the scientific-code
+fingerprint, workbook hash, matrix hashes, week windows, and policy
+coefficients. The fit stage refuses to overwrite an existing policy.
 
 ## Method boundary and next phase
 
 The exact `solve_week` / `solve_adversary` oracles remain the source of
-truth. The runner **trains a predictive LASSO baseline**, and evaluates its VF, gamma-gap,
+truth. The runner **trains a pooled squared-error LASSO predictive baseline**, and evaluates its VF, gamma-gap,
 and SPO-style upper bounds with certified schedules. It does **not** yet
 optimize distinct rich policy vectors against VF, GAP, or SPO. That requires
 a proper optimizer over `w`, using the same frozen feature matrix and
-consistent regularization, not another two-parameter advice grid. Do not
+consistent regularization, not another two-parameter advice grid. LASSO is
+not a response-aware CASE policy and must not be reported as one. Do not
 present pilot loss scores as a comparison of trained methods.
 
 The original affine offset-and-slope grid and its specialized recovery

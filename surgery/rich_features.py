@@ -27,7 +27,7 @@ from surgery.data import Encoder
 
 REQUIRED = ('case_id', 'date', 'group', 'service', 'procedure',
             'surgeon', 'booked', 'patient_type')
-AGG_COLS = ('n', 'err_sum', 'abs_sum', 'under_sum')
+AGG_COLS = ('n', 'err_sum', 'abs_sum', 'under_sum', 'ratio_sum')
 
 
 def _date_series(values: pd.Series) -> pd.Series:
@@ -83,9 +83,13 @@ def _counts(frame: pd.DataFrame, keys: tuple[str, ...]) -> pd.DataFrame:
     )
     a['_abs'] = a._error.abs()
     a['_under'] = (a._error > 0).astype(float)
+    # Per-case relative booking error; capped to prevent very small bookings
+    # from dominating a surgeon/procedure history estimate.
+    a['_ratio'] = np.clip(a._error / a.booked.to_numpy(float), -2., 5.)
     grouped = a.groupby(list(keys), dropna=False, observed=True)
     result = grouped.agg(n=('_error', 'size'), err_sum=('_error', 'sum'),
-                         abs_sum=('_abs', 'sum'), under_sum=('_under', 'sum'))
+                         abs_sum=('_abs', 'sum'), under_sum=('_under', 'sum'),
+                         ratio_sum=('_ratio', 'sum'))
     return result.reset_index()
 
 
@@ -210,6 +214,7 @@ class RichCorrectionEncoder:
         gmean = _mean(g, 'err_sum', np.zeros(len(f)))
         gabs = _mean(g, 'abs_sum', np.zeros(len(f)))
         gunder = _mean(g, 'under_sum', np.zeros(len(f)))
+        global_ratio = _mean(g, 'ratio_sum', np.zeros(len(f)))
         svmean = _rate(service, 'err_sum', gmean, self.pseudo)
         svabs = _rate(service, 'abs_sum', gabs, self.pseudo)
         svunder = _rate(service, 'under_sum', gunder, self.pseudo)
@@ -222,6 +227,18 @@ class RichCorrectionEncoder:
         pair_mean = _mean(pair, 'err_sum', .5 * (pmean+smean))
         pair_n = pair.n.to_numpy(float)
         pair_extra = pair_n / (pair_n + self.pseudo) * (pair_mean - .5 * (pmean+smean))
+        # Four proportional-bias interaction fields. Use the original
+        # Encoder's estimated within-service shrinkage for sparse procedure
+        # and surgeon IDs. The pair is shrunk more heavily toward their mean.
+        k_proc = self.base.shrinkage['procedure']
+        k_surgeon = self.base.shrinkage['surgeon']
+        k_proc = self.pseudo if k_proc is None else max(float(k_proc), 1.)
+        k_surgeon = self.pseudo if k_surgeon is None else max(float(k_surgeon), 1.)
+        service_ratio = _rate(service, 'ratio_sum', global_ratio, self.pseudo)
+        proc_ratio = _rate(proc, 'ratio_sum', service_ratio, k_proc)
+        surgeon_ratio = _rate(surgeon, 'ratio_sum', service_ratio, k_surgeon)
+        pair_ratio = _rate(pair, 'ratio_sum', .5 * (proc_ratio + surgeon_ratio),
+                           max(k_proc, k_surgeon, float(self.pseudo)))
         return {
             'hist_service_mean_error': svmean,
             'hist_service_mean_abs_error': svabs,
@@ -234,6 +251,10 @@ class RichCorrectionEncoder:
             'hist_surgeon_log_support': np.log1p(surgeon.n.to_numpy(float)),
             'hist_joint_log_support': np.log1p(pair_n),
             'hist_pair_residual_interaction': pair_extra,
+            'hist_ratio_service': service_ratio,
+            'hist_ratio_procedure': proc_ratio,
+            'hist_ratio_surgeon': surgeon_ratio,
+            'hist_ratio_pair': pair_ratio,
         }
 
     def _context(self, frame: pd.DataFrame, legacy: np.ndarray, train_mode: bool):
@@ -243,17 +264,20 @@ class RichCorrectionEncoder:
             out['site:'+group] = f.group.eq(group).to_numpy(float)
         for val in self.other_patient_types:
             out['patient_type:'+val] = f.patient_type.eq(val).to_numpy(float)
-        day = f.date.dt.dayofyear.to_numpy(float)
-        out['calendar_sin'] = np.sin(2*np.pi*day/365.25)
-        out['calendar_cos'] = np.cos(2*np.pi*day/365.25)
-        out['calendar_year_progress'] = (f.date-self.date_origin).dt.days.to_numpy(float) / 365.25
         for name in ('dtt', 'consult'):
             lead = _median_lead(f, name, self.log_lead_clip)
             valid, log = lead if lead is not None else (np.zeros(len(f), bool), np.zeros(len(f)))
             median = self.lead_medians.get(name, 0.)
             out[name+'_log_lead'] = np.where(valid,log,median)
             out[name+'_missing'] = (~valid).astype(float)
-        out.update(self._history(f, train_mode=train_mode))
+        history = self._history(f, train_mode=train_mode)
+        # Rate summaries become explicit interactions with the booked anchor,
+        # not an unrestricted booked-duration main effect.
+        booked = f.booked.to_numpy(float)
+        for level in ('service', 'procedure', 'surgeon', 'pair'):
+            out['proportional_booked_x_' + level] = (
+                booked * history.pop('hist_ratio_' + level))
+        out.update(history)
         # The unit booked anchor remains outside X. These are ONLY contextual
         # adjustments and can change the conditional slope in non-reference groups.
         relative_b = np.clip((f.booked.to_numpy(float)-180.)/180., -1., 5.)
@@ -279,7 +303,6 @@ class RichCorrectionEncoder:
         self.other_groups = sorted(set(f.group)-{self.reference_site})
         self.reference_patient_type = f.patient_type.value_counts().index[0]
         self.other_patient_types = sorted(set(f.patient_type)-{self.reference_patient_type})
-        self.date_origin = f.date.min()
         self.lead_medians = {}
         for name in ('dtt','consult'):
             valid, lead = _median_lead(f,name,self.log_lead_clip)
@@ -307,9 +330,13 @@ class RichCorrectionEncoder:
         if not hasattr(self,'base'):
             raise RuntimeError('fit_transform must be called before transform')
         f = self._prepare(frame)
-        old = self.base.transform(f)
-        # The existing Encoder._scores uses the COMPLETE fitted TRAIN HISTORY.
+        # Avoid computing the legacy scores twice: _raw() includes booked and
+        # service indicators, while the final four entries are _scores().
+        # This is equivalent to the original Encoder.transform() output.
         legacy = self.base._scores(f)
+        raw = self.base._raw(f, legacy)
+        old = np.column_stack([np.ones(len(f)),
+                                (raw - self.base.mean) / self.base.scale])
         extra = self._context(f,legacy,train_mode=False)
         mat = np.column_stack([extra[k] for k in self.extra_names]).astype(float)
         return self._combine(old,mat)
