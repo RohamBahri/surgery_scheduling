@@ -1,11 +1,14 @@
 """Regression guards for the supported-week rich feature pilot."""
 import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from run_weekly_rich import (choose_pilot_weeks, source_fingerprint,
-                             verify_bounds, main)
+                             verify_bounds, main, oracle_assignment_sha256,
+                             paired_week_is_certified)
 from surgery.data import GROUPS
 from surgery.rich_features import RichCorrectionEncoder
 from surgery.weekly_data import Week
@@ -100,3 +103,37 @@ def test_feature_code_includes_source_digest_and_no_calendar():
     test = f.iloc[:3].copy()
     test["actual"] += 10000.
     np.testing.assert_allclose(enc.transform(test), enc.transform(f.iloc[:3]))
+
+
+def test_resumed_week_requires_one_shared_hindsight_assignment():
+    """BOOKED/LASSO cannot be mixed across oracle ties or partial retries."""
+    week = example()
+    # Both schedules are feasible but differ in the physical room-day of case 2.
+    first = SimpleNamespace(complete=True, assignment=[0, 0, 1])
+    alternate = SimpleNamespace(complete=True, assignment=[1, 0, 1])
+    digest = oracle_assignment_sha256([week], [first])
+    other = oracle_assignment_sha256([week], [alternate])
+    assert digest != other and len(digest) == 64
+    assert oracle_assignment_sha256([week], [first]) == digest
+
+    key = ("validation", week.group, week.monday)
+    bkey, lkey = (*key, "BOOKED"), (*key, "LASSO")
+    rows = {
+        bkey: {"complete": True, "oracle_assignment_sha256": digest},
+        lkey: {"complete": True, "oracle_assignment_sha256": digest},
+    }
+    assert paired_week_is_certified(rows, *key)
+
+    rows[lkey]["oracle_assignment_sha256"] = other
+    assert not paired_week_is_certified(rows, *key)
+    rows[lkey]["oracle_assignment_sha256"] = digest
+    rows[lkey]["complete"] = False
+    assert not paired_week_is_certified(rows, *key)
+    rows[lkey]["complete"] = True
+    del rows[lkey]["oracle_assignment_sha256"]
+    assert not paired_week_is_certified(rows, *key)
+    del rows[lkey]
+    assert not paired_week_is_certified(rows, *key)
+    with pytest.raises(ValueError, match="Only certified"):
+        oracle_assignment_sha256([week], [SimpleNamespace(
+            complete=False, assignment=[0, 0, 1])])

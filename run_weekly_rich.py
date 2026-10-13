@@ -189,6 +189,36 @@ def fit_lasso(root, penalties):
                      indent=2), flush=True)
 
 
+def oracle_assignment_sha256(components, oracles):
+    """Identify the actual hindsight schedule shared by a week's policies.
+
+    Hash the physical room-days rather than local slot indices, so the
+    fingerprint describes the true schedule independent of component order.
+    """
+    if len(components) != len(oracles) or any(
+            not result.complete or result.assignment is None for result in oracles):
+        raise ValueError("Only certified hindsight assignments can be fingerprinted")
+    assignments = sorted(
+        (int(case_id), int(component.slots[int(slot)][0]),
+         str(component.slots[int(slot)][1]))
+        for component, result in zip(components, oracles)
+        for case_id, slot in zip(component.case_ids, result.assignment)
+    )
+    return hashlib.sha256(json.dumps(assignments, separators=(",", ":")).encode()).hexdigest()
+
+
+def paired_week_is_certified(rows, part, group, monday):
+    """Only reuse a complete BOOKED/LASSO pair with the SAME hindsight plan."""
+    booked = rows.get((part, group, monday, "BOOKED"))
+    lasso = rows.get((part, group, monday, "LASSO"))
+    if not booked or not lasso:
+        return False
+    reference = booked.get("oracle_assignment_sha256")
+    return (booked.get("complete") == True and lasso.get("complete") == True
+            and isinstance(reference, str) and len(reference) == 64
+            and lasso.get("oracle_assignment_sha256") == reference)
+
+
 def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
     """Certified weekly losses for BOOKED and predictive LASSO; no model fitting."""
     meta, frames = load_matrices(root)
@@ -229,8 +259,9 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
             raise ValueError("Pilot inputs or response settings differ; use a fresh output directory")
     else:
         identity_path.write_text(json.dumps(settings, indent=2) + "\n")
-    # Reuse only previously certified policy-week results; retry unfinished cells.
-    # Increasing --seconds or --limit-weeks never invalidates certified rows.
+    # Reuse only fully certified, oracle-matched policy PAIRS for each week.
+    # Changing --seconds or --threads can change an un-tied hindsight
+    # assignment, so a partially completed week must recompute both methods.
     rows = {}
     output_csv = root / "pilot.csv"
     if output_csv.exists():
@@ -242,19 +273,22 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
                     raise ValueError("Duplicate certified pilot cell")
                 rows[key] = record
     for week, part in selected:
-        if all((part, week.group, week.monday, m) in rows
-               for m in ("BOOKED", "LASSO")):
+        if paired_week_is_certified(rows, part, week.group, week.monday):
             continue
+        # Never mix a retained method row with a newly solved hindsight
+        # schedule. Incomplete, legacy, or mismatched pairs are both redone.
+        for method in ("BOOKED", "LASSO"):
+            rows.pop((part, week.group, week.monday, method), None)
         parts = week.components()
         oracle = [solve_week(c, c.actual, seconds=seconds, threads=threads, tie=False)
                   for c in parts]
+        oracle_ready = all(o.complete for o in oracle)
+        oracle_hash = oracle_assignment_sha256(parts, oracle) if oracle_ready else None
         for method in ("BOOKED", "LASSO"):
-            if (part, week.group, week.monday, method) in rows:
-                continue
             aggregate = {key: 0. for key in
                          ("cases", "case_error", "vf", "gap", "spo",
                           "regret", "realized_cost", "oracle_cost")}
-            completed = all(o.complete for o in oracle)
+            completed = oracle_ready
             for component, hindsight in zip(parts, oracle):
                 if not completed:
                     break
@@ -286,12 +320,14 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
             key = (part, week.group, week.monday, method)
             rows[key] = {"group": week.group, "monday": week.monday,
                          "period": part, "method": method,
-                         "complete": completed, **(aggregate if completed else
-                                                  {k: np.nan for k in aggregate})}
+                         "complete": completed,
+                         "oracle_assignment_sha256": oracle_hash,
+                         **(aggregate if completed else
+                            {k: np.nan for k in aggregate})}
         temporary = output_csv.with_suffix(".tmp")
         pd.DataFrame([rows[k] for k in sorted(rows)]).to_csv(temporary, index=False)
         temporary.replace(output_csv)
-        print(f"{part} {week.group} {week.monday}: scored", flush=True)
+        print(f"{part} {week.group} {week.monday}: scored paired policies", flush=True)
     if not all(row["complete"] for row in rows.values()):
         raise RuntimeError("Some weekly jobs were uncertified; retry the SAME directory with a larger budget")
     print("Exact scores saved to", output_csv)

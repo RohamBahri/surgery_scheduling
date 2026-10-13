@@ -89,9 +89,15 @@ caffeinate -i python3.14 run_weekly_rich.py \
 The default three-week pilot covers the first validation week at each
 site. The pilot writes `pilot.csv` after each group-week. To retry uncertified
 solves, rerun **the same command in the same output directory** with a larger
-`--seconds` budget. Certified policy-week results are reused, and
-`pilot_settings.json` prevents mixing scenarios or policies. Use
-`--limit-weeks 0` to expand a pilot to every development group-week.
+`--seconds` budget (or more threads). A BOOKED/LASSO policy-week pair is
+reused **only if both methods were certified against the identical hindsight
+oracle assignment**, verified by `oracle_assignment_sha256`. Otherwise
+**both methods for that week are recomputed** against the same freshly solved
+hindsight oracle. This preserves paired SPO comparisons across partial
+restarts even when the oracle's tie choice changes. Existing completed pairs
+remain reusable. `pilot_settings.json` prevents mixing response scenarios
+or fitted policies. Use `--limit-weeks 0` to expand a pilot to all
+development group-weeks.
 
 Files: `manifest.json`, `train.npz`, `validation.npz`,
 `lasso_policy.json`, `pilot_settings.json`, `pilot.csv`. The feature design and training selection record the scientific-code
