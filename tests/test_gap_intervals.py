@@ -131,3 +131,62 @@ def test_missing_interval_is_not_silently_accepted(tmp_path):
         certified_score({"weeks":{w.group+"|"+w.monday:{
             "complete":False,"bounded":False,"realized_plan_cost":3.}}},
             [w],np.array([1.,0.]),.1,w.n)
+
+
+@pytest.mark.parametrize("candidate_bounds,expected",[
+    ((250.,270.),"accepted"),
+    ((290.,310.),"paused"),
+])
+def test_training_accepts_only_certified_interval_descent(
+        tmp_path,monkeypatch,candidate_bounds,expected):
+    import surgery.gap_learning as gl
+    week=sample()
+    X=np.column_stack((np.ones(week.n),np.array([-.5,0.,.5])))
+    idx={int(cid):j for j,cid in enumerate(week.case_ids)}
+    start=np.array([0.,0.])
+    settings={"experiment":"synthetic validated interval training"}
+    initial=300.
+    class DummyLibrary:
+        def __init__(self,*args):
+            self.schedule_count=2
+    monkeypatch.setattr(gl,"ScheduleLibrary",DummyLibrary)
+    monkeypatch.setattr(gl,"propose",lambda lib,w,*args:(
+        np.asarray(w)+np.array([1.,0.]),
+        {"library_schedules":2,"proposal_objective":50.}))
+    def fake_certify(root,filename,weeks,index,X,booked,w,*args,**kwargs):
+        path=tmp_path/filename
+        if path.exists():
+            return json.loads(path.read_text())
+        if filename.startswith("gap_current_00"):
+            lo,hi=initial,initial
+        else:
+            lo,hi=candidate_bounds
+        key=week.group+"|"+week.monday
+        payload={
+            "identity":{"weights_sha256":gl.array_hash(w),"gamma":2.},
+            "weeks":{key:{
+                "complete":lo==hi,"bounded":True,
+                "gap_lower":lo,"gap_upper":hi,
+                "realized_plan_cost":400.,
+                "planner_assignment":[],"adversary_assignment":[]}}
+        }
+        save_json(path,payload)
+        return payload
+    monkeypatch.setattr(gl,"certify",fake_certify)
+    result=gl.train_gap(
+        tmp_path,[week],idx,X,week.booked,0.,start,settings,
+        .8,30.,2.,1,20,3.,1.5,45.,1,1,
+        refine_seconds=90.,refinement_budget=0)
+    if expected=="accepted":
+        assert result["complete"]
+        assert result["history"][0]["accepted"]
+        assert result["history"][0]["certified_after"][
+            "regularized_gap_without_hindsight_per_case"] is None
+        assert (tmp_path/"gap_current_01.json").exists()
+        assert result["history"][0]["certified_after"][
+            "regularized_gap_upper_per_case"] < result["history"][0][
+            "certified_before"]["regularized_gap_lower_per_case"]
+    else:
+        assert not result["complete"]
+        assert result["paused"]["reason"]=="candidate intervals overlap incumbent"
+        assert result["history"]==[]
