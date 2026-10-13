@@ -7,6 +7,7 @@ import pytest
 from surgery.weekly_data import Week
 from surgery.weekly_planner import evaluate, solve_week
 from surgery.planner import display_and_duration
+from run_weekly_gap import evaluate_week_gap
 from surgery.gap_learning import (
     oracle_week, array_hash, week_key, ScheduleLibrary,
     certify, certified_score, room_cost_and_derivative, train_gap
@@ -142,3 +143,19 @@ def test_training_cannot_improve_fixed_week_only_by_reducing_predicted_cost(tmp_
     rerun=train_gap(tmp_path,[week],idx,X,week.booked,0.,start,settings,
                     .8,30.,2.,2,15,4.,1.5,30.,1,1)
     assert rerun==result
+
+
+def test_five_policy_validation_and_tie_safe_gap_certificate():
+    week=flexible_example()
+    d=week.booked-7.
+    policies={
+        "BOOKED":week.booked.copy(),"LASSO":d.copy(),
+        "CASE":d.copy(),"VF":d.copy(),"VF_GAP":d.copy()
+    }
+    rows=evaluate_week_gap((week,policies,45.,1,2.))
+    assert len(rows)==5 and all(r["complete"] for r in rows)
+    assert len({r["oracle_assignment_sha256"] for r in rows})==1
+    gap=next(r for r in rows if r["method"]=="VF_GAP")
+    assert gap["vf_gap_bound_tie_safe"]+.02>=gap["regret"]
+    assert gap["vf_gap_bound"]<=gap["vf_bound"]+.02
+    assert gap["gap_primary_predicted_cost"]<=gap["pred_cost"]+.02

@@ -104,7 +104,11 @@ caffeinate -i python3.14 run_weekly_gap.py \
 A freshly shared realized hindsight oracle is used for BOOKED,
 LASSO, CASE, VF, and VF_GAP in each group-week. Reports include
 post-response MAE, realized OR cost, regret, overtime, overloaded
-blocks, VF-GAP certificate for the learned VF_GAP policy, and paired
+blocks, the exact primary-optimum VF-GAP certificate, and a separate
+tie-safe bound for the tie-broken deployed schedule. Validation re-solves
+primary predicted planning independently of the deployment tie-break,
+so the exact VF-GAP bound cannot be confused with a small allowable
+tie-stage primary-cost tolerance. It also reports paired
 18-calendar-week bootstrap confidence intervals against every
 baseline, holding all three sites together within each resample.
 

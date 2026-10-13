@@ -18,7 +18,7 @@ import pandas as pd
 from run_weekly_rich import load_matrices, source_fingerprint, verify_bounds
 from run_weekly_train import load_weeks, check_week_cases, evaluate_week
 from surgery.planner import display_and_duration
-from surgery.weekly_planner import solve_adversary
+from surgery.weekly_planner import solve_adversary, solve_week, evaluate
 from surgery.weekly_training import save_json
 from surgery.gap_learning import train_gap
 
@@ -127,25 +127,44 @@ def evaluate_week_gap(task):
             row["vf_gap_bound"]=float("nan")
         return rows
     reviewed=dict(zip(map(int,week.case_ids),map(float,durations["VF_GAP"])))
-    adversarial=0.
+    adversarial, primary_cost, realized_primary = 0., 0., 0.
     for comp in week.components():
         d=np.array([reviewed[int(i)] for i in comp.case_ids],float)
+        primary=solve_week(comp,d,seconds=seconds,threads=threads,tie=False)
         a=solve_adversary(comp,d,gamma=gamma,seconds=seconds,threads=threads)
-        if not a.complete or a.assignment is None:
+        if (not primary.complete or primary.assignment is None
+                or not a.complete or a.assignment is None):
             for row in rows:
                 row["complete"]=False
                 row["vf_gap_bound"]=float("nan")
-                row["gap_failure"]=f"{comp.group} {comp.monday} {a.status}"
+                row["gap_failure"]=(f"{comp.group} {comp.monday}: "
+                    f"primary={primary.status}, adversary={a.status}")
             return rows
+        primary_cost+=evaluate(comp,primary.assignment,d)["cost"]
+        realized_primary+=evaluate(comp,primary.assignment,comp.actual)["cost"]
         adversarial+=a.value
     gap_row=next(row for row in rows if row["method"]=="VF_GAP")
-    bound=gamma*gap_row["pred_cost"]+adversarial-gap_row["oracle_cost"]
-    if bound < gap_row["regret"]-.02:
-        raise AssertionError("Certified VF-GAP lower than realized regret")
-    if bound > gap_row["vf_bound"]+.02:
-        raise AssertionError("Certified VF-GAP exceeds original VF bound")
+    oracle=gap_row["oracle_cost"]
+    # This is the mathematical exact primary-value VF-GAP bound.
+    bound=gamma*primary_cost+adversarial-oracle
+    vf_primary=primary_cost+gap_row["asym_error"]-oracle
+    if bound < realized_primary-oracle-.02:
+        raise AssertionError("Primary optimum regret exceeds certified VF-GAP")
+    if bound > vf_primary+.02:
+        raise AssertionError("Exact primary VF-GAP exceeds original VF bound")
+    # Deployment applies additional tie-breaking within a small primary
+    # tolerance. This bound accounts for that *specific* selected schedule.
+    observed_bound=gamma*gap_row["pred_cost"]+adversarial-oracle
+    if observed_bound < gap_row["regret"]-.02:
+        raise AssertionError("Observed schedule regret exceeds tie-safe GAP bound")
+    if primary_cost > gap_row["pred_cost"]+.02:
+        raise AssertionError("Tie-breaking schedule cheaper than certified primary")
     for row in rows:
         row["vf_gap_bound"]=bound if row["method"]=="VF_GAP" else float("nan")
+        row["vf_gap_bound_tie_safe"]=(observed_bound if row["method"]=="VF_GAP"
+                                      else float("nan"))
+        row["gap_primary_predicted_cost"]=(primary_cost if row["method"]=="VF_GAP"
+                                            else float("nan"))
     return rows
 
 
@@ -206,7 +225,9 @@ def evaluate(args):
                 and len(digests)==1 and all(
                     isinstance(d,str) and len(d)==64 for d in digests)
                 and np.isfinite(records[(week.group,week.monday,"VF_GAP")].get(
-                    "vf_gap_bound",float("nan")))):
+                    "vf_gap_bound",float("nan")))
+                and np.isfinite(records[(week.group,week.monday,"VF_GAP")].get(
+                    "vf_gap_bound_tie_safe",float("nan")))):
             continue
         for name in predictions:
             records.pop((week.group,week.monday,name),None)
@@ -234,7 +255,8 @@ def evaluate(args):
                 save(future.result())
     expected=len(weeks)*len(predictions)
     if (len(records)!=expected or any(r.get("complete")!=True for r in records.values())
-            or not all(np.isfinite(r["vf_gap_bound"])
+            or not all(np.isfinite(r["vf_gap_bound"]) and
+                       np.isfinite(r.get("vf_gap_bound_tie_safe",float("nan")))
                        for r in records.values() if r["method"]=="VF_GAP")):
         raise RuntimeError("Validation not fully certified; rerun with larger --seconds")
     summarize_gap(args.output,pd.DataFrame(records.values()))
@@ -260,6 +282,9 @@ def summarize_gap(root,df):
         }
     result["vf_gap_bound_per_case"]=float(df.loc[df.method=="VF_GAP","vf_gap_bound"].sum()/
                                             df.loc[df.method=="VF_GAP","cases"].sum())
+    result["tie_safe_gap_bound_per_case"]=float(
+        df.loc[df.method=="VF_GAP","vf_gap_bound_tie_safe"].sum()/
+        df.loc[df.method=="VF_GAP","cases"].sum())
     pivot=df.pivot(index=["monday","group"],columns="method",values="realized_cost")
     monthly=pivot.groupby(level="monday").sum()
     weeks=len(monthly)

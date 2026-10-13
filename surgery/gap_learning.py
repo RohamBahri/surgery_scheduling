@@ -65,9 +65,16 @@ def oracle_week(task):
         ap = evaluate(comp, a.assignment, d)["cost"]
         if abs(pv - p.value) > .1 or abs((ac - gamma * ap) - a.value) > .1:
             raise AssertionError("Exact oracle's solution cost reconstruction differs")
+        realized = evaluate(comp, p.assignment, comp.actual)["cost"]
+        theta = float((1.75*np.maximum(comp.actual-d,0.)
+                       + np.maximum(d-comp.actual,0.)).sum())
+        gap_term = gamma*pv + ac-gamma*ap
+        if gap_term < realized-.02 or gap_term > pv+theta+.02:
+            raise AssertionError(
+                "VF-GAP bound chain violated: realized <= gap <= original VF")
         pred_total += pv
         adv_total += ac - gamma * ap
-        realized_total += evaluate(comp, p.assignment, comp.actual)["cost"]
+        realized_total += realized
         planned.extend(assignment_physical(comp, p.assignment))
         adversarial.extend(assignment_physical(comp, a.assignment))
         statuses.append([p.status, a.status])
@@ -324,10 +331,8 @@ def train_gap(root, weeks, index, X, booked, lam, start, settings,
                   f"realized plan cost/case={scored['realized_plan_cost_per_case']:.6f}",flush=True)
             if (scored["regularized_gap_without_hindsight_per_case"]
                     < old["regularized_gap_without_hindsight_per_case"]-1e-5):
-                if (selected is None or
-                    scored["regularized_gap_without_hindsight_per_case"] <
-                    selected[2]["regularized_gap_without_hindsight_per_case"]):
-                    selected=(w,cert,scored,filename,factor)
+                selected=(w,cert,scored,filename,factor)
+                break  # first exact-certified improvement; do not waste extra full solves
         accepted=selected is not None
         if accepted:
             w,cert,score,filename,factor=selected
@@ -336,8 +341,10 @@ def train_gap(root, weeks, index, X, booked, lam, start, settings,
             # next outer step; no duplicated oracle solves required.
             next_path=root/f"gap_current_{outer+1:02}.json"
             if next_path.exists():
-                raise ValueError("Unexpected next-round checkpoint already exists")
-            save_json(next_path,cert)
+                if json.loads(next_path.read_text()) != cert:
+                    raise ValueError("Unexpected incompatible next-round certificate")
+            else:
+                save_json(next_path,cert)
         state["history"].append({
             "outer":outer+1,"certified_before":old,
             "candidates":candidates, "proposal":meta,
