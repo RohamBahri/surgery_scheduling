@@ -18,7 +18,7 @@ import pandas as pd
 from run_weekly_rich import load_matrices, source_fingerprint, verify_bounds
 from run_weekly_train import load_weeks, check_week_cases, evaluate_week
 from surgery.planner import display_and_duration
-from surgery.weekly_planner import solve_adversary, solve_week, evaluate
+from surgery.weekly_planner import solve_adversary, solve_week, evaluate as evaluate_schedule
 from surgery.weekly_training import save_json
 from surgery.gap_learning import train_gap
 
@@ -140,8 +140,8 @@ def evaluate_week_gap(task):
                 row["gap_failure"]=(f"{comp.group} {comp.monday}: "
                     f"primary={primary.status}, adversary={a.status}")
             return rows
-        primary_cost+=evaluate(comp,primary.assignment,d)["cost"]
-        realized_primary+=evaluate(comp,primary.assignment,comp.actual)["cost"]
+        primary_cost+=evaluate_schedule(comp,primary.assignment,d)["cost"]
+        realized_primary+=evaluate_schedule(comp,primary.assignment,comp.actual)["cost"]
         adversarial+=a.value
     gap_row=next(row for row in rows if row["method"]=="VF_GAP")
     oracle=gap_row["oracle_cost"]

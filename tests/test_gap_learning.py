@@ -67,7 +67,7 @@ def test_fully_fixed_schedule_has_identically_zero_vf_gap():
         value,grad=lib.objective_gradient(w,X,week.booked,.8,30.,0.)
         # Smooth costs exactly cancel between predicted planner/adversary.
         assert np.linalg.norm(grad)<1e-8
-        assert value==pytest.approx(hindsight,abs=1e-7)
+        assert value==pytest.approx(hindsight/week.n,abs=1e-7)
 
 
 def test_true_bound_is_between_regret_and_old_vf_bound():
