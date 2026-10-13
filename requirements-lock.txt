@@ -4,3 +4,6 @@ scipy==1.18.1
 openpyxl==3.1.5
 gurobipy==13.0.3
 pytest==9.1.1
+scikit-learn==1.8.0
+joblib==1.5.2
+threadpoolctl==3.6.0

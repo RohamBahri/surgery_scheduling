@@ -1,210 +1,105 @@
-# Weekly supported-day planning (experimental)
+# Weekly operating-room planning: rich-feature training
 
-This branch starts from `daily-experiment`. It reuses `surgery.data.build_cohort`
-unchanged, including the 24,506/8,774 train/test split. The old daily experiment
-remains available. `weekly_data.py` defines eligibility; `weekly_planner.py`
-defines optimization; `run_weekly.py` is a **training-only** audit/benchmark.
+This branch is the weekly supported-day experiment. The weekly feasible set,
+certified ordinary planner, hindsight oracle, and loss-augmented adversary are
+in `surgery/weekly_data.py` and `surgery/weekly_planner.py`. They have NOT
+been changed by the feature integration.
 
-## Decisions represented
+## Scientific protocol
 
-- One group × one Monday–Friday week; physical rooms active in the retained
-  historical group-week are fixed, paid room-day sessions (480 min).
-- Original surgeon-day/room relationships are preserved as eligible sessions.
-  Cases may individually move among a surgeon's supported sessions; all cases
-  must be assigned. Multiple surgeons per room and multiple rooms per surgeon
-  are permitted, but no new unrestricted same-day room access is added.
-- A surgeon observed on **one day** with **at least two retained cases** can
-  optionally use **one more weekday**. Evidence: a valid performed surgery on
-  that weekday *before* the planning week (one distinct date suffices), or
-  same-week performed activity excluded during cleaning. The eligible physical
-  room must already be active in the target week and historically used by that
-  surgeon (or be the matching excluded-activity room). The best supported
-  (weekday,room) candidate is selected deterministically.
-- Each originally observed surgeon operating day keeps at least one case;
-  the extra day is optional. No entire-list relocation, postponed case,
-  endogenous staffing, or within-day sequencing.
-- Cost = Idle + 1.75 Overtime over **every staffed room-day**, including
-  unused sessions. Load = case room durations + 30 minutes between cases.
-- Planner: minimum predicted cost, then minimum changed room-day assignments,
-  then exact lexicographic ordering of case assignments (sorted case IDs).
-  The canonical stage is solved in bounded mixed-radix chunks to avoid very
-  large coefficients. Gurobi uses one thread and seed 0. No realized durations
-  enter the planner or tie-breaking. The benchmark records primary and
-  tie-stage runtimes separately; extra tie stages are not assumed free.
-- Report both room overload and surgeon-day case-minute overload. The latter
-  is a diagnostic only; no surgeon sequencing/overlap guarantee is asserted.
+- UHN 2011–2012 is the development/training period; January–June 2013 remains
+  the **final held-out test**, not used to fit, select, or score weekly pilots.
+- A case's recommendation is `booked + X @ w`: the coefficient of booked
+  duration is fixed at one. The correction matrix does not contain an
+  unrestricted booked-duration main effect. It does contain explicit
+  booked-duration interactions with service, site, and historical bias.
+- `surgery/rich_features.py` wraps the existing `surgery.data.Encoder`.
+  The original leave-one-date-out procedure and shrinkage parameters are
+  **unchanged**. The training matrix additionally uses same-date-excluded
+  history aggregates, calendar, site, patient type, consultation/decision
+  lead times, and shrunken surgeon–procedure interactions.
+- Evaluation historical features use only the **fitted training cohort**,
+  even for unseen surgeon, procedure, or combination IDs. Unseen effects
+  shrink/fall back to wider service or global histories.
+- Planned-room assignment, intraoperative timestamps, realized duration,
+  postoperative outcomes, and held-out labels are not direct predictors.
+  `actual` saved with the matrix is a training/evaluation target, not in X.
+- To prevent within-development leakage, the feature encoder is fitted on
+  selected training weeks, then applied unchanged to subsequent validation
+  weeks. We require the maximum training surgery date to precede the
+  minimum validation surgery date across the three room groups.
+- For this stage, the regularized **LASSO predictive baseline** is selected
+  by training-only BIC. The same X is intended for later direct decision-
+  aware optimization. No separate feature models or artificial test split.
 
-Weekdays/rosters and same-week excluded activity are **retrospective proxies**.
-We cannot infer patient/surgeon availability from the workbook with certainty.
-Historical prior evidence is filtered to dates strictly before each target week.
-Do not describe this as a prospective availability reconstruction.
+## Use
 
-## Run
+Install dependencies with `python -m pip install -r requirements-lock.txt`
+and `python -m pip install -e . --no-deps`. Gurobi is required for the
+exact planning stage.
 
 ```bash
-git switch weekly-supported-days
-python -m pip install -r requirements-lock.txt
-python -m pip install -e . --no-deps
-python -m pytest tests/test_weekly.py -q
+python -m pytest -q
 
-# Structural audit: no Gurobi optimization, initial 2 group-weeks per group
-python run_weekly.py data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage audit --weeks 2 --output artifacts/weekly_audit_2
+# Build training and later development-period validation matrices.
+# This is deliberately slower than a naive date-blind encoder.
+caffeinate -i python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage features --start-week-index 0 \
+  --train-weeks 60 --validation-weeks 18 \
+  --output artifacts/weekly_rich_v1
 
-# Paired Booked/hindsight and gap-VF adversarial oracle timings
-python run_weekly.py data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage benchmark --weeks 2 --adversary --seconds 60 \
-  --adversary-seconds 60 --gamma 2 --output artifacts/weekly_pilot_2
+# Fit a single L1-regularized rich predictive correction on training cases only.
+python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage fit --output artifacts/weekly_rich_v1
 
-# Full training structural audit, then exact solver benchmark
-python run_weekly.py data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage audit --weeks 0 --output artifacts/weekly_audit_full
-python run_weekly.py data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage benchmark --weeks 0 --adversary \
-  --output artifacts/weekly_benchmark_full
+# Small **exact** pilot: two group-weeks, BOOKED vs LASSO, same response.
+# Displays case-error/VF/GAP/SPO scores and realized regret; VF/GAP/SPO are NOT
+# claimed as separately optimized policy methods.
+caffeinate -i python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage pilot --output artifacts/weekly_rich_v1 \
+  --limit-weeks 2 --seconds 120 --threads 1
+
+# To request all development group-weeks, use --limit-weeks 0,
+# with a fresh output directory and an adequate solver budget.
 ```
 
-Outputs: `manifest.json`, `components.csv`, and (for benchmark)
-`benchmark.csv`, `summary.json`. Never overwrite an existing artifact
-directory. Unfinished or tie-incomplete solves are flagged and cause nonzero
-exit, rather than being mislabeled optimal.
+Files: `manifest.json`, `train.npz`, `validation.npz`,
+`lasso_policy.json`, `pilot.csv`. The feature design and training
+selection record the names, source hash, week windows, and policy coefficients.
 
-Use `--prior-dates 2` as a robustness check. `--group TGH` or another
-room group and `--weeks N` restrict *group-weeks* for fast pilots.
+## Method boundary and next phase
 
-## Model/method boundary
+The exact `solve_week` / `solve_adversary` oracles remain the source of
+truth. The runner **trains a predictive LASSO baseline**, and evaluates its VF, gamma-gap,
+and SPO-style upper bounds with certified schedules. It does **not** yet
+optimize distinct rich policy vectors against VF, GAP, or SPO. That requires
+a proper optimizer over `w`, using the same frozen feature matrix and
+consistent regularization, not another two-parameter advice grid. Do not
+present pilot loss scores as a comparison of trained methods.
 
-The optimizer exposes `solve_week(component, reviewed_durations)`,
-`solve_adversary(component, reviewed_durations, gamma)`, and
-`evaluate(component, assignment, actual_durations)`. Each component
-decomposes by the *full eligible* room-day graph, including second-day edges.
-The loss-augmented maximization enforces exact realized overtime. Gurobi
-returns valid bounds; unfinished optimizations do not become certificates.
+The original affine offset-and-slope grid and its specialized recovery
+runner have been retired: those results were a restricted diagnostic and
+are not evidence about rich-feature learning.
 
-This branch benchmarks planner/oracle tractability before selecting a policy
-optimizer. It **does not** train a new VF, gap-VF, or SPO policy and should not
-be interpreted as demonstrating any learned-policy gains. Keep January–June
-2013 out of model selection.
+## Preserved weekly planner semantics
 
+- Each site group and Monday–Friday week has a fixed roster of physical
+  480-minute room-day sessions, inferred retrospectively from retained cases.
+- All cases are assigned. Original surgeon operating days are preserved;
+  additional weekdays require historical support. No sequencing, deferral,
+  endogenous staffing, or unrestricted room access is modeled.
+- Cost is idle minutes + 1.75 times overtime, with 30-minute turnover
+  between cases on the same room-day, including unused staffed sessions.
+- Planner minimizes predicted cost, then moved cases, then canonical
+  assignment. Load-balance tie-breaking remains an **audit option** in
+  `run_weekly_diagnostics.py`, not part of training.
+- Solvers must certify every stage. An incomplete result is labeled
+  incomplete, never treated as an optimum.
 
-## CPU parallelism and targeted retry
-
-Use **15 total CPU cores**, not 15 Gurobi threads on every small problem.
-For full-cohort experiments run 15 independent spawn-based processes, with
-one Gurobi thread per process (`--workers 15 --threads 1`). Runtime output
-and CSV order are deterministic by component index; model identities, costs,
-and eligibility are unchanged. A worker raises on any numerical inconsistency.
-Solver wall-clock times and optimization trajectories may differ with CPU load.
-
-```bash
-# Future full-cohort benchmarks: 15 concurrent single-threaded oracles.
-caffeinate -i python3.14 run_weekly.py \
-  data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage benchmark --weeks 0 --adversary --gamma 2 \
-  --workers 15 --threads 1 --seconds 60 --adversary-seconds 60 \
-  --output artifacts/weekly_parallel_new
-
-# Resolve only previously uncertified components. One hard MILP can use
-# all 15 threads internally instead of spinning up 15 mostly idle workers.
-caffeinate -i python3.14 run_weekly.py \
-  data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --stage benchmark --weeks 0 --adversary --gamma 2 \
-  --retry-from artifacts/weekly_benchmark_full/benchmark.csv \
-  --workers 1 --threads 15 --seconds 120 --adversary-seconds 600 \
-  --output artifacts/weekly_retry_600
-```
-
-Retry requires the original `manifest.json` beside the input CSV, and
-verifies the dataset fingerprint, cohort/component structure, prior-date
-eligibility and gamma before reusing certified rows. Save to a NEW directory.
-Use this only when the mathematical planner/eligibility sources have not
-changed. Numerical times in retained rows are from the original run, not a
-fresh 15-core benchmark. No existing artifact is silently overwritten.
-
-
-## Workload validation before changing the planning objective
-
-The core benchmark is unchanged. To investigate the room-days above 720
-minutes, rerun only components flagged in the certified full-cohort benchmark,
-using exact Gurobi solves. Compare the existing tie (primary cost, fewest
-moves, canonical) against **primary cost, minimum peak PREDICTED room load,
-fewest moves, canonical**.
-
-```bash
-caffeinate -i python3.14 run_weekly_diagnostics.py \
-  data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --benchmark artifacts/weekly_retry_600/benchmark.csv \
-  --workers 15 --threads 1 --seconds 120 \
-  --output artifacts/weekly_load_audit
-```
-
-The `--benchmark` directory must contain the corresponding `manifest.json`.
-The script reconstructs the cohort and checks the workbook fingerprint and
-baseline realized costs component by component. Output: `components.csv`,
-`rooms.csv`, and `summary.json`. The audit exposes a conservative
-room-specific forced-case load lower bound; it is **not** a full infeasibility
-proof for less constrained cases. Judge balancing by both realized overload
-and realized cost. Balancing is *not* made the default planner rule.
-
-## Learning objective pilot (TRAINING PERIOD ONLY)
-
-Evaluate a common, intentionally small recommendation class
-`u_i = offset + slope * (booked_i-180)/180`, with the same response map,
-grid, training weeks, validation weeks, and exact weekly planner for all methods.
-The methods differ only in their **training objective**: Shift (constant
-advice, case MAE), Case (affine advice, case MAE), original VF, gamma-gap-VF,
-and an SPO-style upper bound. BOOKED is the zero-advice reference. Optimize
-each objective by exhaustive finite-grid selection (not pDCA or end-to-end
-gradient learning) and compare realized regret on strictly *later training
-weeks*. Test data from January–June 2013 are excluded.
-
-```bash
-caffeinate -i python3.14 run_weekly_learning.py \
-  data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --start-week-index 20 --train-weeks 3 --validation-weeks 2 \
-  --alpha .8 --h 30 --gamma 2 \
-  --workers 15 --threads 1 --seconds 60 \
-  --output artifacts/weekly_learning_pilot
-```
-
-Files: `grid_results.csv` (all candidate/period results),
-`policies.csv` (one training-selected policy per method/group), and
-`validation.csv` (matched training and later-week regret/cost summaries).
-Use `--resume` with the identical command/output if interrupted.
-Uncertified solves are never used to select a policy. More demanding runs
-can increase `--train-weeks`, `--validation-weeks`, and grid density
-in a **fresh** output directory. Choose those settings without consulting
-2013 test results. This pilot is *diagnostic*: success would justify
-implementing a richer case-feature policy optimizer, not establish
-publishable out-of-sample gains.
-
-## Recover a partially completed learning pilot
-
-If the original learning grid contains timed-out candidates, do **not** rerun
-all previously certified evaluations. The separate recovery command preserves
-the original numerical experiment and its source-code fingerprint, validates
-the full 225-cell design, and reruns only the missing cells. Use one difficult
-Gurobi job at a time with 15 threads; the job is not multiplied across workers.
-
-```bash
-git pull --ff-only origin weekly-supported-days
-caffeinate -i python3.14 run_weekly_learning_recover.py \
-  data/UHNOperating_RoomScheduling2011-2013.xlsx \
-  --previous artifacts/weekly_learning_pilot \
-  --seconds 600 --threads 15 \
-  --output artifacts/weekly_learning_recovered
-```
-
-Inputs in `--previous`: `manifest.json` and `grid_results.csv` from the
-same original run. The original training and mathematical source hashes,
-workbook fingerprint, week split, policy grid, and complete rows are verified.
-The output directory must be new/empty. Recovered results are written to
-`grid_results.csv`, `retries.csv`, `policies.csv`, and `validation.csv`.
-If a retry also times out, its incomplete result is retained and must not be
-treated as a learned-policy comparison; retry the incomplete merged directory
-with a larger budget.
-
-The balanced-load tie is **not** part of the learning pilot. It remains a
-sensitivity candidate, because it improved aggregate retrospective realized
-cost in the overload-selected training components but increased it in some
-individual components.
+For the solver-only audit and benchmark use `run_weekly.py` (see
+`python run_weekly.py --help`). The independent overload-diagnostics
+script remains available because implausible realized block loads still
+require investigation.

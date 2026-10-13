@@ -58,3 +58,10 @@ A separate experimental weekly physical-room planner (optional evidence-supporte
 second weekdays, exact Gurobi planner and gap-VF oracle) is described in
 [docs/weekly.md](docs/weekly.md). It does not replace the daily pipeline or
 assert learned-policy results.
+
+## Weekly rich-feature development branch
+
+The supported weekly planner, fixed-booking-anchor correction features, and
+training-only pilot are documented in [docs/weekly.md](docs/weekly.md).
+Use `run_weekly_rich.py` for the new case-level feature workflow. The older
+`run_experiment.py` remains a separately maintained **daily** experiment.
