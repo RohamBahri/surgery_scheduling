@@ -25,7 +25,7 @@ or use the 2013 test for selection.
   one. Bounded, piecewise-linear surgeon response is honored exactly for
   objective acceptance; smoothing affects only gradient computation.
 
-The training optimizer is nonconvex because of the response map and
+The training settings pin the source hash of both training files independently\nfrom the unchanged feature encoder hash, so existing rich matrices remain\nreusable but new policies cannot silently mix trainer implementations.\n\nThe training optimizer is nonconvex because of the response map and
 combinatorial weekly planner. Neither full-case nor VF training is described
 as globally optimal. We do not claim to have separately trained GAP or SPO
 models; those methods require dedicated valid optimizing algorithms.
@@ -103,7 +103,7 @@ planner's existing tie-breaking policy is preserved. The validation summary
 contains a paired calendar-week bootstrap interval, clustering all three
 hospital groups within each of the 18 resampled calendar weeks.
 
-The evaluation is checkpointed per group-week in
+Both weekly training and validation write finished jobs as they complete,\nnot in task-submission order; a slow group-week cannot block saving results\nfrom faster weeks. A completed VF optimization file carries an explicit\nrun-complete marker and stopping reason (not a global-optimality certificate).\n\nThe evaluation is checkpointed per group-week in
 `evaluation_all_validation.csv`; running it again with `--seconds 600`
 retries the incomplete weeks only. Final summaries are in
 `evaluation_summary.json`. **The 2013 holdout is untouched**.

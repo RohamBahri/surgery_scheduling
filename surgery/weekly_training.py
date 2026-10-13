@@ -237,8 +237,9 @@ def solve_training_plans(root, weeks, X, booked, index, w, outer,
     elif pending:
         with ProcessPoolExecutor(max_workers=min(workers, len(pending)),
                                  mp_context=mp.get_context("spawn")) as pool:
-            for item in pool.map(planning_task, pending):
-                remember(item)
+            futures = [pool.submit(planning_task, task) for task in pending]
+            for future in as_completed(futures):
+                remember(future.result())
     incomplete = [w.group + "|" + w.monday for w in weeks if not
                   state.get(w.group + "|" + w.monday, {}).get("complete")]
     if incomplete:
@@ -263,6 +264,9 @@ def fit_vf(root, weeks, X, booked, actual, index, alpha, h, lam,
         "settings": settings, "w": list(start), "iterations": []}
     if state.get("settings") != settings:
         raise ValueError("VF training settings changed; use a new run directory")
+    if state.get("complete"):
+        return state
+    stopping = "outer_iteration_cap"
     for outer in range(len(state["iterations"]), max_outer):
         current = np.asarray(state["w"], float)
         plans = solve_training_plans(root, weeks, X, booked, index, current, outer,
@@ -287,7 +291,10 @@ def fit_vf(root, weeks, X, booked, actual, index, alpha, h, lam,
         print(f"VF outer {outer + 1}: before={before:.5f} "
               f"after={after:.5f} accepted={accepted}", flush=True)
         if not accepted or (before-after) / max(1., abs(before)) < 1e-4:
+            stopping = "no_accepted_gain" if not accepted else "relative_improvement"
             break
+    state["complete"] = True
+    state["stopping"] = stopping
     state["method"] = "VF"
     state["objective_definition"] = (
         "sum asymmetric post-response error + min predicted OR cost, "

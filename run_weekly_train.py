@@ -26,6 +26,16 @@ from surgery.weekly_training import (fit_case, fit_vf, training_lambda,
                                       asymmetric_error, save_json)
 
 
+def trainer_source_fingerprint():
+    """Independent from frozen feature-code checksum: permits safe X reuse."""
+    h = hashlib.sha256()
+    root = Path(__file__).resolve().parent
+    for name in ("run_weekly_train.py", "surgery/weekly_training.py"):
+        h.update(name.encode())
+        h.update((root / name).read_bytes())
+    return h.hexdigest()
+
+
 def load_weeks(workbook, meta, part):
     raw, cohort = read_cohort(workbook)
     expected = {tuple(t) for t in meta["training_keys" if part == "train" else "validation_keys"]}
@@ -51,6 +61,7 @@ def experiment_identity(meta, workbook, alpha, h, lambda_l1, iterations, max_out
         raise ValueError("Workbook changed since rich features were built")
     return {
         "feature_code_sha256": source_fingerprint(),
+        "trainer_code_sha256": trainer_source_fingerprint(),
         "workbook_sha256": workbook_hash,
         "matrix_sha256": meta["matrix_sha256"],
         "feature_names": meta["feature_names"],
@@ -188,6 +199,8 @@ def evaluate_models(root, workbook, alpha, h, penalty, iterations,
     vf = json.loads((root / "vf_progress.json").read_text())
     if case.get("settings") != settings or vf.get("settings") != settings:
         raise ValueError("Training policies have incompatible settings")
+    if vf.get("complete") is not True:
+        raise ValueError("VF training has not completed its configured iterations")
     names = meta["feature_names"]
     if baseline["features"] != names:
         raise ValueError("Lasso feature order mismatch")
@@ -264,7 +277,9 @@ def evaluate_models(root, workbook, alpha, h, penalty, iterations,
     else:
         with ProcessPoolExecutor(max_workers=min(workers, max(1,len(tasks))),
                                  mp_context=mp.get_context("spawn")) as pool:
-            for rows in pool.map(evaluate_week, tasks):
+            futures = [pool.submit(evaluate_week, task) for task in tasks]
+            for future in as_completed(futures):
+                rows = future.result()
                 persist(rows)
                 print(rows[0]["group"], rows[0]["monday"], "evaluated", flush=True)
     all_rows = pd.DataFrame(records.values())
