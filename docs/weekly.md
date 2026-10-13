@@ -104,6 +104,64 @@ Files: `manifest.json`, `train.npz`, `validation.npz`,
 fingerprint, workbook hash, matrix hashes, week windows, and policy
 coefficients. The fit stage refuses to overwrite an existing policy.
 
+## Reuse completed rich-feature artifacts after oracle-pair fix
+
+The source fingerprint intentionally includes the weekly runner. The
+October 13 oracle-pair resume correction changed the runner, **not** the
+feature builder or fitted Lasso. Consequently, files produced with code SHA
+`dcdc7f7cfaae9cb5fe83a8c8a39da987ea118c9c6a965eb75288f2f2968b0fb9`
+can be adopted **without regenerating X or refitting the policy**, after
+checking matrix and policy hashes. This command is strictly limited to that
+verified historical version; it rejects all other mismatched sources.
+
+```bash
+# From an updated checkout and the existing artifact directory:
+python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage adopt --output artifacts/weekly_rich_v2
+```
+
+The command preserves the original manifest in
+`manifest_before_oracle_pair_fix.json`, updates the manifest's code identity
+with provenance fields, and renames the legacy SPO rows to
+`pilot_before_oracle_pair_fix.csv`. The legacy pilot was fully solved but
+its BOOKED/LASSO rows lack hindsight-oracle assignment fingerprints.
+The feature arrays and Lasso policy remain byte-identical.
+
+For a 15-core workstation, use three concurrent small pilot week jobs
+with five Gurobi threads each (up to 15 solver threads):
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 caffeinate -i python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage pilot --output artifacts/weekly_rich_v2 \
+  --pilot-period validation --limit-weeks 3 \
+  --workers 3 --threads 5 --seconds 120
+```
+
+Then evaluate **all 54 validation group-weeks**, using fifteen
+independent one-thread Gurobi worker processes; the three certified
+pairs are reused, and the 2013 test set remains untouched:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 caffeinate -i python3.14 run_weekly_rich.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --stage pilot --output artifacts/weekly_rich_v2 \
+  --pilot-period validation --limit-weeks 0 \
+  --workers 15 --threads 1 --seconds 120
+```
+
+Increase `--seconds` if a solver is not certified and rerun the same
+directory to retry only affected group-weeks. Each independent worker
+solves **both** policy schedules against one shared hindsight oracle,
+records `oracle_assignment_sha256`, and checkpoints as soon as a
+group-week finishes. `--workers * --threads` cannot exceed 15.
+Gurobi controls actual solver parallelism, so 15 is a concurrency
+**capacity**, not a guarantee every core is busy at every instant.
+
+These commands score BOOKED and the fitted *predictive* Lasso only.
+They do not train the separate response-aware or decision-aware policies.
+
 ## Method boundary and next phase
 
 The exact `solve_week` / `solve_adversary` oracles remain the source of

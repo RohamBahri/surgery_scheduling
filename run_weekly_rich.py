@@ -8,9 +8,11 @@ are reported as certified losses, not misrepresented as separately trained
 policies. Existing weekly scheduling/oracle models are unchanged.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 import hashlib
 import json
+import multiprocessing as mp
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +25,12 @@ from surgery.weekly_data import build_weeks, performed_events
 from surgery.weekly_planner import evaluate, solve_adversary, solve_week
 
 # A source change invalidates previously built matrices and policy coefficients.
+# Provenance of the verified rich-feature artifacts produced immediately before
+# the paired-oracle resume correction (commit fed01bf). Scientific feature
+# inputs have not changed; only pilot orchestration/source fingerprint did.
+LEGACY_FEATURE_SOURCE_SHA256 = (
+    "dcdc7f7cfaae9cb5fe83a8c8a39da987ea118c9c6a965eb75288f2f2968b0fb9"
+)
 SOURCE_FILES = ('run_weekly_rich.py', 'surgery/data.py',
                 'surgery/rich_features.py', 'surgery/planner.py',
                 'surgery/weekly_data.py', 'surgery/weekly_planner.py')
@@ -189,6 +197,72 @@ def fit_lasso(root, penalties):
                      indent=2), flush=True)
 
 
+def adopt_legacy_artifacts(root, workbook):
+    """One-time, fingerprint-checked reuse of pre-oracle-pair artifacts.
+
+    This migration does NOT refit or change the matrices. It updates the
+    source-version guard only for the reviewed runner-only change and archives
+    old SPO pilot rows, which lack a hindsight assignment fingerprint.
+    """
+    manifest_path = root / "manifest.json"
+    meta = json.loads(manifest_path.read_text())
+    old_fingerprint = meta.get("code_sha256")
+    if old_fingerprint != LEGACY_FEATURE_SOURCE_SHA256:
+        raise ValueError(
+            "Only the verified pre-paired-runner artifact version can be adopted; "
+            "never bypass code fingerprints for a different feature builder")
+    if hashlib.sha256(workbook.read_bytes()).hexdigest() != meta.get("workbook_sha256"):
+        raise ValueError("Workbook differs from the artifacts")
+    if meta.get("feature_metadata", {}).get("unit_booking_anchor") is not True:
+        raise ValueError("Expected fixed booked-duration anchor")
+    if meta.get("feature_metadata", {}).get("n_features") != 74:
+        raise ValueError("Unexpected historical feature dimension")
+    if meta.get("train_cases") != 18705 or meta.get("validation_cases") != 5779:
+        raise ValueError("Unexpected development cohort")
+    if any(str(name).startswith("calendar_") for name in meta["feature_names"]):
+        raise ValueError("Legacy artifact contains removed calendar fields")
+    for part in ("train", "validation"):
+        path = root / f"{part}.npz"
+        checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+        if checksum != meta["matrix_sha256"][part]:
+            raise ValueError(f"{part} matrix does not match the original manifest")
+        with np.load(path) as z:
+            if (z["X"].shape != (meta[part + "_cases"], len(meta["feature_names"]))
+                    or not np.isfinite(z["X"]).all()):
+                raise ValueError(f"Invalid {part} matrix")
+    policy_path = root / "lasso_policy.json"
+    policy = json.loads(policy_path.read_text())
+    if (policy.get("method") != "LASSO_MSE"
+            or policy.get("features") != meta["feature_names"]
+            or len(policy.get("weights", [])) != len(meta["feature_names"])):
+        raise ValueError("Policy is incompatible with the original feature matrix")
+    settings_path = root / "pilot_settings.json"
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text())
+        if (settings.get("workbook_sha256") != meta["workbook_sha256"]
+                or settings.get("policy_sha256")
+                != hashlib.sha256(policy_path.read_bytes()).hexdigest()):
+            raise ValueError("Existing pilot does not match this model/workbook")
+    old_backup = root / "manifest_before_oracle_pair_fix.json"
+    old_pilot = root / "pilot.csv"
+    archived_pilot = root / "pilot_before_oracle_pair_fix.csv"
+    if old_backup.exists() or archived_pilot.exists():
+        raise ValueError("Migration already attempted; inspect artifacts manually")
+    if old_pilot.exists():
+        old_pilot.rename(archived_pilot)
+    old_backup.write_bytes(manifest_path.read_bytes())
+    meta["previous_code_sha256"] = old_fingerprint
+    meta["runner_only_migration"] = "fed01bf to paired-oracle pilot runner"
+    meta["code_sha256"] = source_fingerprint()
+    temporary = manifest_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(meta, indent=2) + "\n")
+    temporary.replace(manifest_path)
+    print("Verified and reused feature matrices and fitted LASSO policy.", flush=True)
+    if archived_pilot.exists():
+        print("Prior three-week pilot archived as", archived_pilot, flush=True)
+        print("Recompute oracle-matched BOOKED/LASSO pairs with --stage pilot.", flush=True)
+
+
 def oracle_assignment_sha256(components, oracles):
     """Identify the actual hindsight schedule shared by a week's policies.
 
@@ -219,10 +293,63 @@ def paired_week_is_certified(rows, part, group, monday):
             and lasso.get("oracle_assignment_sha256") == reference)
 
 
-def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
-    """Certified weekly losses for BOOKED and predictive LASSO; no model fitting."""
+def score_pilot_week(task):
+    """Score both policies against one certified hindsight oracle in one worker."""
+    week, period, case_reviews, alpha, h, gamma, seconds, threads = task
+    components = week.components()
+    hindsight = [solve_week(c, c.actual, seconds=seconds,
+                            threads=threads, tie=False) for c in components]
+    oracle_ready = all(o.complete for o in hindsight)
+    oracle_hash = oracle_assignment_sha256(components, hindsight) if oracle_ready else None
+    rows = []
+    for method in ("BOOKED", "LASSO"):
+        totals = {key: 0. for key in ("cases", "case_error", "vf", "gap", "spo",
+                                     "regret", "realized_cost", "oracle_cost")}
+        complete = oracle_ready
+        for c, o in zip(components, hindsight):
+            if not complete:
+                break
+            reviewed = (c.booked if method == "BOOKED" else
+                        np.array([case_reviews[int(i)] for i in c.case_ids], float))
+            plan = solve_week(c, reviewed, seconds=seconds, threads=threads)
+            adversary = solve_adversary(c, reviewed, gamma=gamma,
+                                        seconds=seconds, threads=threads)
+            if not plan.complete or not adversary.complete:
+                complete = False
+                break
+            realized = evaluate(c, plan.assignment, c.actual)["cost"]
+            predicted_oracle = evaluate(c, o.assignment, reviewed)["cost"]
+            error = c.actual - reviewed
+            theta = float(np.sum(1.75 * np.maximum(error, 0.) +
+                                 np.maximum(-error, 0.)))
+            regret = realized - o.value
+            vf = plan.value + theta - o.value
+            gap = gamma * plan.value + adversary.value - o.value
+            spo = gamma * predicted_oracle + adversary.value - o.value
+            verify_bounds(regret, vf, gap, spo)
+            for key, value in (
+                ("cases", c.n), ("case_error", np.abs(error).sum()),
+                ("vf", vf), ("gap", gap), ("spo", spo), ("regret", regret),
+                ("realized_cost", realized), ("oracle_cost", o.value)
+            ):
+                totals[key] += float(value)
+        rows.append({
+            "group": week.group, "monday": week.monday, "period": period,
+            "method": method, "complete": complete,
+            "oracle_assignment_sha256": oracle_hash,
+            **(totals if complete else {key: np.nan for key in totals})
+        })
+    return rows
+
+
+def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit,
+          workers=1, period="validation"):
+    """Certified weekly BOOKED versus LASSO scores, parallel across weeks."""
+    if workers * threads > 15 or workers < 1 or threads < 1:
+        raise ValueError("CPU budget requires 1 <= workers*threads <= 15")
     meta, frames = load_matrices(root)
-    policy = json.loads((root / "lasso_policy.json").read_text())
+    policy_path = root / "lasso_policy.json"
+    policy = json.loads(policy_path.read_text())
     if policy["features"] != meta["feature_names"]:
         raise ValueError("Policy features mismatch")
     if hashlib.sha256(workbook.read_bytes()).hexdigest() != meta["workbook_sha256"]:
@@ -230,113 +357,94 @@ def pilot(root, workbook, alpha, h, gamma, seconds, threads, limit):
     weights = np.asarray(policy["weights"], float)
     if not np.isfinite(weights).all():
         raise ValueError("Non-finite policy coefficients")
-    allowed = {}
+    reviewed_by_case = {}
     for part in ("train", "validation"):
         data = frames[part]
         _, post = display_and_duration(data["X"].astype(float) @ weights,
                                         data["booked"], alpha, h)
-        for case, duration in zip(data["case_id"], post):
-            allowed[int(case)] = float(duration)
+        reviewed_by_case.update((int(case), float(duration))
+                                for case, duration in zip(data["case_id"], post))
     raw, cohort = read_cohort(workbook)
     weeks = build_weeks(cohort, performed_events(raw), split="train", prior_dates=1)
     period_by_key = {
         (part, group, monday)
-        for part, field in (("train", "training_keys"), ("validation", "validation_keys"))
+        for part, field in (("train", "training_keys"),
+                            ("validation", "validation_keys"))
         for group, monday in meta[field]
     }
     selected = [(w, part) for w in weeks
                 for part in ("train", "validation")
-                if (part, w.group, w.monday) in period_by_key]
+                if (part, w.group, w.monday) in period_by_key
+                and (period == "all" or part == period)]
     selected = choose_pilot_weeks(selected, limit)
     settings = {
         "workbook_sha256": meta["workbook_sha256"],
-        "policy_sha256": hashlib.sha256((root / "lasso_policy.json").read_bytes()).hexdigest(),
+        "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
         "alpha": alpha, "h": h, "gamma": gamma, "prior_dates": 1,
     }
     identity_path = root / "pilot_settings.json"
     if identity_path.exists():
         if json.loads(identity_path.read_text()) != settings:
-            raise ValueError("Pilot inputs or response settings differ; use a fresh output directory")
+            raise ValueError("Pilot settings or fitted policy changed")
     else:
         identity_path.write_text(json.dumps(settings, indent=2) + "\n")
-    # Reuse only fully certified, oracle-matched policy PAIRS for each week.
-    # Changing --seconds or --threads can change an un-tied hindsight
-    # assignment, so a partially completed week must recompute both methods.
     rows = {}
     output_csv = root / "pilot.csv"
     if output_csv.exists():
-        for record in pd.read_csv(output_csv).to_dict("records"):
+        previous = pd.read_csv(output_csv)
+        for record in previous.to_dict("records"):
             if record.get("complete") == True:
                 key = (str(record["period"]), str(record["group"]),
                        str(record["monday"]), str(record["method"]))
                 if key in rows:
                     raise ValueError("Duplicate certified pilot cell")
                 rows[key] = record
+    tasks = []
     for week, part in selected:
         if paired_week_is_certified(rows, part, week.group, week.monday):
             continue
-        # Never mix a retained method row with a newly solved hindsight
-        # schedule. Incomplete, legacy, or mismatched pairs are both redone.
         for method in ("BOOKED", "LASSO"):
             rows.pop((part, week.group, week.monday, method), None)
-        parts = week.components()
-        oracle = [solve_week(c, c.actual, seconds=seconds, threads=threads, tie=False)
-                  for c in parts]
-        oracle_ready = all(o.complete for o in oracle)
-        oracle_hash = oracle_assignment_sha256(parts, oracle) if oracle_ready else None
-        for method in ("BOOKED", "LASSO"):
-            aggregate = {key: 0. for key in
-                         ("cases", "case_error", "vf", "gap", "spo",
-                          "regret", "realized_cost", "oracle_cost")}
-            completed = oracle_ready
-            for component, hindsight in zip(parts, oracle):
-                if not completed:
-                    break
-                if method == "BOOKED":
-                    reviewed = component.booked
-                else:
-                    reviewed = np.array([allowed[int(i)] for i in component.case_ids])
-                plan = solve_week(component, reviewed, seconds=seconds, threads=threads)
-                adversary = solve_adversary(component, reviewed, gamma=gamma,
-                                            seconds=seconds, threads=threads)
-                if not plan.complete or not adversary.complete:
-                    completed = False
-                    break
-                realized = evaluate(component, plan.assignment, component.actual)["cost"]
-                pred_oracle = evaluate(component, hindsight.assignment, reviewed)["cost"]
-                error = component.actual - reviewed
-                theta = float((1.75 * np.maximum(error, 0.) +
-                               np.maximum(-error, 0.)).sum())
-                regret = realized - hindsight.value
-                vf = plan.value + theta - hindsight.value
-                gap = gamma * plan.value + adversary.value - hindsight.value
-                spo = gamma * pred_oracle + adversary.value - hindsight.value
-                verify_bounds(regret, vf, gap, spo)
-                for key, val in (("cases", component.n), ("case_error", np.abs(error).sum()),
-                                 ("vf", vf), ("gap", gap), ("spo", spo),
-                                 ("regret", regret), ("realized_cost", realized),
-                                 ("oracle_cost", hindsight.value)):
-                    aggregate[key] += float(val)
-            key = (part, week.group, week.monday, method)
-            rows[key] = {"group": week.group, "monday": week.monday,
-                         "period": part, "method": method,
-                         "complete": completed,
-                         "oracle_assignment_sha256": oracle_hash,
-                         **(aggregate if completed else
-                            {k: np.nan for k in aggregate})}
-        temporary = output_csv.with_suffix(".tmp")
-        pd.DataFrame([rows[k] for k in sorted(rows)]).to_csv(temporary, index=False)
-        temporary.replace(output_csv)
-        print(f"{part} {week.group} {week.monday}: scored paired policies", flush=True)
-    if not all(row["complete"] for row in rows.values()):
-        raise RuntimeError("Some weekly jobs were uncertified; retry the SAME directory with a larger budget")
+        case_reviews = {int(i): reviewed_by_case[int(i)] for i in week.case_ids}
+        tasks.append((week, part, case_reviews, alpha, h, gamma, seconds, threads))
+
+    def save(scored):
+        for row in scored:
+            key = (str(row["period"]), str(row["group"]),
+                   str(row["monday"]), str(row["method"]))
+            rows[key] = row
+        temp = output_csv.with_suffix(".tmp")
+        pd.DataFrame([rows[k] for k in sorted(rows)]).to_csv(temp, index=False)
+        temp.replace(output_csv)
+
+    print(f"{len(tasks)} unscored group-weeks; {workers} workers x "
+          f"{threads} Gurobi threads = at most {workers * threads} CPU cores", flush=True)
+    if workers == 1:
+        for task in tasks:
+            scored = score_pilot_week(task)
+            save(scored)
+            print(f"{scored[0]['period']} {scored[0]['group']} "
+                  f"{scored[0]['monday']}: scored pair", flush=True)
+    elif tasks:
+        with ProcessPoolExecutor(max_workers=min(workers, len(tasks)),
+                                 mp_context=mp.get_context("spawn")) as pool:
+            futures = {pool.submit(score_pilot_week, task): task[:2] for task in tasks}
+            for future in as_completed(futures):
+                scored = future.result()
+                save(scored)
+                print(f"{scored[0]['period']} {scored[0]['group']} "
+                      f"{scored[0]['monday']}: scored pair", flush=True)
+    if any(not rows[(part, w.group, w.monday, method)]["complete"]
+           for w, part in selected for method in ("BOOKED", "LASSO")):
+        raise RuntimeError("Some group-weeks are unfinished; rerun with more time")
     print("Exact scores saved to", output_csv)
+
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workbook", type=Path)
-    parser.add_argument("--stage", choices=("features", "fit", "pilot"), required=True)
+    parser.add_argument("--stage", choices=("features", "fit", "pilot", "adopt"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--start-week-index", type=int, default=0)
     parser.add_argument("--train-weeks", type=int, default=60)
@@ -347,11 +455,14 @@ def main():
     parser.add_argument("--gamma", type=float, default=2.)
     parser.add_argument("--seconds", type=float, default=120.)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=15)
+    parser.add_argument("--pilot-period", choices=("validation", "all"), default="validation")
     parser.add_argument("--limit-weeks", type=int, default=3)
     args = parser.parse_args()
     if (args.start_week_index < 0 or args.train_weeks < 1 or args.validation_weeks < 1
             or args.seconds <= 0 or not 1 <= args.threads <= 15 or args.gamma < 1
-            or not 0 < args.alpha <= 1 or args.h <= 0 or args.limit_weeks < 0):
+            or not 0 < args.alpha <= 1 or args.h <= 0 or args.limit_weeks < 0
+            or args.workers < 1 or args.workers * args.threads > 15):
         parser.error("Invalid parameter")
     if args.stage == "features":
         if args.output.exists() and any(args.output.iterdir()):
@@ -359,6 +470,8 @@ def main():
         args.output.mkdir(parents=True, exist_ok=True)
         save_features(args.output, args.workbook, args.start_week_index,
                       args.train_weeks, args.validation_weeks)
+    elif args.stage == "adopt":
+        adopt_legacy_artifacts(args.output, args.workbook)
     elif args.stage == "fit":
         if (args.output / "lasso_policy.json").exists() or (args.output / "pilot_settings.json").exists():
             parser.error("Fitted policy/pilot already exists; refuse to overwrite it")
@@ -368,7 +481,8 @@ def main():
         fit_lasso(args.output, penalties)
     else:
         pilot(args.output, args.workbook, args.alpha, args.h, args.gamma,
-              args.seconds, args.threads, args.limit_weeks)
+              args.seconds, args.threads, args.limit_weeks,
+              workers=args.workers, period=args.pilot_period)
 
 
 if __name__ == "__main__":

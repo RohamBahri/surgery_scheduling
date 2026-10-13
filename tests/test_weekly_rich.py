@@ -1,5 +1,7 @@
 """Regression guards for the supported-week rich feature pilot."""
 import sys
+import json
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,7 +10,8 @@ import pytest
 
 from run_weekly_rich import (choose_pilot_weeks, source_fingerprint,
                              verify_bounds, main, oracle_assignment_sha256,
-                             paired_week_is_certified)
+                             paired_week_is_certified, score_pilot_week,
+                             adopt_legacy_artifacts, LEGACY_FEATURE_SOURCE_SHA256)
 from surgery.data import GROUPS
 from surgery.rich_features import RichCorrectionEncoder
 from surgery.weekly_data import Week
@@ -137,3 +140,52 @@ def test_resumed_week_requires_one_shared_hindsight_assignment():
     with pytest.raises(ValueError, match="Only certified"):
         oracle_assignment_sha256([week], [SimpleNamespace(
             complete=False, assignment=[0, 0, 1])])
+
+
+def test_week_scoring_shares_hindsight_oracle_for_both_methods():
+    w = example()
+    response = {int(k): float(v) for k, v in zip(w.case_ids, w.booked)}
+    rows = score_pilot_week((w, "validation", response, .8, 30., 2., 30., 1))
+    assert len(rows) == 2 and all(row["complete"] for row in rows)
+    assert {row["method"] for row in rows} == {"BOOKED", "LASSO"}
+    assert rows[0]["oracle_assignment_sha256"] == rows[1]["oracle_assignment_sha256"]
+    for name in ("regret", "case_error", "vf", "gap", "spo", "oracle_cost"):
+        assert rows[0][name] == pytest.approx(rows[1][name])
+
+
+def test_legacy_adoption_preserves_matrices_and_archives_unmatched_pilot(tmp_path):
+    # Synthetic feature arrays; real migration also checks workbook and all
+    # policy/matrix hashes before changing any provenance.
+    raw = tmp_path / "workbook.xlsx"
+    raw.write_bytes(b"synthetic test workbook content")
+    names = ["intercept"] + [f"feature_{k}" for k in range(73)]
+    hashes = {}
+    for part, n in (("train", 18705), ("validation", 5779)):
+        path = tmp_path / f"{part}.npz"
+        np.savez_compressed(path, X=np.zeros((n, 74), dtype=np.float32))
+        hashes[part] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "code_sha256": LEGACY_FEATURE_SOURCE_SHA256,
+        "workbook_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        "matrix_sha256": hashes, "train_cases": 18705,
+        "validation_cases": 5779, "feature_names": names,
+        "feature_metadata": {"unit_booking_anchor": True, "n_features": 74},
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    policy_path = tmp_path / "lasso_policy.json"
+    policy_path.write_text(json.dumps({"method": "LASSO_MSE", "features": names,
+                                       "weights": [0.] * 74}))
+    (tmp_path / "pilot_settings.json").write_text(json.dumps({
+        "workbook_sha256": manifest["workbook_sha256"],
+        "policy_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    }))
+    (tmp_path / "pilot.csv").write_text("method,spo\nBOOKED,1\n")
+    adopt_legacy_artifacts(tmp_path, raw)
+    newer = json.loads((tmp_path / "manifest.json").read_text())
+    assert newer["previous_code_sha256"] == LEGACY_FEATURE_SOURCE_SHA256
+    assert newer["code_sha256"] == source_fingerprint()
+    assert (tmp_path / "manifest_before_oracle_pair_fix.json").exists()
+    assert (tmp_path / "pilot_before_oracle_pair_fix.csv").exists()
+    assert not (tmp_path / "pilot.csv").exists()
+    with pytest.raises(ValueError, match="Only the verified"):
+        adopt_legacy_artifacts(tmp_path, raw)
