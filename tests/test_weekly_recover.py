@@ -69,7 +69,10 @@ def test_recover_grid_rejects_duplicate_or_missing_cells(tmp_path):
     grid.to_csv(path, index=False)
     with pytest.raises(ValueError, match="duplicate"):
         _read_previous(tmp_path, meta)
-    grid = grid.iloc[:-1]
+    # Restore the unmodified grid before testing the independent missing-row
+    # guard; the previous deliberate duplicate is a different error condition.
+    _, path = previous_grid(tmp_path)
+    grid = pd.read_csv(path).iloc[:-1]
     grid.to_csv(path, index=False)
     with pytest.raises(ValueError, match="Expected 225"):
         _read_previous(tmp_path, meta)
