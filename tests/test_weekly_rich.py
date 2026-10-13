@@ -94,7 +94,7 @@ def test_feature_code_includes_source_digest_and_no_calendar():
     assert X.shape[0] == n
     assert "booked" not in enc.names
     assert not any(name.startswith("calendar_") for name in enc.names)
-    assert any(name == "proportional_booked_x_" + level for level in
+    assert all("proportional_booked_x_" + level in enc.names for level in
                ("service", "procedure", "surgeon", "pair"))
     assert np.isfinite(X).all()
     test = f.iloc[:3].copy()
