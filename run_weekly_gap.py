@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
 import multiprocessing as mp
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,77 @@ from surgery.gap_learning import train_gap
 
 def file_sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+LEGACY_TRAINER_COMMIT="8b68f100f52f38455e5b4cd06ed79fc5fc50d9f3"
+
+
+def legacy_source_hash():
+    """Compute the *original* trainer fingerprint from an audited git commit."""
+    h=hashlib.sha256()
+    root=Path(__file__).resolve().parent
+    for name in ("run_weekly_gap.py","surgery/gap_learning.py"):
+        raw=subprocess.check_output(
+            ["git","show",f"{LEGACY_TRAINER_COMMIT}:{name}"],cwd=root)
+        h.update(name.encode())
+        h.update(raw)
+    return h.hexdigest()
+
+
+def adopt_old_gap(root, old, new):
+    """Explicit, lossless migration of the verified v1 trainer's checkpoints.
+
+    Reuse only already certified historical group-week records. Their
+    per-week prediction fingerprints are still checked on first access.
+    Only the trainer-source identity changes; policy/data/hyperparameters
+    must be bitwise identical. Back up originals before mutation.
+    """
+    root=Path(root)
+    a={k:v for k,v in old.items() if k!="trainer_source_sha256"}
+    b={k:v for k,v in new.items() if k!="trainer_source_sha256"}
+    if a!=b:
+        raise ValueError("Only trainer source may change; other experiment "
+                         "settings differ. Use a new output directory.")
+    if old.get("trainer_source_sha256")!=legacy_source_hash():
+        raise ValueError("Existing source fingerprint is not the audited "
+                         "original VF-GAP implementation; adoption refused.")
+    target=root/"gap_settings.json"
+    backup=root/"gap_settings_before_intervals.json"
+    if backup.exists():
+        raise ValueError("Migration backup already exists; inspect files")
+    if (root/"gap_evaluation_settings.json").exists():
+        raise ValueError("Cannot migrate after validation; create a separate run")
+    for path in sorted(root.glob("gap_*.json")):
+        if path.name.startswith(("gap_candidate_","gap_current_")):
+            obj=json.loads(path.read_text())
+            ident=obj.get("identity",{})
+            if (not isinstance(ident.get("weights_sha256"),str)
+                    or len(ident["weights_sha256"])!=64
+                    or ident.get("gamma")!=new["gamma"]
+                    or not isinstance(obj.get("weeks"),dict)):
+                raise ValueError(f"Malformed prior checkpoint: {path}")
+            for key,row in obj["weeks"].items():
+                if (row.get("key")!=key or
+                        not isinstance(row.get("input_sha256"),str)
+                        or len(row["input_sha256"])!=64):
+                    raise ValueError(f"Malformed group-week record in {path}")
+    progress=root/"gap_progress.json"
+    prior_progress=None
+    if progress.exists():
+        prior_progress=json.loads(progress.read_text())
+        if prior_progress.get("settings")!=old:
+            raise ValueError("Existing GAP progress does not match old settings")
+    # Atomic writes; backups retained even if a later write fails.
+    backup.write_bytes(target.read_bytes())
+    if prior_progress is not None:
+        (root/"gap_progress_before_intervals.json").write_bytes(
+            progress.read_bytes())
+        prior_progress["settings"]=new
+        save_json(progress,prior_progress)
+    save_json(target,new)
+    print("Adopted audited v1 VF-GAP checkpoint metadata. Previously certified "
+          "group-weeks will be reused; unfinished components will be checked "
+          "using primal-dual intervals.",flush=True)
 
 
 def initialize(args):
@@ -64,7 +136,8 @@ def initialize(args):
     init=models[args.initial]["weights" if args.initial=="LASSO" else "w"]
     source_root=Path(__file__).resolve().parent
     trainer_sha=hashlib.sha256()
-    for name in ("run_weekly_gap.py","surgery/gap_learning.py"):
+    for name in ("run_weekly_gap.py","surgery/gap_learning.py",
+                 "surgery/gap_intervals.py"):
         trainer_sha.update(name.encode())
         trainer_sha.update((source_root/name).read_bytes())
     identity={
@@ -92,8 +165,16 @@ def initialize(args):
     args.output.mkdir(parents=True,exist_ok=True)
     destination=args.output/"gap_settings.json"
     if destination.exists():
-        if json.loads(destination.read_text())!=identity:
-            raise ValueError("VF-GAP run output has different settings or trainer source")
+        previous=json.loads(destination.read_text())
+        if previous!=identity:
+            if args.stage=="adopt":
+                adopt_old_gap(args.output,previous,identity)
+            else:
+                raise ValueError("Existing VF-GAP artifacts were made with an older "
+                                 "trainer. Run the explicit --stage adopt command "
+                                 "first to verify and preserve the checkpoints.")
+    elif args.stage=="adopt":
+        raise ValueError("No existing VF-GAP checkpoints to adopt")
     else:
         save_json(destination,identity)
     return meta,frames,models,identity,np.asarray(init,float)
@@ -111,7 +192,13 @@ def fit(args):
                      float(ident["lambda_l1"]),initial,ident,
                      args.alpha,args.h,args.gamma,args.max_outer,
                      args.iterations,args.trust,args.temperature,
-                     args.seconds,args.threads,args.workers)
+                     args.seconds,args.threads,args.workers,
+                     refine_seconds=args.refine_seconds,
+                     refinement_budget=args.refinement_budget)
+    if not result.get("complete"):
+        print("VF-GAP paused with rigorous overlapping intervals:",
+              result.get("paused"),flush=True)
+        return
     print("VF-GAP training completed:",result["stopping"],flush=True)
     print("Certified training improvement records:",
           [(r["certified_before"]["regularized_gap_without_hindsight_per_case"],
@@ -313,7 +400,7 @@ def main():
     p.add_argument("workbook",type=Path)
     p.add_argument("--artifacts",type=Path,required=True)
     p.add_argument("--output",type=Path,required=True)
-    p.add_argument("--stage",choices=("train","evaluate"),required=True)
+    p.add_argument("--stage",choices=("adopt","train","evaluate"),required=True)
     p.add_argument("--initial",choices=("CASE","VF","LASSO"),default="CASE")
     p.add_argument("--alpha",type=float,default=.8)
     p.add_argument("--h",type=float,default=30.)
@@ -325,14 +412,19 @@ def main():
     p.add_argument("--workers",type=int,default=15)
     p.add_argument("--threads",type=int,default=1)
     p.add_argument("--seconds",type=float,default=300.)
+    p.add_argument("--refine-seconds",type=float,default=1200.)
+    p.add_argument("--refinement-budget",type=int,default=1)
     args=p.parse_args()
     if (args.workers<1 or args.threads<1 or args.workers*args.threads>15 or
         args.max_outer<1 or args.iterations<1 or args.seconds<=0 or
+        args.refine_seconds<args.seconds or args.refinement_budget<0 or
         not 0<args.alpha<=1 or args.h<=0):
         p.error("Require positive budgets, alpha in (0,1], and workers*threads <= 15")
     if not args.artifacts.is_dir():
         p.error("Rich-feature artifacts directory does not exist")
-    if args.stage=="train":
+    if args.stage=="adopt":
+        initialize(args)
+    elif args.stage=="train":
         fit(args)
     else:
         evaluate(args)
