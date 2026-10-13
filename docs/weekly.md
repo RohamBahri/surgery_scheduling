@@ -177,3 +177,34 @@ in a **fresh** output directory. Choose those settings without consulting
 2013 test results. This pilot is *diagnostic*: success would justify
 implementing a richer case-feature policy optimizer, not establish
 publishable out-of-sample gains.
+
+## Recover a partially completed learning pilot
+
+If the original learning grid contains timed-out candidates, do **not** rerun
+all previously certified evaluations. The separate recovery command preserves
+the original numerical experiment and its source-code fingerprint, validates
+the full 225-cell design, and reruns only the missing cells. Use one difficult
+Gurobi job at a time with 15 threads; the job is not multiplied across workers.
+
+```bash
+git pull --ff-only origin weekly-supported-days
+caffeinate -i python3.14 run_weekly_learning_recover.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --previous artifacts/weekly_learning_pilot \
+  --seconds 600 --threads 15 \
+  --output artifacts/weekly_learning_recovered
+```
+
+Inputs in `--previous`: `manifest.json` and `grid_results.csv` from the
+same original run. The original training and mathematical source hashes,
+workbook fingerprint, week split, policy grid, and complete rows are verified.
+The output directory must be new/empty. Recovered results are written to
+`grid_results.csv`, `retries.csv`, `policies.csv`, and `validation.csv`.
+If a retry also times out, its incomplete result is retained and must not be
+treated as a learned-policy comparison; retry the incomplete merged directory
+with a larger budget.
+
+The balanced-load tie is **not** part of the learning pilot. It remains a
+sensitivity candidate, because it improved aggregate retrospective realized
+cost in the overload-selected training components but increased it in some
+individual components.
