@@ -529,3 +529,73 @@ def test_extended_checkpoint_matches_one_time_resume_allowlist():
     import run_weekly_anchored as runner
     assert runner.ORACLE_NUMERIC_FIX_PREDECESSOR_SHA==(
         'db51063aaaa62a4e7c17e4a76dd04706768a4848dcaf71d8a37a21e9a307c552')
+
+
+def test_oracle_fix_resume_migrates_only_matching_interrupted_experiment(
+        tmp_path,monkeypatch):
+    """Exercise initialize() with a real interrupted progress/settings checkpoint.
+
+    No workbook decoding or surgical MILPs are needed to test the exact
+    allowlisted source migration; the data/model validators are left active.
+    """
+    import json
+    from types import SimpleNamespace
+    import run_weekly_anchored as runner
+    artifacts=tmp_path/'baselines'
+    artifacts.mkdir()
+    workbook=tmp_path/'data.xlsx'
+    workbook.write_bytes(b'fixed fake workbook')
+    meta={'feature_names':['intercept']+[f'feature_{i}' for i in range(73)],
+          'matrix_sha256':{'train':'frozen-train','validation':'frozen-validation'}}
+    origin={'workbook_sha256':runner.sha(workbook),
+            'matrix_sha256':meta['matrix_sha256'],
+            'feature_code_sha256':'fixed-features','alpha':.8,'h':30.}
+    (artifacts/'learning_settings.json').write_text(json.dumps(origin))
+    for filename,model in (
+            ('model_case.json',{'settings':origin,'w':[0.]*74}),
+            ('vf_progress.json',{'settings':origin,'w':[0.]*74,'complete':True}),
+            ('lasso_policy.json',{'features':meta['feature_names'],
+                                  'weights':[0.]*74})):
+        (artifacts/filename).write_text(json.dumps(model))
+    train={'case_id':np.arange(18705,dtype=int),
+           'X':np.ones((18705,74),dtype=float),
+           'booked':np.full(18705,100.,dtype=float),
+           'actual':np.full(18705,105.,dtype=float)}
+    frames={'train':train,'validation':{'case_id':np.arange(5779,dtype=int)}}
+    weeks=[SimpleNamespace(group='TGH',case_ids=np.array([i]),n=1)
+           for i in range(60)]
+    monkeypatch.setattr(runner,'load_matrices',lambda root:(meta,frames))
+    monkeypatch.setattr(runner,'load_weeks',lambda *args:weeks)
+    monkeypatch.setattr(runner,'source_fingerprint',lambda :'fixed-features')
+    identity={'trainer_source_sha256':'new-reviewed-implementation',
+              'feature_source_sha256':'fixed-features',
+              'matrix_sha256':meta['matrix_sha256'],
+              'site':'TGH','gamma':2.,'max_outer':15}
+    monkeypatch.setattr(runner,'settings',lambda *args:dict(identity))
+    output=tmp_path/'interrupted'
+    output.mkdir()
+    previous=dict(identity,trainer_source_sha256=
+                  runner.ORACLE_NUMERIC_FIX_PREDECESSOR_SHA)
+    (output/'anchored_settings.json').write_text(json.dumps(previous))
+    (output/'anchored_progress.json').write_text(json.dumps(
+        {'complete':False,'outer':4,'accepted':[{'outer':i} for i in range(4)]}))
+    args=SimpleNamespace(output=output,artifacts=artifacts,workbook=workbook,
+                         gap_model=None,site='TGH',alpha=.8,h=30.,
+                         resume_oracle_fix=False)
+    with pytest.raises(ValueError,match='Use a new output directory'):
+        runner.initialize(args)
+    assert json.loads((output/'anchored_settings.json').read_text())==previous
+    args.resume_oracle_fix=True
+    result=runner.initialize(args)
+    assert len(result[2])==60 and len(result[4]['case_id'])==60
+    assert json.loads((output/'anchored_settings.json').read_text())==identity
+    provenance=json.loads((output/'anchored_source_migration.json').read_text())
+    assert provenance['previous_code_sha256']==runner.ORACLE_NUMERIC_FIX_PREDECESSOR_SHA
+    assert provenance['previous_outer']==4
+    assert provenance['accepted_steps_before_migration']==4
+    args.resume_oracle_fix=False
+    runner.initialize(args) # Normal restart succeeds after migration.
+    # Any changed model settings must remain a hard reproducibility error.
+    identity['gamma']=3.
+    with pytest.raises(ValueError,match='Use a new output directory'):
+        runner.initialize(args)
