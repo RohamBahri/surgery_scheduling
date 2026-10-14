@@ -493,7 +493,7 @@ def test_certify_anchors_at_final_deployed_policy_on_realized_ties(
                           'regret':1.,'tie_safe_upper':5.} for b in blocks}
     monkeypatch.setattr(runner,'_certificate_week',certificate)
     args=SimpleNamespace(output=tmp_path,report_gap=False,
-         workers=1,seconds=10.,threads=1,alpha=.8,h=30.)
+         workers=1,seconds=10.,threads=1,alpha=.8,h=30.,gamma=2.)
     runner.certify(args)
     assert hits==['certification_incumbent']
     assert anchors and all(src=='CURRENT_POLICY' for src,_ in anchors)
