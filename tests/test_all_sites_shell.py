@@ -200,3 +200,31 @@ def test_diagnose_incomplete_references_uses_readonly_mode(repo):
     assert "--stage" not in args
     assert "--initial-policy" not in args
     assert "--resume-oracle-fix" not in args
+
+
+
+def test_finalize_references_is_explicit_120s_feasible_fallback(repo):
+    base,env=repo
+    out=base/"artifacts/anchored_ALL_extended"
+    out.mkdir(parents=True)
+    (out/"anchored_references.json").write_text('{"VF":{"complete":false}}')
+    res=run(base,env,"finalize-references")
+    assert res.returncode==0,res.stderr
+    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[0]=="rescue_anchored_references.py"
+    assert "--allow-feasible" in args
+    assert "--diagnose-only" not in args
+    assert "--stage" not in args
+    assert args[args.index("--seconds")+1]=="120"
+    assert args[args.index("--threads")+1]=="4"
+    env["RESCUE_SECONDS"]="45"
+    res=run(base,env,"finalize-references")
+    assert res.returncode==0,res.stderr
+    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[args.index("--seconds")+1]=="45"
+
+
+def test_finalize_references_requires_checkpoint(repo):
+    base,env=repo
+    res=run(base,env,"finalize-references")
+    assert res.returncode==2 and "references" in res.stderr
