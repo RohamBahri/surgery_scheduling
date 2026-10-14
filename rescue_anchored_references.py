@@ -64,153 +64,7 @@ def cached_reference_for_component(c, local, candidates, saved, seconds, threads
             # Only a solver TIME_LIMIT is eligible for the explicit
             # feasible-reference fallback. Other failure modes could indicate
             # a broken model or an invalid result, and must still stop.
-            timed_out=bool(re.search(r'(?:^|_)9
-    return {'complete':True,'cases':c.n,
-            'oracle_cost':float(hindsight['realized_cost']),
-            'references':[reference_cache[name] for name in candidates]},None
-
-
-def rescue(args):
-    output=Path(args.output)
-    settings_path=output/'anchored_settings.json'
-    refs_path=output/'anchored_references.json'
-    if not settings_path.exists() or not refs_path.exists():
-        raise ValueError('Run the normal references stage first; no checkpoint found')
-    original=json.loads(settings_path.read_text())
-    base=json.loads((args.artifacts/'learning_settings.json').read_text())
-    if 'SEED' in original.get('baseline_models_sha256',{}):
-        raise ValueError('A warm-start SEED baseline requires a matching --initial-policy')
-    identity=SimpleNamespace(
-        workbook=args.workbook,artifacts=args.artifacts,gap_model=args.gap_model,
-        initial_policy=None,output=output,site=original['site'],
-        alpha=float(base['alpha']),h=float(base['h']),
-        gamma=float(original['gamma']),lambda_l1=float(original['lambda_l1']),
-        prox=float(original['prox']),coef_prox=float(original['coef_prox']),
-        iterations=int(original['pDCA_iterations']),
-        closure_rounds=int(original['closure_rounds']),
-        max_outer=int(original['max_outer']),
-        exact_sep_batch=int(original['exact_sep_batch']),
-        resume_oracle_fix=False)
-    _,_,weeks,index,data,policies,ident=initialize(identity)
-    if ident!=original:
-        raise ValueError('Dataset or scientific code differs from reference checkpoint')
-    references=json.loads(refs_path.read_text())
-    all_components={key(c):c for week in weeks for c in week.components()}
-    pending=[name for name in sorted(all_components)
-             if not references.get(name,{}).get('complete')]
-    if args.component is not None:
-        if args.component not in all_components:
-            raise ValueError('Unknown component: '+args.component)
-        pending=[k for k in pending if k==args.component]
-    if not pending:
-        print('No unfinished reference components remain.',flush=True)
-        return True
-    X=data['X'].astype(float)
-    booked=data['booked'];actual=data['actual']
-    lower,upper=reachable(booked,identity.alpha,identity.h)
-    predictions={'BOOKED':booked.copy(),
-                 'BOX_CLIP':np.clip(actual,lower,upper),
-                 'BOX_PAD':upper}
-    for name,w in policies.items():
-        _,pred=display_and_duration(X@np.asarray(w,float),booked,
-                                    identity.alpha,identity.h)
-        predictions[name]=pred
-    cache_path=output/'anchored_reference_rescue_cache.json'
-    settings_digest=hashlib.sha256(settings_path.read_bytes()).hexdigest()
-    cache=(json.loads(cache_path.read_text()) if cache_path.exists()
-           else {'settings_sha256':settings_digest,'components':{}})
-    if cache.get('settings_sha256')!=settings_digest:
-        raise ValueError('Reference rescue cache belongs to another experiment')
-    results=cache['components']
-    failed=[]
-    print(f'Pending: {len(pending)} reference components, '
-          f'{args.seconds:.0f}s per solve, {args.threads} solver threads.',flush=True)
-    for name in pending:
-        c=all_components[name]
-        rows=np.asarray([index[int(i)] for i in c.case_ids],dtype=int)
-        methods={label:pred[rows] for label,pred in predictions.items()}
-        prior=references.get(name,{})
-        print(f'Component {name}: cases={c.n} rooms={c.k} '
-              f'surgeons={len(c.surgeon_ids)}; '
-              f'previous failure={prior.get("failure","unknown")}',flush=True)
-        if getattr(args,'diagnose_only',False):
-            mandated=sum(any(
-                c.slots[j][0] in required
-                and j in c.allowed[t]
-                and sum(c.slots[x][0]==c.slots[j][0] for x in c.allowed[t])==1
-                for t,required in enumerate(c.required_days))
-                for j in range(c.k))
-            print(f'  mandatory physical room-days: {mandated}/{c.k}',flush=True)
-            for label,d in methods.items():
-                historical=float(evaluate(c,c.original,d)['cost'])
-                analytic=conservation_certificate(c,d)
-                suffix=(f" analytic global optimum={analytic['cost']:.4f}"
-                        if analytic is not None else ' conservation certificate not sufficient')
-                print(f'  {label}: original planned cost={historical:.4f};{suffix}',flush=True)
-            continue
-        saved=results.setdefault(name,{})
-        def persist():
-            save_json(cache_path,cache)
-        record,failure=cached_reference_for_component(
-            c,rows,methods,saved,args.seconds,args.threads,on_update=persist,
-            allow_feasible=getattr(args,'allow_feasible',False))
-        if failure:
-            print(f'UNRESOLVED {name}: {failure}',flush=True)
-            failed.append((name,failure))
-        else:
-            references[name]=record
-            save_json(refs_path,references)
-            unverified=[x['source'] for x in record['references']
-                        if x.get('reference_optimality_certified') is False]
-            label=('HINDSIGHT CERTIFIED, OPTIONAL ASPIRATIONS UNCERTIFIED'
-                   if unverified else 'ALL REFERENCES CERTIFIED')
-            print(f'{label} {name}: {len(record["references"])} reference methods; '
-                  f'uncertified={unverified}',flush=True)
-    if getattr(args,'diagnose_only',False):
-        print('Read-only diagnostics complete; no solver calls or checkpoint writes.',flush=True)
-        return True
-    remaining=[k for k in all_components if not references.get(k,{}).get('complete')]
-    if remaining:
-        print(f'REMAINING {len(remaining)} components: '
-              +', '.join(f'{k} ({references.get(k,{}).get("failure","pending")})'
-                          for k in remaining[:5]),flush=True)
-        return False
-    unresolved_refs=[(k,ref['source'],ref.get('fallback_kind'))
-                     for k,record in references.items()
-                     if record.get('complete') for ref in record.get('references',[])
-                     if ref.get('reference_optimality_certified') is False]
-    print(f'All {len(all_components)} components have certified hindsight; '
-          f'{len(unresolved_refs)} optional feasible reference aspirations '
-          f'are explicitly UNCERTIFIED: {unresolved_refs[:10]}',flush=True)
-    print('Normal train stage may proceed; baseline deployment and test '
-          'evaluation remain separately subject to exact verification.',flush=True)
-    return True
-
-
-def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('workbook',type=Path)
-    p.add_argument('--artifacts',required=True,type=Path)
-    p.add_argument('--gap-model',required=True,type=Path)
-    p.add_argument('--output',required=True,type=Path)
-    p.add_argument('--component',help='Optional single component key; defaults to all incomplete')
-    p.add_argument('--allow-feasible',action='store_true',
-                   help='On optional reference TIME_LIMIT, use feasible incumbent (or original schedule) as an UNCERTIFIED aspiration; hindsight still must be proven optimal')
-    p.add_argument('--diagnose-only',action='store_true',
-                   help='Read-only structural/cost diagnostic; do not call Gurobi or modify checkpoints')
-    p.add_argument('--seconds',default=1800.,type=float)
-    p.add_argument('--threads',default=4,type=int)
-    a=p.parse_args()
-    if a.seconds<=0 or not 1<=a.threads<=15:
-        p.error('Positive time limit and 1..15 threads required')
-    if not rescue(a):
-        raise SystemExit('Reference rescue incomplete; cached successful solves. '
-                         'Inspect status and retry with a larger --seconds budget.')
-
-
-if __name__=='__main__':
-    main()
-,status)
+            timed_out=bool(re.search(r'(?:^|_)9$',status)
                            or 'TIME_LIMIT' in status)
             if not allow_feasible or not timed_out:
                 saved['last_failure']=name+': '+status
@@ -347,14 +201,20 @@ def rescue(args):
         def persist():
             save_json(cache_path,cache)
         record,failure=cached_reference_for_component(
-            c,rows,methods,saved,args.seconds,args.threads,on_update=persist)
+            c,rows,methods,saved,args.seconds,args.threads,on_update=persist,
+            allow_feasible=getattr(args,'allow_feasible',False))
         if failure:
             print(f'UNRESOLVED {name}: {failure}',flush=True)
             failed.append((name,failure))
         else:
             references[name]=record
             save_json(refs_path,references)
-            print(f'CERTIFIED {name}: {len(record["references"])} reference methods',flush=True)
+            unverified=[x['source'] for x in record['references']
+                        if x.get('reference_optimality_certified') is False]
+            label=('HINDSIGHT CERTIFIED, OPTIONAL ASPIRATIONS UNCERTIFIED'
+                   if unverified else 'ALL REFERENCES CERTIFIED')
+            print(f'{label} {name}: {len(record["references"])} reference methods; '
+                  f'uncertified={unverified}',flush=True)
     if getattr(args,'diagnose_only',False):
         print('Read-only diagnostics complete; no solver calls or checkpoint writes.',flush=True)
         return True
@@ -364,8 +224,15 @@ def rescue(args):
               +', '.join(f'{k} ({references.get(k,{}).get("failure","pending")})'
                           for k in remaining[:5]),flush=True)
         return False
-    print(f'All {len(all_components)} components are now certified; '
-          'normal train stage may proceed.',flush=True)
+    unresolved_refs=[(k,ref['source'],ref.get('fallback_kind'))
+                     for k,record in references.items()
+                     if record.get('complete') for ref in record.get('references',[])
+                     if ref.get('reference_optimality_certified') is False]
+    print(f'All {len(all_components)} components have certified hindsight; '
+          f'{len(unresolved_refs)} optional feasible reference aspirations '
+          f'are explicitly UNCERTIFIED: {unresolved_refs[:10]}',flush=True)
+    print('Normal train stage may proceed; baseline deployment and test '
+          'evaluation remain separately subject to exact verification.',flush=True)
     return True
 
 
@@ -376,6 +243,8 @@ def main():
     p.add_argument('--gap-model',required=True,type=Path)
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--component',help='Optional single component key; defaults to all incomplete')
+    p.add_argument('--allow-feasible',action='store_true',
+                   help='On optional reference TIME_LIMIT, use feasible incumbent (or original schedule) as an UNCERTIFIED aspiration; hindsight still must be proven optimal')
     p.add_argument('--diagnose-only',action='store_true',
                    help='Read-only structural/cost diagnostic; do not call Gurobi or modify checkpoints')
     p.add_argument('--seconds',default=1800.,type=float)
