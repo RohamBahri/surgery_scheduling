@@ -4,12 +4,12 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: bash run_all_sites_anchored.sh {references|train|certify|evaluate} [--dry-run]\n' >&2
+  printf 'Usage: bash run_all_sites_anchored.sh {references|rescue-references|train|certify|evaluate} [--dry-run]\n' >&2
 }
 if [[ $# -lt 1 || $# -gt 2 ]]; then usage; exit 2; fi
 STAGE="$1"
 case "$STAGE" in
-  references|train|certify|evaluate) ;;
+  references|rescue-references|train|certify|evaluate) ;;
   *) usage; exit 2 ;;
 esac
 DRY_RUN=0
@@ -41,6 +41,10 @@ for required in run_weekly_anchored.py "$WORKBOOK" \
     exit 2
   fi
 done
+if [[ "$STAGE" == rescue-references && ! -f "$OUT/anchored_references.json" ]]; then
+  echo "Error: run references before rescuing incomplete components." >&2
+  exit 2
+fi
 if [[ "$STAGE" == train && ! -f "$OUT/anchored_references.json" ]]; then
   echo 'Error: run the references stage before training.' >&2
   exit 2
@@ -52,7 +56,19 @@ if [[ "$STAGE" == certify || "$STAGE" == evaluate ]]; then
   fi
 fi
 
-ARGS=(
+if [[ "$STAGE" == rescue-references ]]; then
+  if [[ ! -f rescue_anchored_references.py ]]; then
+    echo "Error: missing rescue_anchored_references.py" >&2
+    exit 2
+  fi
+  ENTRY=rescue_anchored_references.py
+  ARGS=(
+    "$WORKBOOK" --artifacts "$ARTIFACTS" --gap-model "$GAP_MODEL"
+    --output "$OUT" --seconds "${RESCUE_SECONDS:-1800}" --threads "${RESCUE_THREADS:-4}"
+  )
+else
+  ENTRY=run_weekly_anchored.py
+  ARGS=(
   "$WORKBOOK"
   --artifacts "$ARTIFACTS"
   --gap-model "$GAP_MODEL"
@@ -68,11 +84,12 @@ ARGS=(
   --seconds 300
   --sep-seconds 90
   --master-seconds 300
-)
+  )
+fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   printf 'DRY RUN (no Python imports, solver calls, or artifacts written):\n'
-  printf '%q ' "$PYTHON" run_weekly_anchored.py "${ARGS[@]}"
+  printf '%q ' "$PYTHON" "$ENTRY" "${ARGS[@]}"
   printf '\n'
   exit 0
 fi
@@ -90,7 +107,7 @@ if [[ "$STAGE" == evaluate ]]; then
   echo 'Evaluating 2012 development validation only; 2013 holdout is untouched.'
 fi
 if command -v caffeinate >/dev/null 2>&1; then
-  caffeinate -i "$PYTHON" run_weekly_anchored.py "${ARGS[@]}"
+  caffeinate -i "$PYTHON" "$ENTRY" "${ARGS[@]}"
 else
-  "$PYTHON" run_weekly_anchored.py "${ARGS[@]}"
+  "$PYTHON" "$ENTRY" "${ARGS[@]}"
 fi

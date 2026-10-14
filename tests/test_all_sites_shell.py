@@ -24,6 +24,7 @@ def repo(tmp_path):
     base = tmp_path / "repo with spaces"
     base.mkdir()
     shutil.copy2(SOURCE, base / SOURCE.name)
+    shutil.copy2(SOURCE.parent / "rescue_anchored_references.py", base / "rescue_anchored_references.py")
     (base / "run_weekly_anchored.py").write_text("# Stub runner\n")
     (base / "data").mkdir()
     (base / "data/UHNOperating_RoomScheduling2011-2013.xlsx").write_bytes(b"mock workbook")
@@ -141,3 +142,46 @@ def test_spaces_in_absolute_output_path_are_preserved(repo):
     assert result.returncode == 0, result.stderr
     args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
     assert args[args.index("--output") + 1] == str(dest)
+
+
+def test_rescue_only_targets_incomplete_components(repo):
+    base, env = repo
+    dest = base / "artifacts/anchored_ALL_extended"
+    dest.mkdir(parents=True)
+    (dest / "anchored_references.json").write_text('{"foo":{"complete":false}}')
+    result = run(base, env, "rescue-references")
+    assert result.returncode == 0, result.stderr
+    args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[:2] == ["rescue_anchored_references.py",
+                        "data/UHNOperating_RoomScheduling2011-2013.xlsx"]
+    assert args[args.index("--seconds") + 1] == "1800"
+    assert args[args.index("--threads") + 1] == "4"
+    assert "--stage" not in args
+    assert "--initial-policy" not in args
+    env["RESCUE_SECONDS"] = "3600"
+    env["RESCUE_THREADS"] = "2"
+    result = run(base, env, "rescue-references")
+    assert result.returncode == 0, result.stderr
+    args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[args.index("--seconds") + 1] == "3600"
+    assert args[args.index("--threads") + 1] == "2"
+
+
+def test_rescue_requires_existing_checkpoint(repo):
+    base, env = repo
+    result = run(base, env, "rescue-references")
+    assert result.returncode == 2
+    assert "run references" in result.stderr
+
+
+def test_rescue_dry_run_does_not_require_solver(repo):
+    base, env = repo
+    dest = base / "artifacts/anchored_ALL_extended"
+    dest.mkdir(parents=True)
+    (dest / "anchored_references.json").write_text('{}')
+    env["MOCK_IMPORT_EXIT"] = "1"
+    result = run(base, env, "rescue-references", dry=True)
+    assert result.returncode == 0, result.stderr
+    assert "rescue_anchored_references.py" in result.stdout
+    assert "--seconds 1800" in result.stdout
+    assert not Path(env["ARGS_CAPTURE"]).exists()
