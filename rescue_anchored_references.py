@@ -137,7 +137,7 @@ def rescue(args):
         print(f'Component {name}: cases={c.n} rooms={c.k} '
               f'surgeons={len(c.surgeon_ids)}; '
               f'previous failure={prior.get("failure","unknown")}',flush=True)
-        if args.diagnose_only:
+        if getattr(args,'diagnose_only',False):
             mandated=sum(any(
                 c.slots[j][0] in required
                 and j in c.allowed[t]
@@ -164,7 +164,7 @@ def rescue(args):
             references[name]=record
             save_json(refs_path,references)
             print(f'CERTIFIED {name}: {len(record["references"])} reference methods',flush=True)
-    if args.diagnose_only:
+    if getattr(args,'diagnose_only',False):
         print('Read-only diagnostics complete; no solver calls or checkpoint writes.',flush=True)
         return True
     remaining=[k for k in all_components if not references.get(k,{}).get('complete')]
