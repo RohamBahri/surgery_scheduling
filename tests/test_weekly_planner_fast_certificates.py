@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 
 from surgery.weekly_data import Week
-from surgery.weekly_planner import (
-    conservation_certificate, original_wins_tie,
-    _objective_tolerance, evaluate, solve_week,
+from surgery.weekly_planner import _objective_tolerance, evaluate, solve_week
+from surgery.weekly_reference_certificates import (
+    conservation_certificate, original_wins_tie, solve_certified_reference,
 )
 
 
@@ -88,17 +88,46 @@ def test_shortcuts_select_exact_full_planner_assignment():
     pytest.importorskip("gurobipy")
     c=forced_room_instance()
     d=np.array([100.,100.,50.])
-    r=solve_week(c,d,seconds=30.,threads=1,tie=True)
-    assert r.complete
-    assert r.status=="ANALYTIC_CONSERVATION"
-    assert r.assignment==list(map(int,c.original))
-    assert r.value==pytest.approx(brute_force(c,d)[0][0])
-    assert r.bound<=r.value
-    r0=solve_week(c,d,seconds=30.,threads=1,tie=False)
-    assert r0.complete and r0.status=="ANALYTIC_CONSERVATION"
-    # A non-structural instance continues to use the standard exact MIP.
+    r=solve_certified_reference(c,d,seconds=30.,threads=1)
+    assert r['complete']
+    assert r['status']=="ANALYTIC_CONSERVATION"
+    assert r['assignment']==list(map(int,c.original))
+    assert r['predicted_cost']==pytest.approx(brute_force(c,d)[0][0])
+    assert r['primary_bound']<=r['predicted_cost']
+    r0=solve_certified_reference(c,d,seconds=30.,threads=1,hindsight=True)
+    assert r0['complete'] and r0['status']=="ANALYTIC_CONSERVATION"
+    # A non-structural instance continues to use the unchanged exact planner.
     u=unrestricted_instance()
-    r1=solve_week(u,u.booked,seconds=30.,threads=1,tie=True)
-    assert r1.complete and r1.status!="ANALYTIC_CONSERVATION"
-    assert r1.value==pytest.approx(brute_force(u,u.booked)[0][0])
-    assert r1.assignment is not None
+    r1=solve_certified_reference(u,u.booked,seconds=30.,threads=1)
+    assert r1['complete'] and r1['status']!="ANALYTIC_CONSERVATION"
+    assert r1['predicted_cost']==pytest.approx(brute_force(u,u.booked)[0][0])
+    assert r1['assignment'] is not None
+
+
+def test_original_scientific_planner_is_byte_identical_to_frozen_version():
+    """The data/feature fingerprint must not be touched by reference rescue."""
+    from pathlib import Path
+    import hashlib
+    import run_weekly_rich as rich
+    import run_weekly_anchored as anchored
+    p=Path(__file__).resolve().parents[1]/"surgery/weekly_planner.py"
+    raw=p.read_bytes()
+    git_blob=hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\0"+raw).hexdigest()
+    assert git_blob=="3bf935ea74a6b5c6b6a332d9227f3022ad7dffb5"
+    assert "surgery/weekly_planner.py" in rich.SOURCE_FILES
+    assert "surgery/weekly_reference_certificates.py" not in rich.SOURCE_FILES
+    assert "surgery/weekly_reference_certificates.py" not in anchored.SOURCE_FILES
+
+
+def test_zero_move_rescue_equals_exact_planner_on_multiple_ties():
+    pytest.importorskip("gurobipy")
+    w=forced_room_instance()
+    rng=np.random.default_rng(504)
+    for _ in range(20):
+        d=rng.uniform(30.,650.,w.n)
+        actual=solve_week(w,d,seconds=30.,threads=1,tie=True)
+        assert actual.complete
+        accelerated=solve_certified_reference(w,d,seconds=30.,threads=1)
+        assert accelerated["complete"]
+        assert accelerated["assignment"]==actual.assignment
+        assert accelerated["predicted_cost"]==pytest.approx(actual.value,abs=1e-5)

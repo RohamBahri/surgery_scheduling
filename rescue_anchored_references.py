@@ -17,9 +17,10 @@ import numpy as np
 
 from run_weekly_anchored import initialize
 from surgery.anchored_core import key
-from surgery.anchored_oracles import deployed
+from surgery.weekly_reference_certificates import (solve_certified_reference as deployed,
+                                                  conservation_certificate)
 from surgery.planner import display_and_duration, reachable
-from surgery.weekly_planner import evaluate, conservation_certificate, CAPACITY, TURNOVER, OVERTIME
+from surgery.weekly_planner import evaluate
 from surgery.weekly_training import save_json
 
 
