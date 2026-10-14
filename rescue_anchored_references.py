@@ -19,7 +19,7 @@ from run_weekly_anchored import initialize
 from surgery.anchored_core import key
 from surgery.anchored_oracles import deployed
 from surgery.planner import display_and_duration, reachable
-from surgery.weekly_planner import evaluate
+from surgery.weekly_planner import evaluate, conservation_certificate, CAPACITY, TURNOVER, OVERTIME
 from surgery.weekly_training import save_json
 
 
@@ -137,6 +137,21 @@ def rescue(args):
         print(f'Component {name}: cases={c.n} rooms={c.k} '
               f'surgeons={len(c.surgeon_ids)}; '
               f'previous failure={prior.get("failure","unknown")}',flush=True)
+        if args.diagnose_only:
+            mandated=sum(any(
+                c.slots[j][0] in required
+                and j in c.allowed[t]
+                and sum(c.slots[x][0]==c.slots[j][0] for x in c.allowed[t])==1
+                for t,required in enumerate(c.required_days))
+                for j in range(c.k))
+            print(f'  mandatory physical room-days: {mandated}/{c.k}',flush=True)
+            for label,d in methods.items():
+                historical=float(evaluate(c,c.original,d)['cost'])
+                analytic=conservation_certificate(c,d)
+                suffix=(f" analytic global optimum={analytic['cost']:.4f}"
+                        if analytic is not None else ' conservation certificate not sufficient')
+                print(f'  {label}: original planned cost={historical:.4f};{suffix}',flush=True)
+            continue
         saved=results.setdefault(name,{})
         def persist():
             save_json(cache_path,cache)
@@ -149,6 +164,9 @@ def rescue(args):
             references[name]=record
             save_json(refs_path,references)
             print(f'CERTIFIED {name}: {len(record["references"])} reference methods',flush=True)
+    if args.diagnose_only:
+        print('Read-only diagnostics complete; no solver calls or checkpoint writes.',flush=True)
+        return True
     remaining=[k for k in all_components if not references.get(k,{}).get('complete')]
     if remaining:
         print(f'REMAINING {len(remaining)} components: '
@@ -167,6 +185,8 @@ def main():
     p.add_argument('--gap-model',required=True,type=Path)
     p.add_argument('--output',required=True,type=Path)
     p.add_argument('--component',help='Optional single component key; defaults to all incomplete')
+    p.add_argument('--diagnose-only',action='store_true',
+                   help='Read-only structural/cost diagnostic; do not call Gurobi or modify checkpoints')
     p.add_argument('--seconds',default=1800.,type=float)
     p.add_argument('--threads',default=4,type=int)
     a=p.parse_args()

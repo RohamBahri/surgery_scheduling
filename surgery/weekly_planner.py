@@ -179,6 +179,63 @@ def _feasible_duration(week, duration):
     return d
 
 
+def conservation_certificate(week, duration):
+    """Exact global optimum when all physical room-days are mandatory and
+    the historical assignment realizes the aggregate-workload lower bound.
+
+    If every slot is forced open by a required surgeon weekday with only one
+    eligible physical room on that weekday, the number of opened slots k and
+    total room load W = sum(d) + TURNOVER*(n-k) are constant across feasible
+    assignments. Convexity of f(t)=max(-t,0)+OVERTIME*max(t,0) gives
+        sum_j f(L_j-CAPACITY) >= f(W-k*CAPACITY).
+    If the historical feasible assignment achieves this bound, it is
+    primary-optimal. As the unique zero-move assignment, it also wins both
+    secondary tie-breaking stages, with no solver calls.
+
+    This is a sufficient certificate only. If it fails, continue with the
+    unchanged exact MIP; NEVER infer that the original assignment is optimal.
+    """
+    d = _feasible_duration(week, duration)
+    for j, (weekday, _) in enumerate(week.slots):
+        forced = any(
+            weekday in required
+            and sum(week.slots[slot][0] == weekday for slot in week.allowed[s]) == 1
+            and j in week.allowed[s]
+            for s, required in enumerate(week.required_days)
+        )
+        if not forced:
+            return None
+    total_load = float(np.sum(d)) + TURNOVER * (week.n - week.k)
+    diff = total_load - CAPACITY * week.k
+    bound = max(-diff, 0.) + OVERTIME * max(diff, 0.)
+    original_cost = float(evaluate(week,week.original,d)['cost'])
+    tolerance = max(1e-7,1e-9*max(abs(bound),abs(original_cost)))
+    if original_cost > bound + tolerance:
+        return None
+    if original_cost < bound - tolerance:
+        raise AssertionError('Aggregate room-load conservation lower bound violated')
+    return {'assignment':list(map(int,week.original)),'cost':original_cost,
+            'lower_bound':max(0.,bound-tolerance),
+            'certificate':'all_slots_forced_and_aggregate_load_bound',
+            'mandatory_room_days':week.k,
+            'total_room_load':total_load}
+
+
+def original_wins_tie(week, duration, primary_value):
+    """Return True only when zero moves is *provably* an eligible tie choice.
+
+    Used after a certified primary MIP optimum. The unique zero-move
+    assignment is the historical one; if it is within the actual objective
+    tolerance imposed by this planner, its secondary movement objective is 0
+    and the canonical tie stage is unnecessary. Use a tiny strict margin to
+    avoid declaring a boundary-feasible schedule eligible because of rounding.
+    """
+    original_value=float(evaluate(week,week.original,duration)['cost'])
+    tol=_objective_tolerance(primary_value)
+    guard=1e-8*max(1.,abs(primary_value))
+    return original_value <= primary_value+tol-guard
+
+
 def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=False):
     """Minimize predicted cost; optionally balance peak load; then minimize
     moved cases and choose the canonical case-wise assignment.
@@ -193,6 +250,13 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=Fal
     d = _feasible_duration(week, duration)
     week.validate()
     start = time.monotonic()
+    if not balance:
+        analytic=conservation_certificate(week,d)
+        if analytic is not None:
+            return Result(analytic['assignment'],analytic['cost'],
+                          analytic['lower_bound'],True,
+                          'ANALYTIC_CONSERVATION',time.monotonic()-start,
+                          True,True)
     if all(len(week.allowed[int(s)]) == 1 for s in week.surgeon):
         a = [int(j) for j in week.original]
         return Result(a, evaluate(week, a, d)["cost"], evaluate(week, a, d)["cost"],
@@ -217,6 +281,14 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=Fal
                           time.monotonic() - start, optimal, not tie and optimal,
                           primary_seconds=primary_elapsed)
 
+        if not balance and original_wins_tie(week,d,m.ObjVal):
+            # The certified primary optimum allows the historical assignment.
+            # With zero moves, no competitor can outrank it in later stages.
+            historical=list(map(int,week.original))
+            historical_cost=float(evaluate(week,historical,d)['cost'])
+            return Result(historical,historical_cost,bound,True,
+                          'OPTIMAL_ORIGINAL_ZERO_MOVE',time.monotonic()-start,
+                          True,True,primary_elapsed,0.)
         m.addConstr(primary <= float(m.ObjVal) + _objective_tolerance(m.ObjVal))
         if balance:
             import gurobipy as gp

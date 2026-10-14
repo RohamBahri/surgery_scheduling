@@ -4,12 +4,12 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: bash run_all_sites_anchored.sh {references|rescue-references|train|certify|evaluate} [--dry-run]\n' >&2
+  printf 'Usage: bash run_all_sites_anchored.sh {references|diagnose-references|rescue-references|train|certify|evaluate} [--dry-run]\n' >&2
 }
 if [[ $# -lt 1 || $# -gt 2 ]]; then usage; exit 2; fi
 STAGE="$1"
 case "$STAGE" in
-  references|rescue-references|train|certify|evaluate) ;;
+  references|diagnose-references|rescue-references|train|certify|evaluate) ;;
   *) usage; exit 2 ;;
 esac
 DRY_RUN=0
@@ -41,7 +41,7 @@ for required in run_weekly_anchored.py "$WORKBOOK" \
     exit 2
   fi
 done
-if [[ "$STAGE" == rescue-references && ! -f "$OUT/anchored_references.json" ]]; then
+if [[ ( "$STAGE" == diagnose-references || "$STAGE" == rescue-references ) && ! -f "$OUT/anchored_references.json" ]]; then
   echo "Error: run references before rescuing incomplete components." >&2
   exit 2
 fi
@@ -56,7 +56,7 @@ if [[ "$STAGE" == certify || "$STAGE" == evaluate ]]; then
   fi
 fi
 
-if [[ "$STAGE" == rescue-references ]]; then
+if [[ "$STAGE" == rescue-references || "$STAGE" == diagnose-references ]]; then
   if [[ ! -f rescue_anchored_references.py ]]; then
     echo "Error: missing rescue_anchored_references.py" >&2
     exit 2
@@ -66,6 +66,9 @@ if [[ "$STAGE" == rescue-references ]]; then
     "$WORKBOOK" --artifacts "$ARTIFACTS" --gap-model "$GAP_MODEL"
     --output "$OUT" --seconds "${RESCUE_SECONDS:-1800}" --threads "${RESCUE_THREADS:-4}"
   )
+  if [[ "$STAGE" == diagnose-references ]]; then
+    ARGS+=(--diagnose-only)
+  fi
 else
   ENTRY=run_weekly_anchored.py
   ARGS=(

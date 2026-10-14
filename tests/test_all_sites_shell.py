@@ -185,3 +185,18 @@ def test_rescue_dry_run_does_not_require_solver(repo):
     assert "rescue_anchored_references.py" in result.stdout
     assert "--seconds 1800" in result.stdout
     assert not Path(env["ARGS_CAPTURE"]).exists()
+
+
+def test_diagnose_incomplete_references_uses_readonly_mode(repo):
+    base,env=repo
+    out=base/"artifacts/anchored_ALL_extended"
+    out.mkdir(parents=True)
+    (out/"anchored_references.json").write_text('{"component":{"complete":false}}')
+    res=run(base,env,"diagnose-references")
+    assert res.returncode==0,res.stderr
+    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[0]=="rescue_anchored_references.py"
+    assert "--diagnose-only" in args
+    assert "--stage" not in args
+    assert "--initial-policy" not in args
+    assert "--resume-oracle-fix" not in args
