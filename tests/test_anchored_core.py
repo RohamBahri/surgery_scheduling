@@ -391,3 +391,112 @@ def test_anchored_schedule_specific_cuts_align_with_master_value():
     expected=anchored_score(c,anchor,cuts,d,oracle,2.,exact=True)/c.n
     assert value==pytest.approx(expected)
 
+
+
+def test_learn_accepts_exact_sep_batch_and_completes_outer_loop(tmp_path, monkeypatch):
+    """Regression: CLI supplied sep_batch used to raise TypeError immediately."""
+    from surgery import anchored_training as training
+    from surgery.anchored_core import key
+    c=component()
+    pieces=c.components()
+    X=np.zeros((c.n,74), dtype=float);X[:,0]=1.
+    indexed={int(cid):i for i,cid in enumerate(c.case_ids)}
+    refs={}
+    for part in pieces:
+        z=list(map(int,part.original))
+        book=part.booked.tolist()
+        cost=evaluate(part,z,part.actual)['cost']
+        refs[key(part)]={'complete':True,'oracle_cost':0.,
+            'references':[dict(source='BOOKED',type='shared-policy',
+                assignment=z,beta=book,realized_cost=cost,
+                predicted_cost=evaluate(part,z,part.booked)['cost'])]}
+    data={'X':X,'booked':c.booked.copy(),'actual':c.actual.copy(),
+          'case_id':c.case_ids.copy()}
+    recorded=[]
+    def verified(output,name,weeks,index,X,booked,w,alpha,h,*args,**kwargs):
+        _,d=display_and_duration(X@w,booked,alpha,h)
+        result={}
+        for part in pieces:
+            rows=[index[int(cid)] for cid in part.case_ids]
+            z=list(map(int,part.original))
+            result[key(part)]=dict(complete=True,assignment=z,
+                realized_cost=evaluate(part,z,part.actual)['cost'],
+                predicted_cost=evaluate(part,z,d[rows])['cost'],
+                realized_overtime_minutes=0.,room_days_over_720=0,
+                max_realized_room_load=480.,moved_cases=0)
+        return result
+    def proposed(blocks,X,booked,w,*args,**kwargs):
+        return {'w':np.asarray(w,float).tolist(),'inner':[],
+                'restricted_objective':0.}
+    def separated(*args,**kwargs):
+        recorded.append(kwargs['batch'])
+        return {'all_closed':True,'added':0,'closed':len(args[2]),
+                'unresolved':0,'tested':len(args[2]),'untested':0}
+    monkeypatch.setattr(training,'verify_policy',verified)
+    monkeypatch.setattr(training,'pdca',proposed)
+    monkeypatch.setattr(training,'enrich_cuts',separated)
+    result=training.learn(tmp_path,[c],indexed,data,refs,np.zeros(74),.8,30.,
+                          outer=1,iterations=1,closure_rounds=1,
+                          workers=1,sep_batch=17)
+    assert recorded==[17]
+    assert result['complete'] and result['outer']==1
+    assert result['feature_dimensions']==74
+    assert result['training_cases']==c.n
+    assert result['stopping']=='outer_budget'
+
+
+def test_certify_anchors_at_final_deployed_policy_on_realized_ties(
+        tmp_path,monkeypatch):
+    """Regression: certify used BOOKED anchors instead of the final policy."""
+    import json
+    from types import SimpleNamespace
+    import run_weekly_anchored as runner
+    from surgery.anchored_core import key
+    c=component()
+    index={int(cid):i for i,cid in enumerate(c.case_ids)}
+    X=np.zeros((c.n,74));X[:,0]=1.
+    data={'X':X,'booked':c.booked.copy(),'actual':c.actual.copy(),
+          'case_id':c.case_ids.copy()}
+    refs={}
+    for part in c.components():
+        z=list(map(int,part.original))
+        real=evaluate(part,z,part.actual)['cost']
+        refs[key(part)]={'complete':True,'oracle_cost':0.,
+             'references':[dict(source='BOOKED',type='shared-policy',
+                  assignment=z,beta=part.booked.tolist(),realized_cost=real,
+                  predicted_cost=evaluate(part,z,part.booked)['cost'])]}
+    (tmp_path/'anchored_references.json').write_text(json.dumps(refs))
+    w=[0.]*74;w[0]=20.
+    (tmp_path/'anchored_progress.json').write_text(json.dumps(dict(
+        complete=True,w=w,library={})))
+    monkeypatch.setattr(runner,'initialize',
+        lambda args:(None,None,[c],index,data,None,None))
+    hits=[]
+    def verified(output,name,weeks,index,X,booked,w,alpha,h,**kwargs):
+        hits.append(name)
+        _,d=display_and_duration(X@w,booked,alpha,h)
+        result={}
+        for part in c.components():
+            rows=[index[int(cid)] for cid in part.case_ids]
+            z=list(map(int,part.original))
+            result[key(part)]=dict(complete=True,assignment=z,
+                realized_cost=evaluate(part,z,part.actual)['cost'],
+                predicted_cost=evaluate(part,z,d[rows])['cost'])
+        return result
+    monkeypatch.setattr(runner,'verify_policy',verified)
+    anchors=[]
+    def certificate(task):
+        blocks, *_ =task
+        anchors.extend((b['anchor']['source'],
+                        b['anchor']['beta'].tolist()) for b in blocks)
+        return {b['key']:{'certified':True,'separation_exact':True,
+                          'regret':1.,'tie_safe_upper':5.} for b in blocks}
+    monkeypatch.setattr(runner,'_certificate_week',certificate)
+    args=SimpleNamespace(output=tmp_path,report_gap=False,
+         workers=1,seconds=10.,threads=1,alpha=.8,h=30.)
+    runner.certify(args)
+    assert hits==['certification_incumbent']
+    assert anchors and all(src=='CURRENT_POLICY' for src,_ in anchors)
+    assert any(not np.allclose(beta,c.booked[:len(beta)])
+               for _,beta in anchors)
+    assert (tmp_path/'anchored_bound_summary.json').exists()

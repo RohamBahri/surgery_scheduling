@@ -168,8 +168,18 @@ def certify(args):
     model=json.loads((args.output/'anchored_progress.json').read_text())
     if not model.get('complete'):raise ValueError('Training is not complete')
     w=np.asarray(model['w'],float)
-    blocks=prepare_components(weeks,index,refs,model['library'])
-    _,duration=display_and_duration(data['X'].astype(float)@w,data['booked'],args.alpha,args.h)
+    X=data['X'].astype(float)
+    booked=data['booked']
+    _,duration=display_and_duration(X@w,booked,args.alpha,args.h)
+    # Certification must use exactly the same incumbent-aware reference rule as
+    # training, including ties. The duration-keyed deployed cache normally makes
+    # this free after the completed training run.
+    incumbent=verify_policy(args.output,'certification_incumbent',weeks,index,
+                            X,booked,w,args.alpha,args.h,
+                            seconds=args.seconds,threads=args.threads,
+                            workers=args.workers)
+    blocks=prepare_components(weeks,index,refs,model['library'],
+                              current=incumbent,current_duration=duration)
     path=args.output/'anchored_bound_certificates.json'
     report=json.loads(path.read_text()) if path.exists() else {}
     groups={}

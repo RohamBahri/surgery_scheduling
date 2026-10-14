@@ -96,6 +96,27 @@ themselves, accepted as better operating-room decisions. The entire
 algorithm remains a finite-budget heuristic for a nonconvex bilevel
 problem; it provides no global optimality or out-of-sample guarantee.
 
+## Training and certification entry-point safeguards
+
+`--exact-sep-batch` is accepted by both the runner and `learn()`, and is
+validated as a nonnegative integer. An outer-loop integration test exercises
+this argument rather than testing the mathematical modules in isolation.
+
+For the final `--stage certify`, the complete deployed incumbent is loaded
+from the same duration-hash cache used during training (or re-solved when
+needed). The incumbent's exact post-response durations and selected schedules
+are supplied to `prepare_components`, so references tied in realized cost
+favor the current policy instead of alphabetical BOOKED precedence. The
+reported bound remains conservative, but avoids this avoidable looseness.
+
+For a **clean TGH v3-versus-v1 comparison**, omit `--initial-policy`
+from **both** `references` and `train`, use CASE initialization, and
+retain the same predeclared solver and pDCA budgets. Introducing v1 as a
+warm start changes the reference library and creates a separate continuation
+experiment, not a direct standalone comparison. This bug-fix commit does
+**not** modify proximal coefficients, stopping heuristics or response
+regime statistics; such changes require a separately fingerprinted run.
+
 ## Warm starting and reproducibility
 
 By default the learner starts from the frozen CASE coefficients, so

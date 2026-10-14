@@ -310,12 +310,14 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
           *,gamma=2.,lam=0.,prox=.15,coef_prox=1e-5,
           outer=5,iterations=10,closure_rounds=2,seconds=300.,
           sep_seconds=90.,master_seconds=300.,threads=1,workers=15,
-          improvement=1e-4):
+          improvement=1e-4,sep_batch=96):
     """Full-cohort training with finite-budget outer search.
 
     Claims: fixed-library majorization and actual empirical-cost improvement
     for accepted steps. Does NOT claim optimality of original bilevel problem.
     """
+    if not isinstance(sep_batch, int) or sep_batch < 0:
+        raise ValueError('sep_batch must be a nonnegative integer (0 means all)')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
     X=data['X'].astype(float);booked=data['booked'];actual=data['actual']
     n=len(booked)
