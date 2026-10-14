@@ -13,7 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .anchored_core import key, anchored_cut
+from .anchored_core import (key, anchored_cut, anchored_score,
+                            normalize_tangent, tangent_key, reference_fingerprint)
 from .anchored_master import pdca, prepare_components
 from .anchored_oracles import deployed, separate
 from .planner import display_and_duration, reachable
@@ -181,74 +182,127 @@ def verify_policy(output,name,weeks,index,X,booked,w,alpha,h,
 
 
 def _sep_week(task):
+    """Solve exact schedule-specific tangent maximization on chosen components."""
     entries,duration,gamma,seconds,threads=task
     results={}
     for b in entries:
-        c=b['component'];a=b['anchor'];d=duration[b['rows']]
-        r=separate(c,d,a['beta'],gamma,slopes=a['slopes'],exact=False,
+        c=b['component'];anchor=b['anchor']
+        r=separate(c,duration[b['rows']],anchor['beta'],gamma,exact=True,
                    seconds=seconds,threads=threads)
         results[b['key']]=r
     return results
 
 
-def enrich_cuts(output,tag,blocks,duration,gamma,library,
-                seconds=90.,threads=1,workers=15):
-    """Exact fixed-slope training separation with dual-based closure checks.
+def _separation_priority(block, current_duration, proposal_duration, gamma):
+    """Prioritize apparent reductions in the restricted anchored loss."""
+    c=block['component'];rows=block['rows']
+    anchor=block['anchor'];cuts=block['cuts'];oracle=block['oracle_cost']
+    before=anchored_score(c,anchor,cuts,current_duration[rows],oracle,gamma,exact=True)
+    after=anchored_score(c,anchor,cuts,proposal_duration[rows],oracle,gamma,exact=True)
+    # Components with large apparent improvement are most vulnerable to
+    # missing competitor cuts. Also break ties by local duration movement.
+    shift=float(np.linalg.norm(proposal_duration[rows]-current_duration[rows]))
+    return (max(0.,before-after),shift)
 
-    The distinct schedule-specific tangent bound remains a separate optional
-    certification oracle. Unresolved separations never imply closure.
+
+def enrich_cuts(output,tag,blocks,duration,gamma,library,
+                seconds=90.,threads=1,workers=15,*,prior_duration=None,
+                batch=96,round_id=0):
+    """Adaptive exact-tangent cut generation for the *training* loss.
+
+    An exact Gurobi maximization is evaluated on a priority batch, not all
+    components after every pDCA step. The returned primal tangent is added
+    even on time-limit; a finite dual bound is used to certify closure of
+    inspected components. Untested and unresolved components are counted.
+    No global separation-closure claim is made unless every component is
+    independently certified.
     """
     output=Path(output)
-    path=output/f'anchored_separation_{tag}.json'
-    digest=hashlib.sha256(np.ascontiguousarray(duration,dtype=np.float64).tobytes()).hexdigest()
-    doc=json.loads(path.read_text()) if path.exists() else {'sha256':digest,'components':{}}
-    if doc.get('sha256')!=digest:
-        raise ValueError(f'Separation input fingerprint mismatch: {path}')
-    checkpoint=doc['components']
-    tasks=[]
-    # Group by site-week for manageable job scheduling.
-    groups={}
-    for b in blocks:
+    duration=np.asarray(duration,float)
+    prior=np.asarray(prior_duration if prior_duration is not None else duration,float)
+    if batch<0:
+        raise ValueError('Negative exact-separation batch size')
+    components={b['key']:b for b in blocks}
+    ordered=sorted(blocks,key=lambda b:(-_separation_priority(
+        b,prior,duration,gamma)[0],-_separation_priority(
+        b,prior,duration,gamma)[1],b['key']))
+    if batch==0 or batch>=len(ordered):
+        selected=ordered
+    else:
+        focus=max(1,(batch*2)//3)
+        chosen=ordered[:focus]
+        remaining=ordered[focus:]
+        available=batch-len(chosen)
+        offset=(round_id*available)%max(1,len(remaining))
+        for k in range(min(available,len(remaining))):
+            chosen.append(remaining[(offset+k)%len(remaining)])
+        selected=chosen
+    selected_keys={b['key'] for b in selected}
+    path=output/f'anchored_exact_separation_{tag}.json'
+    digest=hashlib.sha256()
+    digest.update(np.ascontiguousarray(duration,dtype=np.float64).tobytes())
+    for b in sorted(selected,key=lambda b:b['key']):
+        digest.update(b['key'].encode('utf8'))
+        digest.update(reference_fingerprint(b['anchor']['beta']).encode('ascii'))
+    fingerprint=digest.hexdigest()
+    doc=json.loads(path.read_text()) if path.exists() else {
+        'sha256':fingerprint,'components':{},'exact_tangent':True}
+    if doc.get('sha256')!=fingerprint:
+        raise ValueError(f'Separation point/reference fingerprint mismatch: {path}')
+    checkpoint=doc['components'];groups={}
+    for b in selected:
         if checkpoint.get(b['key'],{}).get('complete'):
             continue
         c=b['component']
         groups.setdefault((c.group,c.monday),[]).append(b)
-    for entries in groups.values():
-        tasks.append((entries,duration,gamma,seconds,threads))
+    tasks=[(items,duration,gamma,seconds,threads) for items in groups.values()]
     def persist(answer):
         checkpoint.update(answer)
         save_json(path,doc)
-    print(f'{tag}: {len(tasks)} group-weeks require fast competitor discovery',flush=True)
+    print(f'{tag}: exact tangent separation for {len(selected)} of '
+          f'{len(blocks)} components; {len(tasks)} site-weeks to solve',flush=True)
     if workers==1:
-        for t in tasks:persist(_sep_week(t))
+        for task in tasks:persist(_sep_week(task))
     elif tasks:
         with ProcessPoolExecutor(max_workers=min(workers,len(tasks)),
                                  mp_context=mp.get_context('spawn')) as pool:
             future=[pool.submit(_sep_week,t) for t in tasks]
             for x in as_completed(future):persist(x.result())
     added=0;closed=0;unresolved=0;max_gap=0.
-    by_key={b['key']:b for b in blocks}
-    for k,block in by_key.items():
-        r=checkpoint.get(k,{})
-        z=r.get('assignment')
+    for b in selected:
+        k=b['key'];c=b['component'];r=checkpoint.get(k,{})
+        known=list(b['cuts'])
         item=library.setdefault(k,[])
-        if z is not None and z not in item:
-            item.append(z);added+=1
+        if r.get('assignment') is not None and r.get('slopes') is not None:
+            cut=normalize_tangent(c,dict(
+                assignment=r['assignment'],slopes=r['slopes'],
+                anchor_sha256=reference_fingerprint(b['anchor']['beta'])
+            ),b['anchor']['beta'])
+            signatures={tangent_key(normalize_tangent(c,x,b['anchor']['beta']))
+                        for x in item}
+            if tangent_key(cut) not in signatures:
+                item.append(cut);added+=1
+            known.append(cut)
         upper=r.get('upper')
-        if upper is None or not np.isfinite(upper) or not item:
+        if upper is None or not np.isfinite(upper):
             unresolved+=1
             continue
-        current_d=duration[block['rows']]
-        known=max(anchored_cut(block['component'],block['anchor'],zz,
-                 current_d,gamma,exact=False) for zz in item)
-        gap=max(0.,float(upper)-float(known))
+        d=duration[b['rows']]
+        restricted=max(anchored_cut(c,b['anchor'],z,d,gamma,exact=True)
+                       for z in known)
+        gap=max(0.,float(upper)-restricted)
         max_gap=max(max_gap,gap)
-        if gap<=1e-5:
+        if gap<=1e-4:
             closed+=1
         else:
             unresolved+=1
     return {'added':added,'closed':closed,'unresolved':unresolved,
-            'components':len(blocks),'max_certified_cut_gap':max_gap}
+            'tested':len(selected),'untested':len(blocks)-len(selected),
+            'complete_oracles':sum(bool(checkpoint.get(k,{}).get('complete'))
+                                   for k in selected_keys),
+            'max_dual_cut_gap_tested':max_gap,
+            'all_closed':bool(closed==len(blocks) and not unresolved)}
+
 
 
 
@@ -307,11 +361,13 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             _,dur=display_and_duration(X@candidate,booked,alpha,h)
             candidate_id=hashlib.sha256(np.ascontiguousarray(dur,dtype=np.float64).tobytes()).hexdigest()[:12]
             close=enrich_cuts(output,f'{k}_{cut_round}_{candidate_id}',blocks,dur,gamma,
-                              state['library'],sep_seconds,threads,workers)
-            inner.append({'pdca':outcome['inner'],'fast_cut_discovery':close,
+                              state['library'],sep_seconds,threads,workers,
+                              prior_duration=current_duration,batch=sep_batch,
+                              round_id=k*closure_rounds+cut_round)
+            inner.append({'pdca':outcome['inner'],'adaptive_exact_tangent_separation':close,
                           'restricted_objective':outcome['restricted_objective']})
             save_json(state_path,state)
-            if close['added']==0 and close['unresolved']==0:
+            if close['all_closed'] and close['added']==0:
                 break
         trials=[];accepted=False
         previous_library_size=sum(len(v) for v in state['library'].values())

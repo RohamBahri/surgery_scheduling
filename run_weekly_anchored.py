@@ -50,6 +50,8 @@ def settings(args,meta,source,policies):
             'lambda_l1':args.lambda_l1,'prox':args.prox,
             'coef_prox':args.coef_prox,'pDCA_iterations':args.iterations,
             'closure_rounds':args.closure_rounds,'max_outer':args.max_outer,
+             'exact_sep_batch':args.exact_sep_batch,
+             'learner_variant':'schedule_specific_exact_tangent_adaptive_v3',
             'policy':'booked + exact response(clip(X@w)), all 74 shared features',
             'target':'verified empirical scheduling regret',
             'period':'2011-12 development training; no 2013 outcomes'}
@@ -73,6 +75,8 @@ def initialize(args):
                'VF':args.artifacts/'vf_progress.json'}
     if args.gap_model is not None:
         filenames['VF_GAP']=args.gap_model
+    if args.initial_policy is not None:
+        filenames['SEED']=args.initial_policy
     raw={k:json.loads(path.read_text()) for k,path in filenames.items()}
     if raw['CASE'].get('settings')!=origin or raw['VF'].get('settings')!=origin:
         raise ValueError('CASE/VF coefficients not from frozen training settings')
@@ -80,6 +84,9 @@ def initialize(args):
         raise ValueError('VF baseline incomplete')
     if raw['LASSO'].get('features')!=meta['feature_names']:
         raise ValueError('LASSO feature mismatch')
+    if 'SEED' in raw and (raw['SEED'].get('feature_dimensions')!=74
+                          or raw['SEED'].get('complete') is not True):
+        raise ValueError('Warm-start policy must be completed, 74-feature model')
     if 'VF_GAP' in raw and (not raw['VF_GAP'].get('complete')
                           or raw['VF_GAP']['settings']['feature_source_sha256']!=source_fingerprint()
                           or raw['VF_GAP']['settings']['matrix_sha256']!=meta['matrix_sha256']):
@@ -117,6 +124,9 @@ def initialize(args):
         raise ValueError('Full training must use all 180 weeks and 18705 cases')
     if args.site!='all' and len(weeks)!=60:
         raise ValueError('A full-site pilot must use all 60 training weeks')
+    if 'SEED' in raw and (raw['SEED'].get('training_cases')!=len(data['case_id'])
+                          or raw['SEED'].get('training_site_weeks')!=len(weeks)):
+        raise ValueError('Warm-start model cohort or site differs from experiment')
     return meta,frames,weeks,index,data,policies,ident
 
 
@@ -129,13 +139,14 @@ def train(args):
     if len(refs)!=sum(len(w.components()) for w in weeks) or any(
             not v.get('complete') for v in refs.values()):
         raise ValueError('References are incomplete')
-    state=learn(args.output,weeks,index,data,refs,policies['CASE'],args.alpha,args.h,
+    state=learn(args.output,weeks,index,data,refs,policies.get('SEED',policies['CASE']),args.alpha,args.h,
                 gamma=args.gamma,lam=args.lambda_l1,
                 prox=args.prox,coef_prox=args.coef_prox,outer=args.max_outer,
                 iterations=args.iterations,closure_rounds=args.closure_rounds,
                 seconds=args.seconds,sep_seconds=args.sep_seconds,
                 master_seconds=args.master_seconds,threads=args.threads,
-                workers=args.workers,improvement=args.min_improvement)
+                workers=args.workers,improvement=args.min_improvement,
+                 sep_batch=args.exact_sep_batch)
     print('Anchored result:',state['stopping'],'accepted moves=',len(state['accepted']),flush=True)
 
 
@@ -294,6 +305,10 @@ def main():
     p.add_argument('workbook',type=Path)
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--gap-model',type=Path)
+    p.add_argument('--initial-policy',type=Path,
+                   help='Optional completed 74-feature policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
+    p.add_argument('--exact-sep-batch',type=int,default=96,
+                   help='Exact tangent separation components per round; 0 checks every active component')
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--stage',choices=('references','train','certify','evaluate'),required=True)
     p.add_argument('--report-gap',action='store_true',
@@ -319,6 +334,7 @@ def main():
             or args.gamma<1 or not 0<args.alpha<=1 or args.h<=0
             or args.lambda_l1<0 or args.prox<=0 or args.coef_prox<=0
             or args.max_outer<1 or args.iterations<1 or args.closure_rounds<1
+             or args.exact_sep_batch<0
             or min(args.seconds,args.sep_seconds,args.master_seconds)<=0):
         p.error('Invalid finite solver budgets, scenario, or regularization settings')
     if args.stage=='references':

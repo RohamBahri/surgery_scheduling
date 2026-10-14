@@ -27,76 +27,96 @@ The full physical-room cost satisfies
 
     J(z,d) = 480*K - sum_i(d_i) - 30*n + phi(z,d).
 
-For an outer iteration, let `z_current` be the exact deployed schedule.
-The anchor `(y,beta)` is chosen from certified references (including the
-current policy's own schedule and post-response duration vector). A reference
-must have **strictly smaller realized cost** to displace the current policy;
-ties favor the current policy, not alphabetical source names. For each
-physical room, set `s_j=2.75` when that room in `z_current` exceeds 480
-minutes at `beta`, and `s_j=0` otherwise. These room slopes are constant
-across **all** competitor schedules in one optimization stage.
+## Exact schedule-specific anchored surrogate (v3)
 
-For each feasible competing schedule `z`, define the affine lower bound
+The TGH experiments exposed a loss-approximation trade-off:
+v1 trained on schedule-specific tangents and attained 9.8886 regret/case,
+but its discovery oracle was inconsistent with that training loss; v2
+used a common room-fixed-slope loss and exact routine closure but attained
+only 10.7483 regret/case. These are **in-sample, prior-run** observations,
+not results of this updated version.
 
-    T_s(z,d) = 30*used_room_days(z)
-             + sum_j s_j*(load_j(z,d)-480*used_j(z)).
+For every component and chosen anchor `(y,beta)`, we train on
 
-This is valid for every duration vector and every schedule, but it need not
-touch the true scheduling cost for arbitrary competing schedules at `beta`.
-The actual **training objective** is the fixed-room-slope anchored surrogate
+    S(d;y,beta) = gamma*phi(y,d)
+       + max_{z, s in partial phi(z,beta)}
+           [J(z,actual)-gamma*T_{z,s}^beta(d)] - V(actual),
 
-    S_s(d;y,beta) = gamma*phi(y,d)
-                   + max_z [J(z,actual)-gamma*T_s(z,d)]
-                   - V(actual).
+where a physical-room subgradient has slope 0 on the idle side, OVER
+(2.75) on the overtime side, and **either** at an exact 480-minute kink.
+`T_{z,s}^beta(d)` is the exact touching supporting affine function
+of `phi(z,d)` at `beta`. The maximization over these slopes at kinks
+is important: the separation MILP may choose a different valid tangent
+than a deterministic zero-at-kink convention. Both schedule assignments
+**and the selected room slopes** are persisted and represented verbatim
+in the training QP. When an anchor changes, prior cuts are re-tangentized
+at the new beta; they are not falsely reused as touching tangents.
 
-Because `T_s(z,d)<=phi(z,d)` and `min_z phi(z,d)<=phi(y,d)`,
-`S_s` is a convex-in-duration upper bound on the primary VF-GAP surrogate.
-For complete deterministic deployment, with primary-optimality discrepancy
-`delta(d)`, the rigorous certificate is
+Each fixed library yields a convex piecewise-linear surrogate in d and
+an exact response-aware DC function in the original 74 coefficients.
+The proximal majorizer uses upper reviewed durations in the reference
+term and lower reviewed durations in competitor cuts, so its QP contains
+no scheduling or behavioral-regime binaries.
 
-    regret_deployed(d) <= S_s(d;y,beta) + gamma*delta(d).
+The exact separation MILP maximizes **this same tangent objective**.
+Because it requires assignment-dependent overtime-regime binaries, it
+can be expensive. Each outer-stage discovery round checks a budgeted,
+deterministically selected batch, prioritized by apparent restricted-loss
+improvement and rotating coverage of other components. A new exact
+assignment/slope cut is stored even for a feasible time-limited oracle.
+Closure is certified **only** for checked components whose maximization
+dual bound is within tolerance of the known library maximum. Every
+`adaptive_exact_tangent_separation` checkpoint records tested,
+untested, closed, unresolved, added cuts, and maximum tested bound gap.
+Full closure is never claimed when some components are untested.
 
-No epsilon movement penalty replaces the lexicographic planner. The
-`--stage certify` task separately computes an **exact schedule-specific
-tangent** anchored bound; it is valid independently but is not identical to
-the fixed-slope training loss. Both certify an upper bound on regret (with
-the tie correction), but neither proves out-of-sample improvements.
+This bound is valid for each fixed reference because all exact tangents
+are global lower bounds on the corresponding fixed-schedule cost. For
+the actual tolerance-lexicographic deployment use
 
-For fixed anchors, `anchored_master.py` uses a restricted competitor
-library and the original piecewise-linear surgeon response. Its touching
-convex majorizer uses `b+p(w)-linearized(q)` in the reference term and
-`b+linearized(p)-q(w)` in each competitor cut, with convex `p,q`. The
-proximal term measures the change in raw recommendations `X(w-w_k)`,
-and every original feature coefficient is retained. The resulting QP has
-no scheduling or response-regime binaries. Inner pDCA descent refers to
-the **fixed-library** surrogate; each added cut changes that objective.
+    regret_deployed(d) <= S(d;y,beta) + gamma*delta(d),
 
-Routine competitor separation solves the **same fixed-slope objective**
-as the training master. Its maximization MILP provides both an incumbent
-and a dual bound. A cut library is called closed at the candidate only when
-the separation dual bound is within `1e-5` of its known library maximum;
-unresolved components are explicitly reported. Closure at candidate
-iterates is not a proof that the full fixed-slope objective was optimized
-globally across all coefficients or all intermediate pDCA iterates.
-Exact tangent separation remains available for independent final
-certification and comparison to VF-GAP.
+with delta the certified primary-cost suboptimality of the deployed
+assignment. Final `--stage certify` recomputes exact tangent separation
+for all components and the appropriate primary planner bounds;
+it does not turn restricted inner pDCA iterates into globally optimal
+solutions.
 
-All components with a **provably unique feasible schedule** are excluded
-from the learning master: their deployed realized costs are policy
-independent. The previous no-overtime/minimum-room analytic certificate
-is an additional sufficient condition for excluding other policy-locked
-components. All excluded cases stay in the global per-case normalization
-and the complete regret evaluation.
+The current deployed policy is a reference at every outer iteration,
+winning ties in realized cost. A strictly better reference may be a
+jointly attainable historical policy or a casewise box aspiration.
+The latter is not evidence of reachability under one shared policy.
+Unique-schedule and minimum-room/no-overtime certificates exclude
+constant-cost components from training, while preserving their costs
+and cases in all complete realized evaluations.
 
-References may originate from shared-policy witnesses or independently
-reachable box probes. The latter are aspirations, not proofs of joint
-reachability through the shared 74-coefficient policy. Training-only
-candidate selection is always checked using the complete deterministic
-planner. Every accepted policy strictly decreases unregularized training
-regret; a failed or timed-out planner is never accepted. Such empirical
-descent does not imply local/global optimum or validation improvement.
-An exhausted cut/search budget must not be described as policy-class
-impossibility.
+A strict decline in complete realized **training** cost is necessary
+for accepting a candidate. Better surrogate values are not, by
+themselves, accepted as better operating-room decisions. The entire
+algorithm remains a finite-budget heuristic for a nonconvex bilevel
+problem; it provides no global optimality or out-of-sample guarantee.
+
+## Warm starting and reproducibility
+
+By default the learner starts from the frozen CASE coefficients, so
+improvements can be attributed to this algorithm. Optionally supply
+`--initial-policy /path/to/v1/anchored_progress.json` for a **separate**
+continuation experiment that starts from the completed 74-coefficient
+v1 policy (same site and training cases required). Do not credit the
+seed's 11.50-to-9.89 reduction to the continuation algorithm.
+Use a separate output directory for each run and pass the same
+`--initial-policy` flag at **all** stages, because it is fingerprinted
+as a read-only baseline, and contributes an additional SEED reference.
+The same final score can be measured independently with `--stage evaluate`
+on the frozen full-site model; validation is reserved for the completed
+all-site run.
+
+Use `--exact-sep-batch 96` for an adaptive full-site training pilot,
+or `--exact-sep-batch 0` to ask exact separation on every active
+component at every round (substantially more expensive). An
+adaptive batch is a search strategy, **not** a full surrogate
+optimality certificate. Final `--stage certify` is distinct from
+the training-stage adaptive separation.
 
 
 ## Commands
@@ -173,10 +193,11 @@ python3.14 run_weekly_anchored.py \
 * `anchored_verify_<sha256>.json`: cached exact deployed selections across
   trial/current names, keyed by the exact post-response duration SHA. Increase `--seconds` on a timeout; neither
   a primary incumbent nor an incomplete tie-break can be used as acceptance.
-* `anchored_separation_*.json`: fast discovery of promising competitors,
-  with primal-dual bounds on the **same fixed-slope objective used for
-  coefficient training**. Exact closure at evaluated candidates is tracked
-  separately from the exact-tangent final certificate.
+* `anchored_exact_separation_*.json`: adaptive exact-tangent discovery,
+  with primal-dual bounds on the **same exact tangent objective used for
+  coefficient training**, for selected components. Untested and unresolved
+  components are explicitly counted; optional final full closure uses
+  `--stage certify`.
 * `anchored_bound_certificates.json` and `anchored_bound_summary.json`:
   conditional full-tangent upper-bound and tie-safe correction; optional
   VF-GAP intervals. Inspect `separation_exact` / `vf_gap_all_exact` and
@@ -193,7 +214,7 @@ The previous CASE noise-calibrated L1 rule is **not** silently repurposed for
 an unrelated anchored loss. A justified new L1 rule would require a separate
 score derivation, not simply multiplying CASE's penalty by 1/2.08. The defaults
 `gamma=2`, `prox=.15`, `coef_prox=1e-5`, `iterations=12`,
-`closure_rounds=2`, `max_outer=5` are **predeclared implementation choices**,
+`closure_rounds=2`, `exact_sep_batch=96`, `max_outer=5` are **predeclared implementation choices**,
 not estimated best hyperparameters. Altering them creates a new experiment
 and requires an isolated output directory.
 

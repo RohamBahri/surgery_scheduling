@@ -95,8 +95,10 @@ def test_gurobi_master_uses_every_feature_and_is_majorizing():
     w=np.array([6.,-.1,.4,.1]);cases=[[0,0,1,1],[0,1,0,1],[1,1,0,0]]
     anchor={'assignment':cases[0],'beta':c.booked,
             'slopes':slopes_from_reference(c,cases[0],c.booked)}
+    from surgery.anchored_core import normalize_tangent
     block={'component':c,'key':'test','rows':np.arange(4),
            'anchor':anchor,'schedules':cases,
+           'cuts':[normalize_tangent(c,z,anchor['beta']) for z in cases],
            'oracle_cost':min(evaluate(c,z,c.actual)['cost'] for z in cases)}
     ans=solve_majorizer([block],X,c.booked,w,.8,30.,2.,0.,
                         prox=.15,seconds=60.,threads=1)
@@ -224,7 +226,7 @@ def test_current_policy_wins_equal_cost_reference_ties():
     w=np.array([10.,2.])
     from surgery.planner import display_and_duration
     _,d=display_and_duration(X@w,c.booked,.8,30.)
-    expected=anchored_score(c,b['anchor'],b['schedules'],d,recorded,2.,exact=False)
+    expected=anchored_score(c,b['anchor'],b['cuts'],d,recorded,2.,exact=True)
     assert restricted_value(blocks,X,c.booked,w,.8,30.,2.)==pytest.approx(expected/c.n)
 
 
@@ -275,20 +277,117 @@ def test_deployed_planner_cache_is_duration_keyed(tmp_path,monkeypatch):
     assert len(list(tmp_path.glob('anchored_verify_*.json')))==1
 
 
-def test_fixed_slope_separation_closes_its_own_learning_cuts(tmp_path):
+def test_exact_tangent_separation_closes_its_own_learning_cuts(tmp_path):
     pytest.importorskip('gurobipy')
     from surgery.anchored_training import enrich_cuts
-    from surgery.anchored_core import key, slopes_from_reference
+    from surgery.anchored_core import (key, slopes_from_reference,
+                                       normalize_tangent)
     c=component();a=c.original.astype(int).tolist()
     anchor={'assignment':a,'beta':c.booked,
             'slopes':slopes_from_reference(c,a,c.booked)}
     b={'component':c,'key':key(c),'rows':np.arange(c.n),
        'anchor':anchor,'schedules':[a],
+       'cuts':[normalize_tangent(c,a,c.booked)],
        'oracle_cost':evaluate(c,a,c.actual)['cost']}
     lib={}
     out=enrich_cuts(tmp_path,'check',[b],c.booked,2.,lib,
-                    seconds=30.,threads=1,workers=1)
+                    seconds=30.,threads=1,workers=1,batch=0)
     assert out['closed']==1 and out['unresolved']==0
-    assert out['max_certified_cut_gap']<=1e-5
-    assert out['components']==1
+    assert out['untested']==0 and out['tested']==1
+    assert out['max_dual_cut_gap_tested']<=1e-4
+    assert out['all_closed']
     assert lib[key(c)]
+
+
+def test_tangent_cut_slope_preserved_and_reanchored():
+    from surgery.anchored_core import (normalize_tangent, tangent_key,
+            reference_fingerprint, anchored_cut)
+    c=component()
+    z=[0,0,1,1]
+    beta=np.array([220.,230.,210.,240.])
+    changed=beta+np.array([10.,-5.,0.,2.])
+    # Both used room loads equal 480, allowing two supporting slopes.
+    custom={'assignment':z,'slopes':[2.75,0.],
+            'anchor_sha256':reference_fingerprint(beta)}
+    cut=normalize_tangent(c,custom,beta)
+    assert cut['slopes']==[2.75,0.]
+    alternate=normalize_tangent(c,z,beta)
+    assert tangent_key(cut)!=tangent_key(alternate)
+    anchor={'assignment':z,'beta':beta,'slopes':np.array([0.,0.])}
+    assert anchored_cut(c,anchor,cut,changed,2.,exact=True)!=pytest.approx(
+        anchored_cut(c,anchor,alternate,changed,2.,exact=True))
+    # A slope valid only at the old kink is NOT a tangent at the new beta.
+    new_beta=beta-np.array([20.,20.,0.,0.])
+    retangent=normalize_tangent(c,cut,new_beta)
+    assert retangent['slopes'][0]==0.
+
+
+def test_exact_oracle_at_capacity_kink_matches_all_valid_tangents():
+    pytest.importorskip('gurobipy')
+    from surgery.anchored_oracles import separate
+    from surgery.anchored_core import fixed_slope_lower, anchored_cut
+    from surgery.weekly_planner import loads
+    c=component()
+    beta=np.array([220.,230.,210.,240.])
+    d=beta+np.array([8.,-2.,-5.,12.])
+    res=separate(c,d,beta,2.,exact=True,seconds=60.,threads=1)
+    assert res['complete'],res
+    brute=-float('inf')
+    from itertools import product
+    for z in product((0,1),repeat=c.n):
+        ld=loads(c,z,beta)
+        choices=[]
+        for load in ld:
+            if load<480-1e-7:choices.append((0.,))
+            elif load>480+1e-7:choices.append((2.75,))
+            else:choices.append((0.,2.75))
+        for slope in product(*choices):
+            value=evaluate(c,z,c.actual)['cost']-2.*fixed_slope_lower(c,z,d,slope)
+            brute=max(brute,value)
+    assert res['lower']==pytest.approx(brute,abs=1e-4)
+    assert res['upper']==pytest.approx(brute,abs=1e-4)
+    assert len(res['slopes'])==c.k
+
+
+def test_adaptive_batch_reports_unchecked_components(tmp_path):
+    pytest.importorskip('gurobipy')
+    from surgery.anchored_training import enrich_cuts
+    from surgery.anchored_core import (key, normalize_tangent,
+                                        slopes_from_reference)
+    c=component()
+    z=c.original.astype(int).tolist()
+    anchor={'assignment':z,'beta':c.booked,
+            'slopes':slopes_from_reference(c,z,c.booked)}
+    b={'component':c,'key':key(c),'rows':np.arange(c.n),
+       'anchor':anchor,'schedules':[z],
+       'cuts':[normalize_tangent(c,z,c.booked)],
+       'oracle_cost':evaluate(c,z,c.actual)['cost']}
+    # Use an alias key to simulate an independent component in the batch.
+    b2=dict(b,key='second')
+    out=enrich_cuts(tmp_path,'batch_check',[b,b2],c.booked,2.,{},
+                    seconds=30.,threads=1,workers=1,batch=1)
+    assert out['tested']==1 and out['untested']==1
+    assert out['all_closed'] is False
+
+
+def test_anchored_schedule_specific_cuts_align_with_master_value():
+    from surgery.anchored_core import (normalize_tangent, anchored_score)
+    from surgery.anchored_master import restricted_value
+    c=component()
+    z=c.original.astype(int).tolist()
+    beta=c.booked
+    cuts=[normalize_tangent(c,zz,beta) for zz in
+          (z,[0,1,0,1],[1,1,0,0])]
+    anchor={'assignment':z,'beta':beta,'slopes':np.array([0.,0.])}
+    X=np.column_stack([np.ones(c.n),np.arange(c.n)])
+    w=np.array([6.,2.])
+    _,d=display_and_duration(X@w,c.booked,.8,30.)
+    oracle=min(evaluate(c,zz,c.actual)['cost'] for zz in
+               ([0,0,1,1],[0,1,0,1],[1,1,0,0]))
+    block=dict(component=c,key='unit',rows=np.arange(c.n),anchor=anchor,
+               cuts=cuts,schedules=[v['assignment'] for v in cuts],
+               oracle_cost=oracle)
+    value=restricted_value([block],X,c.booked,w,.8,30.,2.)
+    expected=anchored_score(c,anchor,cuts,d,oracle,2.,exact=True)/c.n
+    assert value==pytest.approx(expected)
+

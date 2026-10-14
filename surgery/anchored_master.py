@@ -1,4 +1,4 @@
-"""Coupled full-feature convex pDCA master for the fixed-slope library loss.
+"""Coupled full-feature convex pDCA master for the exact schedule-specific tangent library loss.
 
 No schedule assignment or behavioral-regime binaries enter this master.
 Each case's *complete clipped* response is modeled with convex hinge epigraphs.
@@ -7,7 +7,8 @@ reviewed duration and give a globally valid convex objective majorizer.
 """
 import time
 import numpy as np
-from .anchored_core import (hinge_response, anchored_score, OVER, TURN, CAP, key)
+from .anchored_core import (hinge_response, anchored_score, OVER, TURN, CAP,
+                            key, normalize_tangent, tangent_key)
 from .weekly_planner import evaluate
 
 
@@ -60,24 +61,37 @@ def prepare_components(weeks,index,refs,library,*,current=None,current_duration=
             anchor=dict(assignment=y,beta=beta,
                 slopes=slopes_from_reference(c,slope_schedule,beta),
                 source=best['source'])
-            schedules=[];seen=set()
+            cuts=[];seen=set()
+            # Reference assignments and prior separated cuts both represent
+            # *schedule-specific* tangents at this iteration's reference beta.
             for r in anchors:
-                z=tuple(map(int,r['assignment']))
-                if z not in seen:seen.add(z);schedules.append(list(z))
-            for z in library.get(k,[]):
-                z=tuple(map(int,z))
-                if z not in seen:seen.add(z);schedules.append(list(z))
+                cut=normalize_tangent(c,r['assignment'],beta)
+                fingerprint=tangent_key(cut)
+                if fingerprint not in seen:
+                    seen.add(fingerprint);cuts.append(cut)
+            for entry in library.get(k,[]):
+                cut=normalize_tangent(c,entry,beta)
+                fingerprint=tangent_key(cut)
+                if fingerprint not in seen:
+                    seen.add(fingerprint);cuts.append(cut)
+            schedules=[]
+            known_assignments=set()
+            for cut in cuts:
+                z=tuple(cut['assignment'])
+                if z not in known_assignments:
+                    schedules.append(list(z))
+                    known_assignments.add(z)
             for z in schedules:evaluate(c,z,c.actual)
             out.append(dict(component=c,key=k,rows=rows,anchor=anchor,
-                schedules=schedules,oracle_cost=float(record['oracle_cost'])))
+                schedules=schedules,cuts=cuts,oracle_cost=float(record['oracle_cost'])))
     return out
 
 
 def restricted_value(blocks, X, booked, w, alpha, h, gamma, lam=0.):
     from .planner import display_and_duration
     _,pred=display_and_duration(X @ np.asarray(w,float), booked, alpha, h)
-    loss=sum(anchored_score(b['component'],b['anchor'],b['schedules'],
-                            pred[b['rows']],b['oracle_cost'],gamma,exact=False)
+    loss=sum(anchored_score(b['component'],b['anchor'],b['cuts'],
+                            pred[b['rows']],b['oracle_cost'],gamma,exact=True)
              for b in blocks)
     return loss/len(booked)+lam*float(np.abs(np.asarray(w)[1:]).sum())
 
@@ -140,11 +154,11 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
                                 +TURN*(int(count)-1)-480.)
                     score_ref+=OVER*ot
             theta=m.addVar(lb=-GRB.INFINITY,name='component_max')
-            for assignment in block['schedules']:
-                z=np.asarray(assignment,int)
+            for cut in block['cuts']:
+                z=np.asarray(cut['assignment'],int)
                 counts_z=np.bincount(z,minlength=c.k)
                 opened=counts_z>0
-                slope=a['slopes']  # Match routine fixed-slope separation exactly.
+                slope=np.asarray(cut['slopes'],float)  # Oracle-selected tangent at beta.
                 # q_s(z,d)=30*U + sum_j s_j [sum_i(d_i+30)x_ij-510*u_j]
                 affine=TURN*int(opened.sum())
                 affine+=float(np.dot(slope,TURN*counts_z-(TURN+CAP)*opened))

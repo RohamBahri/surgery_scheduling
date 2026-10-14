@@ -64,7 +64,17 @@ def exact_tangent(component, assignment, beta, d):
 
 def anchored_cut(component, anchor, assignment, d, gamma=GAMMA_DEFAULT,
                  exact=False):
-    if exact:
+    """Evaluate a valid reference cut; a dict may specify a kink subgradient.
+
+    Exact-separation cuts carry physical-room slopes selected at the beta
+    reference point. At 480 exactly, both 0 and OVER are valid tangents.
+    Preserving this choice is essential for master/oracle consistency.
+    """
+    if isinstance(assignment, dict):
+        slopes = np.asarray(assignment['slopes'], float)
+        assignment = assignment['assignment']
+        supporting = fixed_slope_lower(component, assignment, d, slopes)
+    elif exact:
         supporting = exact_tangent(component, assignment, anchor['beta'], d)
     else:
         supporting = fixed_slope_lower(component, assignment, d, anchor['slopes'])
@@ -79,6 +89,49 @@ def anchored_score(component, anchor, competitor_assignments, d, oracle_cost,
             + max(anchored_cut(component, anchor, a, d, gamma, exact)
                   for a in competitor_assignments)
             - oracle_cost)
+
+
+def reference_fingerprint(beta):
+    """Stable identity of the duration point defining the tangent regimes."""
+    import hashlib
+    return hashlib.sha256(np.ascontiguousarray(
+        np.asarray(beta,dtype=np.float64)).tobytes()).hexdigest()
+
+
+def normalize_tangent(component, item, beta):
+    """Return an exact supporting cut of phi(z;d) at the current beta.
+
+    If a previously separated kink slope was generated for another anchor,
+    it is recomputed at the new beta rather than falsely called a tangent.
+    """
+    if isinstance(item, dict):
+        z=list(map(int,item['assignment']))
+        match=item.get('anchor_sha256')==reference_fingerprint(beta)
+        if match and 'slopes' in item:
+            slopes=np.asarray(item['slopes'],float)
+        else:
+            slopes=slopes_from_reference(component,z,beta)
+    else:
+        z=list(map(int,item))
+        slopes=slopes_from_reference(component,z,beta)
+    if len(z)!=component.n or slopes.shape!=(component.k,):
+        raise ValueError('Invalid scheduling cut shape')
+    if np.any(~np.isclose(slopes,0.,atol=1e-8)&
+              ~np.isclose(slopes,OVER,atol=1e-8)):
+        raise ValueError('Tangent has invalid slope values')
+    from .weekly_planner import loads
+    roomloads=loads(component,z,beta)
+    if np.any((slopes>OVER/2)&(roomloads<CAP-1e-6)):
+        raise ValueError('Overtime tangent inconsistent with beta')
+    if np.any((slopes<OVER/2)&(roomloads>CAP+1e-6)):
+        raise ValueError('Idle tangent inconsistent with beta')
+    return {'assignment':z,'slopes':slopes.tolist(),
+            'anchor_sha256':reference_fingerprint(beta)}
+
+
+def tangent_key(cut):
+    return (tuple(cut['assignment']),
+            tuple(round(float(v),7) for v in cut['slopes']))
 
 
 def response_single(score, booked, alpha, h):
