@@ -580,7 +580,7 @@ def test_oracle_fix_resume_migrates_only_matching_interrupted_experiment(
     (output/'anchored_progress.json').write_text(json.dumps(
         {'complete':False,'outer':4,'accepted':[{'outer':i} for i in range(4)]}))
     args=SimpleNamespace(output=output,artifacts=artifacts,workbook=workbook,
-                         gap_model=None,site='TGH',alpha=.8,h=30.,
+                         gap_model=None,initial_policy=None,site='TGH',alpha=.8,h=30.,
                          resume_oracle_fix=False)
     with pytest.raises(ValueError,match='Use a new output directory'):
         runner.initialize(args)
