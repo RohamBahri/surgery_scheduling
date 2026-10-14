@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .anchored_core import key
+from .anchored_core import key, anchored_cut
 from .anchored_master import pdca, prepare_components
 from .anchored_oracles import deployed, separate
 from .planner import display_and_duration, reachable
@@ -99,11 +99,30 @@ def build_reference_library(output,weeks,index,data,policy_weights,alpha,h,
     return state
 
 
-def locked(component,alpha,h):
-    """Sufficient analytic certificate: original uses the absolute minimum
-    possible room count and remains below 480 throughout the reachable box.
-    Tie stages then select the zero-movement original plan for all policies.
+def unique_schedule(component):
+    """Prove that surgeon-day retention leaves exactly one feasible assignment.
+
+    Cases of a surgeon share the same eligible slots. With multiple cases and
+    multiple allowed slots, at least one reassignment is possible unless the
+    surgeon has a single slot. For a single case the required day can force a
+    unique slot even if other days are on the eligible roster.
     """
+    for s,allowed in enumerate(component.allowed):
+        if len(allowed)==1:
+            continue
+        count=int(np.count_nonzero(component.surgeon==s))
+        days=component.required_days[s]
+        if count!=1 or len(days)!=1:
+            return False
+        if sum(int(component.slots[j][0]==days[0]) for j in allowed)!=1:
+            return False
+    return True
+
+
+def locked(component,alpha,h):
+    """Sufficient certificate of policy-independent deployed decisions/cost."""
+    if unique_schedule(component):
+        return True
     original=component.original
     rooms=set(map(int,original))
     required_weekdays={int(day) for days in component.required_days for day in days}
@@ -131,7 +150,7 @@ def verify_policy(output,name,weeks,index,X,booked,w,alpha,h,
     output=Path(output)
     _,duration=display_and_duration(X@np.asarray(w,float),booked,alpha,h)
     sha=hashlib.sha256(np.ascontiguousarray(duration,dtype=np.float64).tobytes()).hexdigest()
-    path=output/f'anchored_verify_{name}.json'
+    path=output/f'anchored_verify_{sha}.json'
     doc=json.loads(path.read_text()) if path.exists() else {'sha256':sha,'components':{}}
     if doc.get('sha256')!=sha:
         raise ValueError(f'Policy fingerprint collision: {path}; use a new evaluation name')
@@ -174,10 +193,10 @@ def _sep_week(task):
 
 def enrich_cuts(output,tag,blocks,duration,gamma,library,
                 seconds=90.,threads=1,workers=15):
-    """Fast underestimator separation for competitor DISCOVERY only.
+    """Exact fixed-slope training separation with dual-based closure checks.
 
-    This is not certified closure of the schedule-specific tangent surrogate;
-    exact-tangent separation is required for that certificate.
+    The distinct schedule-specific tangent bound remains a separate optional
+    certification oracle. Unresolved separations never imply closure.
     """
     output=Path(output)
     path=output/f'anchored_separation_{tag}.json'
@@ -207,15 +226,30 @@ def enrich_cuts(output,tag,blocks,duration,gamma,library,
                                  mp_context=mp.get_context('spawn')) as pool:
             future=[pool.submit(_sep_week,t) for t in tasks]
             for x in as_completed(future):persist(x.result())
-    added=0
-    for k,r in checkpoint.items():
+    added=0;closed=0;unresolved=0;max_gap=0.
+    by_key={b['key']:b for b in blocks}
+    for k,block in by_key.items():
+        r=checkpoint.get(k,{})
         z=r.get('assignment')
-        if z is None:continue
         item=library.setdefault(k,[])
-        if z not in item:
+        if z is not None and z not in item:
             item.append(z);added+=1
-    return {'added':added,'resolved':sum(bool(v.get('complete')) for v in checkpoint.values()),
-            'unresolved':sum(not bool(v.get('complete')) for v in checkpoint.values())}
+        upper=r.get('upper')
+        if upper is None or not np.isfinite(upper) or not item:
+            unresolved+=1
+            continue
+        current_d=duration[block['rows']]
+        known=max(anchored_cut(block['component'],block['anchor'],zz,
+                 current_d,gamma,exact=False) for zz in item)
+        gap=max(0.,float(upper)-float(known))
+        max_gap=max(max_gap,gap)
+        if gap<=1e-5:
+            closed+=1
+        else:
+            unresolved+=1
+    return {'added':added,'closed':closed,'unresolved':unresolved,
+            'components':len(blocks),'max_certified_cut_gap':max_gap}
+
 
 
 def learn(output,weeks,index,data,refs,initial,alpha,h,
@@ -255,14 +289,17 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
         old_regret=(old_total-sum(refs[j]['oracle_cost'] for j in incumbent))/n
         if old_regret < -.02:
             raise AssertionError('Deployed training cost below certified hindsight optimum')
-        blocks=prepare_components(weeks,index,refs,state['library'])
+        _,current_duration=display_and_duration(X@w,booked,alpha,h)
+        blocks=prepare_components(weeks,index,refs,state['library'],
+                                  current=incumbent,current_duration=current_duration)
         blocks=[b for b in blocks if b['key'] not in excluded]
         if not blocks:raise RuntimeError('All components analytically locked: no learnable schedule changes')
         proposals=[]
         candidate=w.copy()
         inner=[]
         for cut_round in range(closure_rounds):
-            blocks=prepare_components(weeks,index,refs,state['library'])
+            blocks=prepare_components(weeks,index,refs,state['library'],
+                                      current=incumbent,current_duration=current_duration)
             blocks=[b for b in blocks if b['key'] not in excluded]
             outcome=pdca(blocks,X,booked,candidate,alpha,h,gamma,lam,
                          iterations,prox,coef_prox,master_seconds,threads)

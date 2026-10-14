@@ -27,55 +27,82 @@ The full physical-room cost satisfies
 
     J(z,d) = 480*K - sum_i(d_i) - 30*n + phi(z,d).
 
-For each **fixed reference pair** `(y,beta)`, every feasible competitor `z`
-gets its own supporting tangent `T_z^beta(d)` to `phi(z,d)` at `beta`. The
-full anchored surrogate is
+For an outer iteration, let `z_current` be the exact deployed schedule.
+The anchor `(y,beta)` is chosen from certified references (including the
+current policy's own schedule and post-response duration vector). A reference
+must have **strictly smaller realized cost** to displace the current policy;
+ties favor the current policy, not alphabetical source names. For each
+physical room, set `s_j=2.75` when that room in `z_current` exceeds 480
+minutes at `beta`, and `s_j=0` otherwise. These room slopes are constant
+across **all** competitor schedules in one optimization stage.
 
-    S(d;y,beta) = gamma*phi(y,d)
-       + max_z[J(z,actual)-gamma*T_z^beta(d)] - V(actual).
+For each feasible competing schedule `z`, define the affine lower bound
 
-`S` is convex in `d` and, for `gamma>=1`, bounds empirical regret when the
-primary planner is exact. For actual deployed deterministic tie-breaking use
+    T_s(z,d) = 30*used_room_days(z)
+             + sum_j s_j*(load_j(z,d)-480*used_j(z)).
 
-    regret_deployed(d) <= S(d;y,beta) + gamma*delta(d),
+This is valid for every duration vector and every schedule, but it need not
+touch the true scheduling cost for arbitrary competing schedules at `beta`.
+The actual **training objective** is the fixed-room-slope anchored surrogate
 
-where `delta` is the deployed schedule's primary-cost excess above the exact
-predicted optimum. The certification stage computes a rigorous upper bound on
-`delta`, including Gurobi numerical tolerances. No arbitrary epsilon movement
-penalty is substituted for the actual tertiary tie-break.
+    S_s(d;y,beta) = gamma*phi(y,d)
+                   + max_z [J(z,actual)-gamma*T_s(z,d)]
+                   - V(actual).
 
-`anchored_master.py` minimizes the **restricted library** version of S, not the
-full S. Each fixed-library objective has an exact DC representation in w by
-composing a convex-in-d surrogate with the full piecewise-linear response.
-A touching convex majorizer uses (p - q) with `p,q` convex, upper duration
-`b + p(w) - linearized(q)` in the reference term, and lower duration
-`b + linearized(p) - q(w)` in each competitor cut. A proximal squared change
-in **all case-wise raw recommendation scores X@w** stabilizes the update.
-The optimizer is a convex quadratic Gurobi program with linear epigraphs and
-all 74 coefficient variables, **without schedule or response binaries**.
+Because `T_s(z,d)<=phi(z,d)` and `min_z phi(z,d)<=phi(y,d)`,
+`S_s` is a convex-in-duration upper bound on the primary VF-GAP surrogate.
+For complete deterministic deployment, with primary-optimality discrepancy
+`delta(d)`, the rigorous certificate is
 
-Routine competitor discovery uses a weaker, but globally valid, per-room
-fixed-slope underestimator. Its maximization oracle is less elaborate than
-schedule-specific tangent separation. **It does not certify closure of the
-exact-tangent restricted library or full S.** The saved records are named
-`anchored_separation_...json` and are used for discovery only; they must not
-be cited as the exact anchored regret bound. The optional `--stage certify`
-solves the full schedule-specific tangent oracle with binary room-regime
-indicators and primal-dual solver bounds. With `--report-gap`, it separately
-computes bounds on the primary VF-GAP quantity.
+    regret_deployed(d) <= S_s(d;y,beta) + gamma*delta(d).
 
-Fixed-reference pDCA subproblems may find only a critical point. Updating the
-references changes the surrogate. The outer algorithm has only a **strict
-realized-training-regret acceptance guarantee**, conditional on fully
-certified deterministic planner solves. An exhausted search budget does not
-prove local or global optimality, and rejection does not prove the shared
-policy class is too restrictive. A failed MILP is never relabeled optimal.
+No epsilon movement penalty replaces the lexicographic planner. The
+`--stage certify` task separately computes an **exact schedule-specific
+tangent** anchored bound; it is valid independently but is not identical to
+the fixed-slope training loss. Both certify an upper bound on regret (with
+the tie correction), but neither proves out-of-sample improvements.
+
+For fixed anchors, `anchored_master.py` uses a restricted competitor
+library and the original piecewise-linear surgeon response. Its touching
+convex majorizer uses `b+p(w)-linearized(q)` in the reference term and
+`b+linearized(p)-q(w)` in each competitor cut, with convex `p,q`. The
+proximal term measures the change in raw recommendations `X(w-w_k)`,
+and every original feature coefficient is retained. The resulting QP has
+no scheduling or response-regime binaries. Inner pDCA descent refers to
+the **fixed-library** surrogate; each added cut changes that objective.
+
+Routine competitor separation solves the **same fixed-slope objective**
+as the training master. Its maximization MILP provides both an incumbent
+and a dual bound. A cut library is called closed at the candidate only when
+the separation dual bound is within `1e-5` of its known library maximum;
+unresolved components are explicitly reported. Closure at candidate
+iterates is not a proof that the full fixed-slope objective was optimized
+globally across all coefficients or all intermediate pDCA iterates.
+Exact tangent separation remains available for independent final
+certification and comparison to VF-GAP.
+
+All components with a **provably unique feasible schedule** are excluded
+from the learning master: their deployed realized costs are policy
+independent. The previous no-overtime/minimum-room analytic certificate
+is an additional sufficient condition for excluding other policy-locked
+components. All excluded cases stay in the global per-case normalization
+and the complete regret evaluation.
+
+References may originate from shared-policy witnesses or independently
+reachable box probes. The latter are aspirations, not proofs of joint
+reachability through the shared 74-coefficient policy. Training-only
+candidate selection is always checked using the complete deterministic
+planner. Every accepted policy strictly decreases unregularized training
+regret; a failed or timed-out planner is never accepted. Such empirical
+descent does not imply local/global optimum or validation improvement.
+An exhausted cut/search budget must not be described as policy-class
+impossibility.
+
 
 ## Commands
 
-From the **root of the existing GitHub repository**, first apply the supplied
-new-file patch (or copy the `surgery/`, `tests/`, `docs/` and runner files into
-the matching locations). Install the project's Python requirements including
+Switch to the `anchored-regret-learning` branch of the existing GitHub
+repository. Install the project's Python requirements including
 Gurobi and a valid Gurobi license. Run `pytest -q tests/test_anchored_core.py`
 and the original repository suite first.
 
@@ -143,12 +170,13 @@ python3.14 run_weekly_anchored.py \
 * `anchored_progress.json`: coefficients, accepted actual-regret improvements,
   attempted candidate policies, pDCA status, non-intercept coefficient changes,
   objective history, discovered competitors and explicit stopping reason.
-* `anchored_verify_*.json`: cached exact deployed selections, keyed by the
-  exact post-response duration SHA. Increase `--seconds` on a timeout; neither
+* `anchored_verify_<sha256>.json`: cached exact deployed selections across
+  trial/current names, keyed by the exact post-response duration SHA. Increase `--seconds` on a timeout; neither
   a primary incumbent nor an incomplete tie-break can be used as acceptance.
 * `anchored_separation_*.json`: fast discovery of promising competitors,
-  with correct maximization primal-dual bounds on the *weaker fixed-slope*
-  surrogate. Not a tight full-S certificate.
+  with primal-dual bounds on the **same fixed-slope objective used for
+  coefficient training**. Exact closure at evaluated candidates is tracked
+  separately from the exact-tangent final certificate.
 * `anchored_bound_certificates.json` and `anchored_bound_summary.json`:
   conditional full-tangent upper-bound and tie-safe correction; optional
   VF-GAP intervals. Inspect `separation_exact` / `vf_gap_all_exact` and

@@ -1,4 +1,4 @@
-"""Coupled full-feature convex pDCA master for the exact-tangent library loss.
+"""Coupled full-feature convex pDCA master for the fixed-slope library loss.
 
 No schedule assignment or behavioral-regime binaries enter this master.
 Each case's *complete clipped* response is modeled with convex hinge epigraphs.
@@ -22,43 +22,54 @@ def envelopes(terms):
     return result
 
 
-def prepare_components(weeks, index, refs, library):
-    """A component participates only with a certified hindsight oracle and anchor."""
+def prepare_components(weeks,index,refs,library,*,current=None,current_duration=None):
+    """Select lowest-realized-cost references; prefer current on cost ties."""
+    if (current is None)!=(current_duration is None):
+        raise ValueError('Supply both incumbent schedules and durations')
     out=[]
     for week in weeks:
         for c in week.components():
-            k=key(c)
-            record=refs.get(k)
-            if record is None or not record.get('complete'):
+            k=key(c); record=refs.get(k)
+            if not record or not record.get('complete') or not record.get('references'):
                 raise ValueError(f'Uncertified reference component {k}')
-            anchors=record.get('references',[])
-            if not anchors:
-                raise ValueError(f'No references for {k}')
-            best=min(anchors,key=lambda r:(r['realized_cost'],r['source']))
-            assigned=list(map(int,best['assignment']))
-            if len(assigned)!=c.n or not np.all(np.isfinite(best['beta'])):
+            rows=np.array([index[int(i)] for i in c.case_ids],int)
+            anchors=list(record['references'])
+            incumbent=None
+            if current is not None:
+                rec=current.get(k)
+                if rec is None or not rec.get('complete'):
+                    raise ValueError(f'Uncertified incumbent schedule for {k}')
+                incumbent=list(map(int,rec['assignment']))
+                beta=np.asarray(current_duration,float)[rows]
+                if abs(evaluate(c,incumbent,c.actual)['cost']-rec['realized_cost'])>1e-5:
+                    raise ValueError(f'Incumbent cost mismatch for {k}')
+                anchors.append(dict(source='CURRENT_POLICY',type='shared-policy',
+                    assignment=incumbent,beta=beta.tolist(),
+                    realized_cost=float(rec['realized_cost']),
+                    predicted_cost=float(rec['predicted_cost'])))
+            best_cost=min(float(r['realized_cost']) for r in anchors)
+            ties=[r for r in anchors if float(r['realized_cost'])<=best_cost+1e-7]
+            best=next((r for r in ties if r['source']=='CURRENT_POLICY'),
+                      min(ties,key=lambda r:r['source']))
+            y=list(map(int,best['assignment']))
+            beta=np.asarray(best['beta'],float)
+            if len(y)!=c.n or beta.shape!=(c.n,) or not np.isfinite(beta).all():
                 raise ValueError(f'Invalid anchor {k}')
             from .anchored_core import slopes_from_reference
-            a={'assignment':assigned,'beta':np.asarray(best['beta'],float),
-               'slopes':slopes_from_reference(c,assigned,best['beta'])}
-            schedules=[]
-            seen=set()
+            slope_schedule=incumbent if incumbent is not None else y
+            anchor=dict(assignment=y,beta=beta,
+                slopes=slopes_from_reference(c,slope_schedule,beta),
+                source=best['source'])
+            schedules=[];seen=set()
             for r in anchors:
                 z=tuple(map(int,r['assignment']))
-                if z not in seen:
-                    seen.add(z); schedules.append(list(z))
+                if z not in seen:seen.add(z);schedules.append(list(z))
             for z in library.get(k,[]):
                 z=tuple(map(int,z))
-                if z not in seen:
-                    seen.add(z); schedules.append(list(z))
-            if not schedules:
-                raise ValueError(f'Empty competitor library for {k}')
-            global_rows=[index[int(i)] for i in c.case_ids]
-            for z in schedules:
-                evaluate(c,z,c.actual)
-            out.append({'component':c,'key':k,'rows':np.asarray(global_rows,int),
-                        'anchor':a,'schedules':schedules,
-                        'oracle_cost':float(record['oracle_cost'])})
+                if z not in seen:seen.add(z);schedules.append(list(z))
+            for z in schedules:evaluate(c,z,c.actual)
+            out.append(dict(component=c,key=k,rows=rows,anchor=anchor,
+                schedules=schedules,oracle_cost=float(record['oracle_cost'])))
     return out
 
 
@@ -66,7 +77,7 @@ def restricted_value(blocks, X, booked, w, alpha, h, gamma, lam=0.):
     from .planner import display_and_duration
     _,pred=display_and_duration(X @ np.asarray(w,float), booked, alpha, h)
     loss=sum(anchored_score(b['component'],b['anchor'],b['schedules'],
-                            pred[b['rows']],b['oracle_cost'],gamma,exact=True)
+                            pred[b['rows']],b['oracle_cost'],gamma,exact=False)
              for b in blocks)
     return loss/len(booked)+lam*float(np.abs(np.asarray(w)[1:]).sum())
 
@@ -133,8 +144,7 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
                 z=np.asarray(assignment,int)
                 counts_z=np.bincount(z,minlength=c.k)
                 opened=counts_z>0
-                from .anchored_core import slopes_from_reference
-                slope=slopes_from_reference(c,z,a['beta'])
+                slope=a['slopes']  # Match routine fixed-slope separation exactly.
                 # q_s(z,d)=30*U + sum_j s_j [sum_i(d_i+30)x_ij-510*u_j]
                 affine=TURN*int(opened.sum())
                 affine+=float(np.dot(slope,TURN*counts_z-(TURN+CAP)*opened))

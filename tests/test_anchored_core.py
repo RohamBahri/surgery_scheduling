@@ -176,3 +176,119 @@ def test_component_preparation_resolves_key_and_retains_all_case_rows():
     assert blocks[0]['key'] == key(c)
     np.testing.assert_array_equal(blocks[0]['rows'], np.arange(c.n))
     assert blocks[0]['schedules'] == [z]
+
+
+def test_single_feasible_schedule_lock_even_with_high_overtime():
+    from surgery.anchored_training import locked, unique_schedule
+    c=component()
+    c.allowed=((0,),(1,))
+    c.booked[:]=600.
+    assert unique_schedule(c)
+    assert locked(c,.8,30.)
+    c.allowed=((0,1),(1,))
+    assert not unique_schedule(c)
+
+
+def test_single_case_required_day_forces_one_slot():
+    from surgery.anchored_training import unique_schedule
+    c=Week('TGH','2012-01-02',((0,'A'),(1,'B'),(0,'C')),
+        np.array([10]),('S1',),np.array([0]),np.array([0]),
+        ((0,1),),((0,),),np.array([700.]),np.array([680.]),()).validate()
+    assert unique_schedule(c)
+    c.allowed=((0,1,2),)
+    assert not unique_schedule(c)
+
+
+def test_current_policy_wins_equal_cost_reference_ties():
+    from surgery.anchored_master import prepare_components, restricted_value
+    from surgery.anchored_core import key, anchored_score, slopes_from_reference
+    c=component();z=c.original.astype(int).tolist()
+    recorded=evaluate(c,z,c.actual)['cost']
+    past={'source':'BOOKED','type':'shared-policy','assignment':z,
+          'beta':c.booked.tolist(),'realized_cost':recorded,
+          'predicted_cost':evaluate(c,z,c.booked)['cost']}
+    refs={key(c):{'complete':True,'references':[past],'oracle_cost':recorded}}
+    current_beta=c.booked+np.array([5.,-7.,12.,0.])
+    incumbent={key(c):{'complete':True,'assignment':z,
+        'realized_cost':recorded,'predicted_cost':evaluate(c,z,current_beta)['cost']}}
+    idx={int(cid):i for i,cid in enumerate(c.case_ids)}
+    blocks=prepare_components([c],idx,refs,{},current=incumbent,
+                               current_duration=current_beta)
+    b=blocks[0]
+    assert b['anchor']['source']=='CURRENT_POLICY'
+    np.testing.assert_allclose(b['anchor']['beta'],current_beta)
+    assert z in b['schedules']
+    np.testing.assert_allclose(b['anchor']['slopes'],
+                               slopes_from_reference(c,z,current_beta))
+    X=np.column_stack([np.ones(c.n),np.arange(c.n)])
+    w=np.array([10.,2.])
+    from surgery.planner import display_and_duration
+    _,d=display_and_duration(X@w,c.booked,.8,30.)
+    expected=anchored_score(c,b['anchor'],b['schedules'],d,recorded,2.,exact=False)
+    assert restricted_value(blocks,X,c.booked,w,.8,30.,2.)==pytest.approx(expected/c.n)
+
+
+def test_strictly_better_reference_beats_current_and_uses_incumbent_slopes():
+    from surgery.anchored_master import prepare_components
+    from surgery.anchored_core import key, slopes_from_reference
+    c=component()
+    schedules=[[i,j,k,l] for i in (0,1) for j in (0,1)
+               for k in (0,1) for l in (0,1)]
+    options=sorted((evaluate(c,z,c.actual)['cost'],z) for z in schedules)
+    best=options[0]; worst=options[-1]
+    assert worst[0]>best[0]
+    beta=c.booked+np.array([20.,-10.,4.,10.])
+    refs={key(c):{'complete':True,'oracle_cost':best[0],
+       'references':[{'source':'BOX_CLIP','beta':beta.tolist(),
+          'assignment':best[1],'realized_cost':best[0],
+          'predicted_cost':evaluate(c,best[1],beta)['cost']}]}}
+    curr={key(c):{'complete':True,'assignment':worst[1],
+         'realized_cost':worst[0],
+         'predicted_cost':evaluate(c,worst[1],c.booked)['cost']}}
+    idx={int(cid):i for i,cid in enumerate(c.case_ids)}
+    b=prepare_components([c],idx,refs,{},current=curr,
+                         current_duration=c.booked)[0]
+    assert b['anchor']['source']=='BOX_CLIP'
+    assert b['anchor']['assignment']==best[1]
+    np.testing.assert_allclose(b['anchor']['slopes'],
+            slopes_from_reference(c,worst[1],beta))
+
+
+def test_deployed_planner_cache_is_duration_keyed(tmp_path,monkeypatch):
+    import surgery.anchored_training as training
+    c=component()
+    count=[0]
+    def fake_deployed(week,d,**kwargs):
+        count[0]+=1
+        z=week.original.astype(int).tolist()
+        return {'complete':True,'assignment':z,'realized_cost':
+                evaluate(week,z,week.actual)['cost'],
+                'predicted_cost':evaluate(week,z,d)['cost']}
+    monkeypatch.setattr(training,'deployed',fake_deployed)
+    X=np.column_stack([np.ones(c.n),np.arange(c.n)])
+    idx={int(cid):i for i,cid in enumerate(c.case_ids)}
+    for name in ('current_0','trial_0','current_1'):
+        ans=training.verify_policy(tmp_path,name,[c],idx,X,c.booked,
+                                   np.array([2.,1.]),.8,30.,workers=1)
+        assert all(v['complete'] for v in ans.values())
+    assert count[0]==1
+    assert len(list(tmp_path.glob('anchored_verify_*.json')))==1
+
+
+def test_fixed_slope_separation_closes_its_own_learning_cuts(tmp_path):
+    pytest.importorskip('gurobipy')
+    from surgery.anchored_training import enrich_cuts
+    from surgery.anchored_core import key, slopes_from_reference
+    c=component();a=c.original.astype(int).tolist()
+    anchor={'assignment':a,'beta':c.booked,
+            'slopes':slopes_from_reference(c,a,c.booked)}
+    b={'component':c,'key':key(c),'rows':np.arange(c.n),
+       'anchor':anchor,'schedules':[a],
+       'oracle_cost':evaluate(c,a,c.actual)['cost']}
+    lib={}
+    out=enrich_cuts(tmp_path,'check',[b],c.booked,2.,lib,
+                    seconds=30.,threads=1,workers=1)
+    assert out['closed']==1 and out['unresolved']==0
+    assert out['max_certified_cut_gap']<=1e-5
+    assert out['components']==1
+    assert lib[key(c)]
