@@ -12,6 +12,44 @@ from .anchored_core import OVER, TURN, CAP, fixed_slope_lower, phi
 from .weekly_planner import evaluate, solve_week, _model, _cost, _assignment
 
 
+def reconcile_maximization_bounds(checked, solver_objective, solver_bound):
+    """Audit floating-point incumbent reconstruction against a MAX dual bound.
+
+    Gurobi's floating-point ObjBound can differ slightly from an independently
+    reconstructed feasible cost. The same tolerance used for reconstruction
+    must be used for the bound consistency check; otherwise valid solves may
+    crash on differences of 1e-6. Never conceal material disagreement or
+    label it certified: return an invalid audit and no usable upper bound.
+    """
+    checked=float(checked)
+    incumbent=float(solver_objective)
+    dual=float(solver_bound)
+    values=(checked,incumbent,dual)
+    if not all(np.isfinite(values)):
+        return {'valid':False,'reason':'nonfinite_objective_or_bound',
+                'checked':checked,'solver_objective':incumbent,
+                'raw_dual_bound':dual,'upper':None}
+    tolerance=max(0.02,2e-6*max(abs(checked),abs(incumbent),abs(dual)))
+    reconstruction_error=checked-incumbent
+    raw_bound_shortfall=max(0.,checked-dual)
+    audit={'valid':True,'checked':checked,'solver_objective':incumbent,
+           'raw_dual_bound':dual,'objective_reconstruction_error':reconstruction_error,
+           'raw_dual_bound_shortfall':raw_bound_shortfall,
+           'numerical_tolerance':tolerance}
+    if abs(reconstruction_error)>tolerance:
+        audit.update(valid=False,reason='objective_reconstruction_mismatch',
+                     upper=None)
+    elif raw_bound_shortfall>tolerance:
+        audit.update(valid=False,reason='material_dual_bound_violation',
+                     upper=None)
+    else:
+        upper=max(dual,checked,incumbent)
+        audit.update(reason='numerically_reconciled' if
+                     raw_bound_shortfall>1e-6 else 'consistent',
+                     upper=upper,dual_adjustment=upper-dual)
+    return audit
+
+
 def separate(component, d, beta, gamma, *, slopes=None, exact=False,
              seconds=120., threads=1):
     """Max J(z;actual)-gamma*T(z;d), including primary room opening.
@@ -82,14 +120,20 @@ def separate(component, d, beta, gamma, *, slopes=None, exact=False,
         slope=np.array([OVER*(v.X>.5) for v in high]) if exact else slopes
         checked=(evaluate(component,z,component.actual)['cost']
                  -gamma*fixed_slope_lower(component,z,d,slope))
-        if abs(checked-m.ObjVal)>max(0.02,2e-6*abs(m.ObjVal)):
-            raise AssertionError(f'Oracle objective reconstruction differs: {checked} vs {m.ObjVal}')
-        upper=float(m.ObjBound)
-        if upper+1e-6<checked:
-            raise AssertionError('Maximization dual bound invalid')
-        return {'complete':bool(m.Status==GRB.OPTIMAL),'status':str(m.Status),
+        audit=reconcile_maximization_bounds(checked,m.ObjVal,m.ObjBound)
+        if not audit['valid']:
+            # Keep the independently reconstructed feasible assignment,
+            # but NEVER issue a certificate or a usable upper bound.
+            # Training records this result as unresolved and can resume.
+            return {'complete':False,'status':'NUMERICAL_AUDIT_FAILED',
+                    'seconds':time.monotonic()-start,'assignment':z,
+                    'slopes':slope.tolist(),'lower':checked,'upper':None,
+                    'numerical_audit':audit}
+        return {'complete':bool(m.Status==GRB.OPTIMAL),
+                'status':str(m.Status),
                 'seconds':time.monotonic()-start,'assignment':z,
-                'slopes':slope.tolist(),'lower':checked,'upper':max(upper,checked)}
+                'slopes':slope.tolist(),'lower':checked,
+                'upper':audit['upper'],'numerical_audit':audit}
     finally:
         m.dispose()
 

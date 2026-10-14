@@ -117,6 +117,57 @@ experiment, not a direct standalone comparison. This bug-fix commit does
 **not** modify proximal coefficients, stopping heuristics or response
 regime statistics; such changes require a separately fingerprinted run.
 
+## Recovery from the Oct 14 interrupted extended-budget experiment
+
+The extended-budget TGH run using 15 outer iterations, 20 pDCA steps,
+three cut rounds, and exact-separation batch 192 reached **9.79714059
+verified training regret per case** after four accepted updates. It then
+stopped in outer iteration 5 because the former oracle accepted up to 0.02
+absolute objective-reconstruction error but required the reconstructed
+objective to lie below Gurobi's dual bound to within only 1e-6.
+
+The revised oracle audits `checked`, `m.ObjVal`, and `m.ObjBound`
+against the **same absolute/relative numeric tolerance**. A small floating
+discrepancy is explicitly reported and the upper bound is reconciled to
+the larger of the three values. A material discrepancy returns an
+**uncertified** result with no usable upper bound, while still preserving
+any valid feasible assignment. These flags are saved in the exact
+separation checkpoint. This is a floating-point solver certificate, not
+a claim of interval-arithmetic rigor.
+
+Do **not** restart reference generation or delete the old directory.
+For the specific interrupted experiment whose archived
+`trainer_source_sha256` equals
+`db51063aaaa62a4e7c17e4a76dd04706768a4848dcaf71d8a37a21e9a307c552`,
+run the usual train command with the **same arguments** and add
+`--resume-oracle-fix`. This one-time flag permits migration only when
+the old source SHA is exactly allowlisted, the training state is
+incomplete, and **all other saved fingerprints and hyperparameters**
+match. The migration is recorded in
+`anchored_source_migration.json`; no existing accepted coefficient,
+reference, cut, or deployment-verification checkpoint is modified.
+Existing completed separation components are reused, and the remaining
+selected components are recomputed.
+
+```bash
+OUT=artifacts/anchored_TGH_extended
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+caffeinate -i python3.14 run_weekly_anchored.py \
+  data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --artifacts artifacts/weekly_rich_v2 \
+  --gap-model artifacts/weekly_gap_v1/gap_progress.json \
+  --output "$OUT" --site TGH --stage train \
+  --max-outer 15 --iterations 20 --closure-rounds 3 \
+  --exact-sep-batch 192 --workers 15 --threads 1 \
+  --seconds 300 --sep-seconds 90 --master-seconds 300 \
+  --resume-oracle-fix
+```
+
+If the existing artifact directory uses a different code digest, a
+different feature matrix, different baseline policies, or different
+hyperparameters, migration intentionally fails. Start a newly
+fingerprinted experiment rather than bypassing reproducibility checks.
+
 ## Warm starting and reproducibility
 
 By default the learner starts from the frozen CASE coefficients, so

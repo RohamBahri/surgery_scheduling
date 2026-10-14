@@ -26,6 +26,13 @@ from surgery.anchored_core import key
 from surgery.anchored_master import prepare_components
 from surgery.anchored_oracles import certified_bound
 
+# Exact pre-fix code digest from the interrupted TGH extended-budget run.
+# This allowlist is intentionally narrow: only this audited maintenance change
+# may migrate saved settings while keeping all mathematical hyperparameters.
+ORACLE_NUMERIC_FIX_PREDECESSOR_SHA = (
+    'db51063aaaa62a4e7c17e4a76dd04706768a4848dcaf71d8a37a21e9a307c552'
+)
+
 SOURCE_FILES=('run_weekly_anchored.py','surgery/anchored_core.py',
               'surgery/anchored_oracles.py','surgery/anchored_master.py',
               'surgery/anchored_training.py')
@@ -100,9 +107,43 @@ def initialize(args):
     args.output.mkdir(parents=True,exist_ok=True)
     path=args.output/'anchored_settings.json'
     if path.exists():
-        if json.loads(path.read_text())!=ident:
-            raise ValueError('Anchored experiment code/data/model/settings changed. Use a new output directory.')
-    else: save_json(path,ident)
+        previous=json.loads(path.read_text())
+        if previous!=ident:
+            safe_migration=(
+                args.resume_oracle_fix
+                and previous.get('trainer_source_sha256')
+                    ==ORACLE_NUMERIC_FIX_PREDECESSOR_SHA
+                and set(previous)==set(ident)
+                and all(previous[k]==v for k,v in ident.items()
+                        if k!='trainer_source_sha256'))
+            if not safe_migration:
+                raise ValueError(
+                    'Anchored experiment code/data/model/settings changed. '
+                    'Use a new output directory; for the specific Oct 14 '
+                    'numeric-oracle fix, use --resume-oracle-fix only when '
+                    'all other saved settings match exactly.')
+            progress=args.output/'anchored_progress.json'
+            if not progress.exists():
+                raise ValueError('Oracle-fix migration requires an interrupted training checkpoint')
+            previous_progress=json.loads(progress.read_text())
+            if previous_progress.get('complete'):
+                raise ValueError('Do not migrate completed experiments')
+            audit={'reason':'numeric MAX dual-bound tolerance audit only',
+                   'previous_code_sha256':previous['trainer_source_sha256'],
+                   'resumed_code_sha256':ident['trainer_source_sha256'],
+                   'previous_outer':previous_progress.get('outer'),
+                   'accepted_steps_before_migration':len(previous_progress.get('accepted',[])),
+                   'previous_settings':previous,
+                   'new_settings':ident}
+            migration=args.output/'anchored_source_migration.json'
+            if migration.exists():
+                raise ValueError('Migration audit file already exists; refusing duplicate migration')
+            save_json(migration,audit)
+            save_json(path,ident)
+            print('Audited oracle numeric fix: resumed interrupted training '
+                  'without changing data, coefficients or hyperparameters',flush=True)
+    else:
+        save_json(path,ident)
     weeks=load_weeks(args.workbook,meta,'train')
     if args.site!='all':weeks=[w for w in weeks if w.group==args.site]
     # Restore row positions in frozen train matrix; NEVER refit, reorder or discard columns.
@@ -315,6 +356,8 @@ def main():
     p.add_argument('workbook',type=Path)
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--gap-model',type=Path)
+    p.add_argument('--resume-oracle-fix',action='store_true',
+                   help='One-time audited migration of the interrupted extended TGH checkpoint after numeric oracle fix')
     p.add_argument('--initial-policy',type=Path,
                    help='Optional completed 74-feature policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
     p.add_argument('--exact-sep-batch',type=int,default=96,

@@ -500,3 +500,32 @@ def test_certify_anchors_at_final_deployed_policy_on_realized_ties(
     assert any(not np.allclose(beta,c.booked[:len(beta)])
                for _,beta in anchors)
     assert (tmp_path/'anchored_bound_summary.json').exists()
+
+
+def test_oracle_max_bound_audit_accepts_roundoff_but_not_material_violations():
+    from surgery.anchored_oracles import reconcile_maximization_bounds
+    # Gurobi's MAX ObjBound can be marginally below a reconstructed feasible
+    # incumbent without indicating a mathematically invalid model.
+    a=reconcile_maximization_bounds(1020.000004, 1020.0, 1020.0)
+    assert a['valid'] and a['reason']=='numerically_reconciled'
+    assert a['upper'] >= a['checked']
+    assert 0. < a['dual_adjustment'] < a['numerical_tolerance']
+    b=reconcile_maximization_bounds(1020.0, 1020.0, 1020.25)
+    assert b['valid'] and b['upper']==1020.25
+    # Large disagreements are explicitly unresolved, never converted into
+    # a reported dual certificate or a silently inflated upper bound.
+    c=reconcile_maximization_bounds(1020.10, 1020.0, 1020.0)
+    assert not c['valid'] and c['upper'] is None
+    assert c['reason']=='objective_reconstruction_mismatch'
+    d=reconcile_maximization_bounds(1020.10, 1020.1, 1020.0)
+    assert not d['valid'] and d['upper'] is None
+    assert d['reason']=='material_dual_bound_violation'
+    e=reconcile_maximization_bounds(1020.0, float('nan'), 1020.1)
+    assert not e['valid'] and e['upper'] is None
+
+
+def test_extended_checkpoint_matches_one_time_resume_allowlist():
+    """The exact uploaded interrupted run hash is deliberately immutable."""
+    import run_weekly_anchored as runner
+    assert runner.ORACLE_NUMERIC_FIX_PREDECESSOR_SHA==(
+        'db51063aaaa62a4e7c17e4a76dd04706768a4848dcaf71d8a37a21e9a307c552')
