@@ -22,7 +22,8 @@ def test_research_shell_syntax_and_variant_parameters(tmp_path):
     env=dict(os.environ,PATH=str(tmp_path)+os.pathsep+os.environ['PATH'],
              OUT='artifacts/nonstandard_experiment',INITIAL='LASSO',
              RIDGE='0.001',REFERENCE_PENALTY='0.002',
-             LINE_FRACTIONS='1.5,1,0.5',TERMINAL_SEPARATION='1')
+             LINE_FRACTIONS='1.5,1,0.5',TERMINAL_SEPARATION='1',
+             TIGHT_SURROGATE='1')
     run=subprocess.run(['bash',str(script),'train','--dry-run'],env=env,
                        text=True,capture_output=True)
     assert run.returncode==0,run.stderr
@@ -31,6 +32,7 @@ def test_research_shell_syntax_and_variant_parameters(tmp_path):
     assert '--ridge 0.001' in text
     assert '--reference-penalty 0.002' in text
     assert '--terminal-separation' in text
+    assert '--tight-surrogate' in text
     assert 'artifacts/nonstandard_experiment' in text
     before=subprocess.run(['bash',str(script),'features','--dry-run'],env=env,
                           text=True,capture_output=True)
