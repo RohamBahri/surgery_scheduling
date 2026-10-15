@@ -155,6 +155,7 @@ class FeatureMetadata:
     reference_service: str
     history_pseudocount: int
     scaled_extra_features: int
+    history_mode: str
 
 
 class RichCorrectionEncoder:
@@ -175,9 +176,13 @@ class RichCorrectionEncoder:
         'pair': ('service', 'procedure', 'surgeon'),
     }
 
-    def __init__(self, pseudo: int = 20, log_lead_clip: int = 730):
+    def __init__(self, pseudo: int = 20, log_lead_clip: int = 730,
+                 history_mode: str = 'leave_date_out'):
         if pseudo <= 0:
             raise ValueError('Pseudo-count must be positive')
+        if history_mode not in ('leave_date_out','full_offline'):
+            raise ValueError('Unsupported history encoding mode')
+        self.history_mode=history_mode
         self.pseudo = int(pseudo)
         self.log_lead_clip = int(log_lead_clip)
 
@@ -317,7 +322,8 @@ class RichCorrectionEncoder:
             valid, lead = _median_lead(f,name,self.log_lead_clip)
             self.lead_medians[name] = float(np.median(lead[valid])) if valid.any() else 0.
         self._summaries(f)
-        extra = self._context(f,self.base.training_scores,train_mode=True)
+        extra = self._context(f,self.base.training_scores,
+                              train_mode=self.history_mode=='leave_date_out')
         self.extra_names = [name for name in extra if name not in REMOVED_SERVICE_FEATURES]
         mat = np.column_stack([extra[k] for k in self.extra_names]).astype(float)
         self.extra_mean = np.mean(mat,axis=0)
@@ -358,4 +364,5 @@ class RichCorrectionEncoder:
             reference_service=str(self.base.reference),
             history_pseudocount=self.pseudo,
             scaled_extra_features=int(self.extra_keep.sum()),
+            history_mode=self.history_mode,
         )
