@@ -80,6 +80,9 @@ case "$STAGE" in
        --max-terminal-restarts "$MAX_TERMINAL_RESTARTS")
     if [[ "${TERMINAL_SEPARATION:-0}" == "1" ]]; then cmd+=(--terminal-separation); fi
     if [[ "${TIGHT_SURROGATE:-0}" == "1" ]]; then cmd+=(--tight-surrogate); fi
+    if [[ "$STAGE" == references && -n "${REFERENCES_FROM:-}" ]]; then
+      cmd+=(--reuse-references-from "$REFERENCES_FROM")
+    fi
     ;;
 esac
 if [[ "$DRY" == 1 ]]; then printf 'DRY RUN: '; printf '%q ' "${cmd[@]}"; printf '\n'; exit 0; fi
