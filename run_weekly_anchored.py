@@ -173,14 +173,14 @@ def train(args):
 
 
 def _certificate_week(task):
-    blocks,duration,gamma,seconds,threads,report_gap=task
+    blocks,duration,gamma,seconds,threads,report_gap,verified=task
     from surgery.anchored_oracles import certified_bound
     result={}
     for b in blocks:
         c=b['component'];d=duration[b['rows']]
         result[b['key']]=certified_bound(c,b['anchor'],d,b['oracle_cost'],
                 None,gamma,seconds=seconds,threads=threads,exact=True,
-                report_gap=report_gap)
+                report_gap=report_gap,deployed_record=verified[b['key']])
     return result
 
 
@@ -211,7 +211,7 @@ def certify(args):
             continue
         c=b['component']
         groups.setdefault((c.group,c.monday),[]).append(b)
-    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap)
+    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap,incumbent)
            for v in groups.values()]
     def persist(rows):
         report.update(rows);save_json(path,report)
