@@ -125,7 +125,24 @@ response scenarios. It does NOT train one joint multi-scenario robust
 policy. The 2012 validation has already been examined; do not
 use repeated validation looks for unrestricted hyperparameter tuning.
 
-## 8. Remaining research directions
+## 8. Small-component case-level reachable-grid headroom
+
+After ANCHORED training, optional training-only finite-grid enumeration:
+
+    export OUT=artifacts/anchored_leakfix_v1
+    export MAX_FLEX_COMPONENTS=5
+    export MAX_FLEX_CASES=3
+    export GRID_LEVELS=3
+    bash run_research_v3.sh flexible-audit
+
+The script selects small, high-gap training components and evaluates
+every combination from the stated per-case reachable-duration GRID
+through the exact hash-tie deployment planner. The result distinguishes
+certified grid evaluations from timed-out candidates. This is an
+exhaustive FINITE GRID diagnostic only; it is NOT an optimal solution
+to the underlying continuous case-specific bilevel problem.
+
+## 9. Remaining research directions
 
 - Audit remaining supervised outcome encodings and proportional booked
   interactions; removing three columns does NOT prove all self-influence
