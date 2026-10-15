@@ -87,17 +87,26 @@ def prepare_components(weeks,index,refs,library,*,current=None,current_duration=
     return out
 
 
-def restricted_value(blocks, X, booked, w, alpha, h, gamma, lam=0.):
+def restricted_value(blocks, X, booked, w, alpha, h, gamma, lam=0., *, ridge=0., reference=0., reference_w=None):
     from .planner import display_and_duration
     _,pred=display_and_duration(X @ np.asarray(w,float), booked, alpha, h)
     loss=sum(anchored_score(b['component'],b['anchor'],b['cuts'],
                             pred[b['rows']],b['oracle_cost'],gamma,exact=True)
              for b in blocks)
-    return loss/len(booked)+lam*float(np.abs(np.asarray(w)[1:]).sum())
+    value=loss/len(booked)+lam*float(np.abs(np.asarray(w)[1:]).sum())
+    if ridge:
+        value += ridge/2*float(np.dot(w[1:],w[1:]))
+    if reference:
+        if reference_w is None:
+            raise ValueError('Reference policy required')
+        delta=X@(np.asarray(w,float)-np.asarray(reference_w,float))
+        value += reference/2*float(np.mean(delta**2))
+    return value
 
 
 def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
-                    prox=0.15,coef_prox=1e-5,seconds=300.,threads=4):
+                    prox=0.15,coef_prox=1e-5,seconds=300.,threads=4,
+                    *,ridge=0.,reference=0.,reference_w=None):
     """Solve one convex touching-majorizer QP with all original rich X columns.
 
     Optimizer epigraphs use the full (unclipped) score X@w, and therefore do
@@ -109,10 +118,12 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
     n,p=X.shape
     if n!=len(booked) or p!=len(at) or not np.isfinite(X).all():
         raise ValueError('Feature dimension or coefficients invalid')
-    if gamma<=0 or lam<0 or prox<=0 or coef_prox<=0:
+    if gamma<=0 or lam<0 or ridge<0 or reference<0 or prox<=0 or coef_prox<=0:
         raise ValueError('Invalid optimization parameters')
     if not np.allclose(X[:,0],1.):
         raise ValueError('First rich feature must be the intercept')
+    if reference and (reference_w is None or np.asarray(reference_w).shape!=(p,)):
+        raise ValueError('Reference policy dimension mismatch')
     raw0=X@at
     dc=[hinge_response(v,alpha,h) for v in booked]
     tangent=[f.affine_tangents(s) for f,s in zip(dc,raw0)]
@@ -174,8 +185,15 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
                 m.addConstr(v>=w[j]);m.addConstr(v>=-w[j]);l1+=v
         prox_score=gp.quicksum((score[i]-float(raw0[i]))**2 for i in range(n))
         prox_coef=gp.quicksum((w[j]-float(at[j]))**2 for j in range(p))
+        ridge_term=ridge/2*gp.quicksum(w[j]*w[j] for j in range(1,p))
+        reference_term=0.
+        if reference:
+            ref_scores=X@np.asarray(reference_w,float)
+            reference_term=reference/(2*n)*gp.quicksum(
+                (score[i]-float(ref_scores[i]))**2 for i in range(n))
         m.setObjective(total/n+lam*l1+prox/(2*n)*prox_score
-                       +coef_prox/2*prox_coef,GRB.MINIMIZE)
+                       +coef_prox/2*prox_coef+ridge_term+reference_term,
+                       GRB.MINIMIZE)
         m.optimize()
         if not m.SolCount:
             return {'complete':False,'status':str(m.Status),'seconds':time.monotonic()-start,
@@ -193,18 +211,22 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
 
 def pdca(blocks,X,booked,start,alpha,h,gamma,lam,
          iterations=10,prox=.15,coef_prox=1e-5,
-         seconds=300.,threads=4,tolerance=1e-5):
+         seconds=300.,threads=4,tolerance=1e-5,
+          *,ridge=0.,reference=0.,reference_w=None):
     current=np.asarray(start,float).copy()
     log=[]
-    previous=restricted_value(blocks,X,booked,current,alpha,h,gamma,lam)
+    previous=restricted_value(blocks,X,booked,current,alpha,h,gamma,lam,
+                              ridge=ridge,reference=reference,reference_w=reference_w)
     for k in range(iterations):
         answer=solve_majorizer(blocks,X,booked,current,alpha,h,gamma,lam,
-                               prox,coef_prox,seconds,threads)
+                               prox,coef_prox,seconds,threads,
+                               ridge=ridge,reference=reference,reference_w=reference_w)
         if answer['w'] is None:
             log.append({'iteration':k+1,**answer,'accepted':False})
             break
         candidate=np.asarray(answer['w'],float)
-        objective=restricted_value(blocks,X,booked,candidate,alpha,h,gamma,lam)
+        objective=restricted_value(blocks,X,booked,candidate,alpha,h,gamma,lam,
+                                   ridge=ridge,reference=reference,reference_w=reference_w)
         delta=float(np.sqrt(np.mean((X@(candidate-current))**2)))
         success=bool(objective<=previous+tolerance)
         log.append({'iteration':k+1,**{a:b for a,b in answer.items() if a!='w'},
