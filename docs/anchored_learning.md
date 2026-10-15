@@ -5,7 +5,7 @@
 This branch reuses the frozen UHN rich-feature matrices and read-only
 CASE, LASSO, VF, and VF-GAP coefficients. It DOES NOT reuse any old anchored
 learning checkpoints. The default NEW output directory is
-artifacts/anchored_ALL_hash_v1.
+artifacts/anchored_ALL_hash_v2.
 
 One shared 74-feature correction policy is trained on 18,705 cases across
 180 TGH, TWH-main, and TWH-day site-weeks, starting from frozen CASE weights.
