@@ -96,11 +96,12 @@ def read_cohort(workbook):
     return raw, attach_preoperative_dates(cohort, raw)
 
 
-def save_features(root, workbook, start, train_weeks, validation_weeks):
+def save_features(root, workbook, start, train_weeks, validation_weeks,
+                  history_mode='leave_date_out'):
     raw, cohort = read_cohort(workbook)
     train, valid, train_keys, validation_keys = windows(
         cohort, start, train_weeks, validation_weeks)
-    encoder = RichCorrectionEncoder()
+    encoder = RichCorrectionEncoder(history_mode=history_mode)
     matrices = {"train": encoder.fit_transform(train), "validation": encoder.transform(valid)}
     matrix_hashes = {}
     for part, frame in (("train", train), ("validation", valid)):
@@ -129,7 +130,8 @@ def save_features(root, workbook, start, train_weeks, validation_weeks):
         "feature_names": list(encoder.names),
         "split": "2011-2012 training period only; 2013 final test outcomes excluded from fitting/scoring",
         "anchor": "booked + X @ w; booked has fixed coefficient one",
-        "history": "original leave-one-date-out encoder unchanged"
+        "history": "base Encoder LODO unchanged; added history: "+history_mode,
+        "history_mode": history_mode
     }
     (root / "manifest.json").write_text(json.dumps(specification, indent=2) + "\n")
     print(f"Features: train {matrices['train'].shape}, validation {matrices['validation'].shape}", flush=True)
@@ -447,6 +449,9 @@ def main():
     parser.add_argument("--stage", choices=("features", "fit", "pilot", "adopt"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--start-week-index", type=int, default=0)
+    parser.add_argument("--history-mode", choices=("leave_date_out","full_offline"),
+                        default="leave_date_out",
+                        help="Offline historical aggregate scheme; requires fresh feature output")
     parser.add_argument("--train-weeks", type=int, default=60)
     parser.add_argument("--validation-weeks", type=int, default=18)
     parser.add_argument("--penalties", default="0.1,0.2,0.5,1,2,5,10")
@@ -469,7 +474,8 @@ def main():
             parser.error("Feature output must be a new empty directory")
         args.output.mkdir(parents=True, exist_ok=True)
         save_features(args.output, args.workbook, args.start_week_index,
-                      args.train_weeks, args.validation_weeks)
+                      args.train_weeks, args.validation_weeks,
+                      history_mode=args.history_mode)
     elif args.stage == "adopt":
         adopt_legacy_artifacts(args.output, args.workbook)
     elif args.stage == "fit":
