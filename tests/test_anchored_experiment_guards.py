@@ -69,7 +69,9 @@ def test_trial_with_unverified_deployment_is_rejected_not_accepted(tmp_path,monk
         all_closed=True,added=0,closed=1,unresolved=0,tested=1,untested=0))
     result=train.learn(tmp_path,[c],idx,data,refs,np.zeros(74),.8,30.,
                        outer=1,iterations=1,closure_rounds=1,workers=1)
-    assert result['complete']
+    assert result['complete'] is False
+    assert result['stopping']=='unresolved_candidate_deployment'
+    assert result['outer']==0
     assert not result['accepted']
     assert all(not row['verified'] for row in result['history'][0]['candidates'])
     assert all(flag for name,flag in calls if name.startswith('trial'))

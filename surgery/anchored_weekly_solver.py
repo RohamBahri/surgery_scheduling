@@ -18,9 +18,8 @@ import numpy as np
 from .weekly_planner import (
     CAPACITY, TURNOVER, OVERTIME, Result, _cost, _assignment,
     _feasible_duration, _objective_tolerance, _check_reconstruction,
-    evaluate, gp_sum_moves, solve_week as frozen_solve_week,
+    evaluate, gp_sum_moves,
 )
-from .weekly_data import Week
 
 
 def mandatory_slots(week):
@@ -64,7 +63,7 @@ def conservation_certificate(week, duration):
     original = float(evaluate(week, week.original, d)['cost'])
     # Absolute numerical tolerance only; never claim a demonstrably
     # non-optimal original schedule is an exact certificate.
-    numeric = 1e-7 * max(1., abs(lb), abs(original))
+    numeric = 1e-9 * max(1., abs(lb), abs(original))
     if original + numeric < lb:
         raise AssertionError('Conservation lower bound exceeds feasible cost')
     if original > lb + numeric:

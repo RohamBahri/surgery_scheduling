@@ -461,9 +461,17 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             gained=(sum(len(v) for v in state['library'].values())
                     >previous_library_size or improved_references>0)
             if not gained:
-                state['stopping']=('unresolved_candidate_deployment' if any(
-                    not x.get('verified',True) for x in trials)
-                    else 'no_verified_improvement_at_tested_steps')
+                if any(not x.get('verified',True) for x in trials):
+                    # A policy with unresolved candidate deployments cannot
+                    # be declared finished, and cannot reach validation.
+                    # Keep the same outer index so a later run with larger
+                    # solver budgets retries this search step.
+                    state['stopping']='unresolved_candidate_deployment'
+                    state['outer']=k
+                    state['complete']=False
+                    save_json(state_path,state)
+                    return state
+                state['stopping']='no_verified_improvement_at_tested_steps'
                 break
             print('No accepted policy; new competitor/reference information '
                   'permits another outer attempt from the unchanged incumbent',flush=True)
