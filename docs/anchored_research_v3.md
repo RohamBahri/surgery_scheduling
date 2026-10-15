@@ -67,6 +67,7 @@ Set a NEW OUT path and preserve ALL variables across stages:
     export LINE_FRACTIONS=1.5,1,0.5,0.25,0.125
     export TRUST_GROWTH=1.25
     export TERMINAL_SEPARATION=1
+    export TIGHT_SURROGATE=1
     export MAX_TERMINAL_RESTARTS=1
     bash run_research_v3.sh references
     bash run_research_v3.sh train
@@ -77,9 +78,14 @@ Terminal separation is over all active components and can be expensive.
 Each component retains a strict solver budget. Unresolved components
 are recorded explicitly. Search is bounded, not a convergence proof.
 
-The proposed mathematically tighter S-hat surrogate has NOT been
-implemented here: its proof and exact master/separation consistency
-must be independently reviewed first. Do not label this as S-hat training.
+TIGHT_SURROGATE=1 activates the independently implemented S-hat
+non-dominating-competitor restriction. Both the master library and
+the exact MILP separation oracle exclude competitors whose realized
+cost is strictly LOWER than the chosen anchor's cost. The anchor itself
+is retained. This is a separate experimental variant; its valid
+tie-safe regret bound is checked on enumerated toy schedules and the
+full certificate stage uses the same restriction. It is not claimed to
+converge globally or generalize automatically.
 
 ## 5. Ridge and LASSO anchoring ablation
 
@@ -151,8 +157,8 @@ to the underlying continuous case-specific bilevel problem.
   use paired calendar-week uncertainty, and preserve 2013 untouched.
 - Solve exact inducibility diagnostics on small high-regret components
   before expanding policy expressiveness.
-- Implement and separately prove S-hat only after valid new separation
-  and QP-master construction.
+- Audit the tight S-hat master/oracle ablation empirically and retain
+  its proof and enumeration checks with the final manuscript.
 - Develop joint behavior-robust training only after fixed-policy
   scenario sensitivity demonstrates sufficient value.
 - Preserve schedule-invariant, case-level recommendations and the
