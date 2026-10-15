@@ -122,3 +122,38 @@ def test_hash_sensitivity_scores_frozen_weights_without_retraining(tmp_path, mon
     assert len(attempts)==4*54
     assert json.loads(checkpoint.read_text())==model
     assert os.environ['SURGERY_ANCHORED_HASH_SEED']=='0'
+
+
+
+def test_reference_builder_prepares_reachable_box_policies(tmp_path, monkeypatch):
+    """Exercise real reference preparation before dispatching any Gurobi work.
+
+    A prior cleanup accidentally deleted the reachable() import, leaving all
+    unit tests green but crashing the first fresh references stage.
+    """
+    from surgery.planner import reachable
+    c = component()
+    n = c.n
+    X = np.zeros((n, 74), dtype=float)
+    X[:, 0] = 1.
+    data = {'X': X, 'booked': c.booked.copy(), 'actual': c.actual.copy(),
+            'case_id': c.case_ids.copy()}
+    index = {int(cid): pos for pos, cid in enumerate(c.case_ids)}
+    captured = []
+    def fake_week_task(task):
+        week, predictions, seconds, threads = task
+        captured.append((week, predictions))
+        return {key(part): {'complete': True} for part in week.components()}
+    monkeypatch.setattr(train, '_week_task', fake_week_task)
+    rows = train.build_reference_library(
+        tmp_path, [c], index, data, {'CASE': np.zeros(74)}, .8, 30.,
+        seconds=10., threads=1, workers=1)
+    assert len(captured) == 1
+    _, predictions = captured[0]
+    lo, hi = reachable(c.booked, .8, 30.)
+    np.testing.assert_allclose(predictions['BOX_CLIP'],
+                               np.clip(c.actual, lo, hi))
+    np.testing.assert_allclose(predictions['BOX_PAD'], hi)
+    np.testing.assert_allclose(predictions['CASE'], c.booked)
+    assert all(v['complete'] for v in rows.values())
+    assert len(rows) == len(c.components())
