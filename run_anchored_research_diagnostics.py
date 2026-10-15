@@ -58,7 +58,7 @@ def run(args):
     raw,cohort=read_cohort(args.workbook)
     tr,_,_,_=windows(cohort,meta['start_week_index'],
                       meta['train_weeks'],meta['validation_weeks'])
-    enc=RichCorrectionEncoder()
+    enc=RichCorrectionEncoder(history_mode=meta.get('history_mode','leave_date_out'))
     fit_X=enc.fit_transform(tr)
     if (enc.names!=meta['feature_names']
             or not np.array_equal(tr.case_id.to_numpy(int),frames['train']['case_id'])
@@ -70,6 +70,7 @@ def run(args):
         raise AssertionError('Service artifact columns still present')
     result=dict(
         feature_spec='service_feature_artifact_repair_v1',
+        history_mode=enc.history_mode,
         n_train=len(fit_X),p=len(names),
         removed_features=sorted(REMOVED_SERVICE_FEATURES),
         historical_columns={k:v for k,v in shifts.items()
