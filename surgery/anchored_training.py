@@ -17,7 +17,7 @@ from .anchored_core import (key, anchored_cut, anchored_score,
                             normalize_tangent, tangent_key, reference_fingerprint)
 from .anchored_master import pdca, prepare_components
 from .anchored_oracles import deployed, separate
-from .planner import display_and_duration
+from .planner import display_and_duration, reachable
 from .weekly_planner import evaluate
 from .weekly_training import save_json, asymmetric_error
 
