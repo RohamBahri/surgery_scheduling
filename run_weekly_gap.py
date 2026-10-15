@@ -147,7 +147,7 @@ def initialize(args):
         "matrix_sha256":meta["matrix_sha256"],
         "training_group_weeks":180,"validation_group_weeks":54,
         "features":meta["feature_names"],
-        "policy":"fixed booked anchor + 74 learned correction coefficients",
+        "policy":f"fixed booked anchor + {len(meta['feature_names'])} learned correction coefficients",
         "initial":args.initial,
         "initial_model_sha256":file_sha(args.artifacts/({
             "CASE":"model_case.json","LASSO":"lasso_policy.json",

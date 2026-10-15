@@ -81,7 +81,7 @@ def initialize(root, workbook, alpha, h, penalty, iterations, max_outer):
     meta, data = load_matrices(root)
     train = data["train"]
     if (len(train["booked"]) != 18705 or len(data["validation"]["booked"]) != 5779
-            or len(meta["feature_names"]) != 74):
+            or len(meta["feature_names"]) != train["X"].shape[1]):
         raise ValueError("Unexpected rich-feature cohort or dimension")
     if meta["feature_names"][0] != "intercept" or "booked" in meta["feature_names"]:
         raise ValueError("The booked anchor must be fixed")

@@ -57,7 +57,7 @@ def settings(args,meta,source,policies):
              'learner_variant':'schedule_specific_exact_tangent_adaptive_v3',
              'planner_tie_rule':'integer_hash_unique_v1',
              'hash_seed':args.hash_seed,
-            'policy':'booked + exact response(clip(X@w)), all 74 shared features',
+            'policy':f'booked + exact response(clip(X@w)), {len(meta["feature_names"])} shared features',
             'target':'verified empirical scheduling regret',
             'period':'2011-12 development training; no 2013 outcomes'}
 
@@ -71,8 +71,9 @@ def initialize(args):
             or not np.isclose(args.alpha,origin['alpha'])
             or not np.isclose(args.h,origin['h'])):
         raise ValueError('Workbook, X or behavioral response differs from frozen CASE experiment')
-    if len(meta['feature_names'])!=74 or meta['feature_names'][0]!='intercept':
-        raise ValueError('Require full original 74 rich-feature policy')
+    if (len(meta['feature_names']) != frames['train']['X'].shape[1]
+            or meta['feature_names'][0]!='intercept'):
+        raise ValueError('Policy features must exactly match frozen manifest')
     if len(frames['train']['case_id'])!=18705 or len(frames['validation']['case_id'])!=5779:
         raise ValueError('Unexpected train/validation cohort')
     filenames={'CASE':args.artifacts/'model_case.json',
@@ -89,7 +90,7 @@ def initialize(args):
         raise ValueError('VF baseline incomplete')
     if raw['LASSO'].get('features')!=meta['feature_names']:
         raise ValueError('LASSO feature mismatch')
-    if 'SEED' in raw and (raw['SEED'].get('feature_dimensions')!=74
+    if 'SEED' in raw and (raw['SEED'].get('feature_dimensions')!=len(meta['feature_names'])
                           or raw['SEED'].get('complete') is not True):
         raise ValueError('Warm-start policy must be completed, 74-feature model')
     if 'VF_GAP' in raw and (not raw['VF_GAP'].get('complete')
@@ -99,7 +100,7 @@ def initialize(args):
     policies={k:np.asarray(d['weights' if k=='LASSO' else 'w'],float)
               for k,d in raw.items()}
     for k,w in policies.items():
-        if w.shape!=(74,) or not np.isfinite(w).all():
+        if w.shape!=(len(meta['feature_names']),) or not np.isfinite(w).all():
             raise ValueError(f'Incomplete feature vector for {k}')
     ident=settings(args,meta,{k:sha(path) for k,path in filenames.items()},policies)
     args.output.mkdir(parents=True,exist_ok=True)
@@ -126,7 +127,7 @@ def initialize(args):
         raise AssertionError('Case count mismatch')
     if args.site=='all':
         full_X=data['X'].astype(float)
-        if (full_X.shape!=(18705,74) or not np.allclose(full_X[:,0],1.)
+        if (full_X.shape!=(18705,len(meta['feature_names'])) or not np.allclose(full_X[:,0],1.)
                 or np.any(np.std(full_X[:,1:],axis=0)<1e-10)):
             raise ValueError('Full 74-feature design is incomplete or contains dropped/constant features')
     if args.site=='all' and (len(weeks)!=180 or len(rows)!=18705):

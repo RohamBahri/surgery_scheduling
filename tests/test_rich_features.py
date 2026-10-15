@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from surgery.rich_features import RichCorrectionEncoder, _counts, _lookup
+from surgery.rich_features import RichCorrectionEncoder, _counts, _lookup, REMOVED_SERVICE_FEATURES
 from run_weekly_rich import windows
 
 
@@ -100,3 +100,16 @@ def test_window_selection_uses_no_2013_test_rows():
     assert set(tr.case_id).isdisjoint(val.case_id)
     assert len(tkeys) == 12 and len(vkeys) == 9
     assert tr.date.max() < val.date.min()
+
+
+def test_service_history_artifact_columns_removed_without_changing_base_encoder():
+    full=sample(days=8)
+    enc=RichCorrectionEncoder()
+    X=enc.fit_transform(full)
+    Xv=enc.transform(full.iloc[:8].copy())
+    assert REMOVED_SERVICE_FEATURES.isdisjoint(enc.names)
+    assert X.shape[1]==Xv.shape[1]==len(enc.names)
+    assert 'procedure_bias' in enc.names
+    assert 'surgeon_bias' in enc.names
+    assert 'proportional_booked_x_service' in enc.names
+    assert len(enc.names)>=10

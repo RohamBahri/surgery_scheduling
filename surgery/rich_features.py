@@ -28,6 +28,15 @@ from surgery.data import Encoder
 REQUIRED = ('case_id', 'date', 'group', 'service', 'procedure',
             'surgeon', 'booked', 'patient_type')
 AGG_COLS = ('n', 'err_sum', 'abs_sum', 'under_sum', 'ratio_sum')
+# These service-only supervised summaries become redundant with service dummies
+# at deployment, but leave-date-out training creates exploitable tiny variations.
+# Remove rather than replacing them with exactly collinear full-sample columns.
+REMOVED_SERVICE_FEATURES = frozenset({
+    'hist_service_mean_error',
+    'hist_service_mean_abs_error',
+    'hist_service_under_rate',
+})
+FEATURE_SPEC_VERSION = 'offline_service_artifact_repair_v1'
 
 
 def _date_series(values: pd.Series) -> pd.Series:
@@ -309,7 +318,7 @@ class RichCorrectionEncoder:
             self.lead_medians[name] = float(np.median(lead[valid])) if valid.any() else 0.
         self._summaries(f)
         extra = self._context(f,self.base.training_scores,train_mode=True)
-        self.extra_names = list(extra)
+        self.extra_names = [name for name in extra if name not in REMOVED_SERVICE_FEATURES]
         mat = np.column_stack([extra[k] for k in self.extra_names]).astype(float)
         self.extra_mean = np.mean(mat,axis=0)
         self.extra_std = np.std(mat,axis=0)
