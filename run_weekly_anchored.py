@@ -51,7 +51,12 @@ def settings(args,meta,source,policies):
             'baseline_models_sha256':source,
             'site':args.site,'gamma':args.gamma,
             'lambda_l1':args.lambda_l1,'prox':args.prox,
-            'coef_prox':args.coef_prox,'pDCA_iterations':args.iterations,
+            'coef_prox':args.coef_prox,'ridge':args.ridge,
+            'reference_penalty':args.reference_penalty,
+            'line_fractions':args.line_fractions,'trust_growth':args.trust_growth,
+            'terminal_separation':args.terminal_separation,
+            'max_terminal_restarts':args.max_terminal_restarts,
+            'pDCA_iterations':args.iterations,
             'closure_rounds':args.closure_rounds,'max_outer':args.max_outer,
              'exact_sep_batch':args.exact_sep_batch,
              'learner_variant':'schedule_specific_exact_tangent_adaptive_v3',
@@ -157,7 +162,13 @@ def train(args):
                 master_seconds=args.master_seconds,threads=args.threads,
                 workers=args.workers,master_threads=args.master_threads,
                 improvement=args.min_improvement,
-                 sep_batch=args.exact_sep_batch)
+                 sep_batch=args.exact_sep_batch,ridge=args.ridge,
+                 reference=args.reference_penalty,
+                 reference_w=policies['LASSO'] if args.reference_penalty else None,
+                 line_fractions=tuple(float(q) for q in args.line_fractions.split(',')),
+                 terminal_separation=args.terminal_separation,
+                 max_terminal_restarts=args.max_terminal_restarts,
+                 trust_growth=args.trust_growth)
     print('Anchored result:',state['stopping'],'accepted moves=',len(state['accepted']),flush=True)
 
 
@@ -416,7 +427,7 @@ def main():
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--gap-model',type=Path)
     p.add_argument('--initial-policy',type=Path,
-                   help='Optional completed 74-feature policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
+                   help='Optional completed feature-compatible policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
     p.add_argument('--exact-sep-batch',type=int,default=96,
                    help='Exact tangent separation components per round; 0 checks every active component')
     p.add_argument('--output',type=Path,required=True)
@@ -435,6 +446,12 @@ def main():
     p.add_argument('--lambda-l1',type=float,default=0.)
     p.add_argument('--prox',type=float,default=.15)
     p.add_argument('--coef-prox',type=float,default=1e-5)
+    p.add_argument('--ridge',type=float,default=0.,help='Coefficient L2 penalty')
+    p.add_argument('--reference-penalty',type=float,default=0.,help='Score distance to frozen LASSO')
+    p.add_argument('--line-fractions',default='1,0.5,0.25,0.125')
+    p.add_argument('--trust-growth',type=float,default=1.)
+    p.add_argument('--terminal-separation',action='store_true')
+    p.add_argument('--max-terminal-restarts',type=int,default=1)
     p.add_argument('--iterations',type=int,default=12)
     p.add_argument('--closure-rounds',type=int,default=2)
     p.add_argument('--max-outer',type=int,default=5)
@@ -449,11 +466,20 @@ def main():
     args=p.parse_args()
     if args.hash_seed < 0:
         p.error('hash seed must be nonnegative')
+    try:
+        fractions=tuple(float(q) for q in args.line_fractions.split(','))
+        if not fractions or any(not np.isfinite(q) or q<=0 for q in fractions):
+            raise ValueError()
+    except ValueError:
+        p.error('line-fractions must be comma-separated finite positive values')
     os.environ['SURGERY_ANCHORED_HASH_SEED'] = str(args.hash_seed)
     if (args.workers<1 or args.threads<1 or args.workers*args.threads>15
             or not 1<=args.master_threads<=15
             or args.gamma<1 or not 0<args.alpha<=1 or args.h<=0
-            or args.lambda_l1<0 or args.prox<=0 or args.coef_prox<=0
+            or args.lambda_l1<0 or args.ridge<0 or args.reference_penalty<0
+            or not np.isfinite(args.trust_growth) or args.trust_growth<1.
+            or args.max_terminal_restarts<0
+            or args.prox<=0 or args.coef_prox<=0
             or args.max_outer<1 or args.iterations<1 or args.closure_rounds<1
              or args.exact_sep_batch<0
             or min(args.seconds,args.sep_seconds,args.master_seconds)<=0):
