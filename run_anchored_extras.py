@@ -203,17 +203,106 @@ def audit_scenarios(args):
         save_json(args.output/'scenario_audit_summary.json',final)
     print(json.dumps(final,indent=2))
 
+
+def audit_flexible_grid(args):
+    """Exact finite-grid deployments for a FEW training-only small components.
+
+    Exhaustive only over the chosen discrete grid of reachable effective
+    durations, not globally optimal over the continuous behavioral box.
+    """
+    from itertools import product
+    from surgery.planner import reachable
+    from surgery.anchored_oracles import deployed
+    from surgery.weekly_planner import evaluate
+    from surgery.anchored_core import key as component_key
+    meta,frames,model,settings=_frozen_identity(args.artifacts,args.output)
+    refs_path=args.output/'anchored_references.json'
+    if not refs_path.exists():
+        raise ValueError('Certified training references required')
+    refs=json.loads(refs_path.read_text())
+    origin=json.loads((args.artifacts/'learning_settings.json').read_text())
+    alpha=float(origin['alpha']);h=float(origin['h'])
+    os.environ['SURGERY_ANCHORED_HASH_SEED']=str(settings['hash_seed'])
+    train=frames['train']
+    weeks=load_weeks(args.workbook,meta,'train')
+    indices={int(cid):i for i,cid in enumerate(train['case_id'])}
+    X=train['X'].astype(float)
+    w=np.asarray(model['w'],float)
+    _,predicted=display_and_duration(X@w,train['booked'],alpha,h)
+    choices=[]
+    for week in weeks:
+        for c in week.components():
+            if c.n>args.max_flex_cases or c.n<1:
+                continue
+            if not any(len(c.allowed[int(s)])>1 for s in c.surgeon):
+                continue
+            k=component_key(c)
+            if k not in refs or not refs[k].get('complete'):
+                continue
+            nominal_gap=evaluate(c,c.original,c.actual)['cost']-refs[k]['oracle_cost']
+            choices.append((nominal_gap,k,c))
+    choices=sorted(choices,key=lambda x:(-x[0],x[1]))[:args.max_flex_components]
+    identity=dict(feature_hash=meta['matrix_sha256'],
+                  anchored_sha=digest(args.output/'anchored_progress.json'),
+                  scenario=[alpha,h],max_cases=args.max_flex_cases,
+                  max_components=args.max_flex_components,
+                  grid_levels=args.grid_levels,hash_seed=settings['hash_seed'],
+                  claim='complete enumeration of finite reachable grid only')
+    idpath=args.output/'flexible_grid_identity.json'
+    _check_output_identity(idpath,identity)
+    path=args.output/'flexible_grid_audit.json'
+    report=json.loads(path.read_text()) if path.exists() else {}
+    for _,k,c in choices:
+        if report.get(k,{}).get('finished'):
+            continue
+        row=np.asarray([indices[int(cid)] for cid in c.case_ids],int)
+        current=deployed(c,predicted[row],seconds=args.seconds,threads=1)
+        low,high=reachable(c.booked,alpha,h)
+        candidate_levels=[
+            sorted(set(map(float,np.linspace(low[i],high[i],args.grid_levels))))
+            for i in range(c.n)]
+        best=float('inf');best_d=None
+        completed=0;unresolved=0
+        total=int(np.prod([len(v) for v in candidate_levels]))
+        for candidate in product(*candidate_levels):
+            d=np.asarray(candidate,float)
+            r=deployed(c,d,seconds=args.seconds,threads=1)
+            if not r['complete']:
+                unresolved+=1
+                continue
+            completed+=1
+            if r['realized_cost']<best:
+                best=float(r['realized_cost']);best_d=d.tolist()
+        record=dict(finished=True,cases=c.n,grid_size=total,
+                    exact_grid_enumeration=unresolved==0,
+                    certified_deployments=completed,unresolved_deployments=unresolved,
+                    current_deployment_complete=bool(current['complete']),
+                    current_realized_cost=current.get('realized_cost'),
+                    best_grid_realized_cost=None if best_d is None else best,
+                    best_grid_effective_durations=best_d,
+                    oracle_cost=refs[k]['oracle_cost'])
+        report[k]=record
+        save_json(path,report)
+        print(f'Grid audit {k}: {completed}/{total} certified',flush=True)
+    print(json.dumps(dict(components=len(report),
+                          fully_enumerated=sum(v['exact_grid_enumeration'] for v in report.values()),
+                          path=str(path)),indent=2))
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--stage',choices=('boosted-fit','boosted-evaluate','scenario-audit'),required=True)
+    p.add_argument('--stage',choices=('boosted-fit','boosted-evaluate','scenario-audit','flexible-audit'),required=True)
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--workbook',type=Path)
     p.add_argument('--workers',type=int,default=15)
     p.add_argument('--seconds',type=float,default=600.)
     p.add_argument('--scenarios',default='.5:30,.8:30,1:30,.8:60')
+    p.add_argument('--max-flex-components',type=int,default=5)
+    p.add_argument('--max-flex-cases',type=int,default=3)
+    p.add_argument('--grid-levels',type=int,default=3)
     args=p.parse_args()
-    if args.workers<1 or args.seconds<=0:
+    if (args.workers<1 or args.seconds<=0 or args.max_flex_components<1
+            or not 1<=args.max_flex_cases<=5 or not 2<=args.grid_levels<=5):
         p.error('Invalid worker count or wall time')
     if args.stage!='boosted-fit' and args.workbook is None:
         p.error('workbook is required for planning evaluation')
@@ -223,6 +312,8 @@ def main():
         fit_boosted(args)
     elif args.stage=='boosted-evaluate':
         evaluate_boosted(args)
+    elif args.stage=='flexible-audit':
+        audit_flexible_grid(args)
     else:
         audit_scenarios(args)
 if __name__=='__main__':
