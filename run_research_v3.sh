@@ -79,6 +79,7 @@ case "$STAGE" in
        --line-fractions "$LINE_FRACTIONS" --trust-growth "$TRUST_GROWTH"
        --max-terminal-restarts "$MAX_TERMINAL_RESTARTS")
     if [[ "${TERMINAL_SEPARATION:-0}" == "1" ]]; then cmd+=(--terminal-separation); fi
+    if [[ "${TIGHT_SURROGATE:-0}" == "1" ]]; then cmd+=(--tight-surrogate); fi
     ;;
 esac
 if [[ "$DRY" == 1 ]]; then printf 'DRY RUN: '; printf '%q ' "${cmd[@]}"; printf '\n'; exit 0; fi
