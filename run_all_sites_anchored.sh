@@ -24,6 +24,7 @@ ARTIFACTS='artifacts/weekly_rich_v2'
 GAP_MODEL='artifacts/weekly_gap_v1/gap_progress.json'
 OUT="${OUT:-artifacts/anchored_ALL_hash_v1}"
 PYTHON="${PYTHON:-python3.14}"
+WORKERS="${WORKERS:-15}"
 for required in run_weekly_anchored.py "$WORKBOOK" \
   "$ARTIFACTS/learning_settings.json" "$ARTIFACTS/model_case.json" \
   "$ARTIFACTS/lasso_policy.json" "$ARTIFACTS/vf_progress.json" "$GAP_MODEL"; do
@@ -54,7 +55,7 @@ ARGS=(
   --iterations 20
   --closure-rounds 3
   --exact-sep-batch 384
-  --workers 15
+  --workers "$WORKERS"
   --threads 1
   --master-threads 4
   --seconds 600
