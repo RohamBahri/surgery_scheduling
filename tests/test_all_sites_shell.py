@@ -11,7 +11,7 @@ import subprocess
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[1] / "run_all_sites_anchored.sh"
-STAGES = ("references", "train", "certify", "evaluate")
+STAGES = ("references", "train", "certify", "evaluate", "sensitivity")
 
 
 def make_executable(path, content):
@@ -59,7 +59,7 @@ def test_bash_syntax():
 @pytest.mark.parametrize("stage", STAGES)
 def test_all_stages_execute_with_frozen_flags(repo, stage):
     base, env = repo
-    out = base / "artifacts/anchored_ALL_clean_v1"
+    out = base / "artifacts/anchored_ALL_hash_v1"
     out.mkdir(parents=True)
     (out / "anchored_references.json").write_text("{}")
     (out / "anchored_progress.json").write_text('{"complete":true}')
@@ -70,8 +70,9 @@ def test_all_stages_execute_with_frozen_flags(repo, stage):
     expected = {
         "--artifacts": "artifacts/weekly_rich_v2",
         "--gap-model": "artifacts/weekly_gap_v1/gap_progress.json",
-        "--output": "artifacts/anchored_ALL_clean_v1",
+        "--output": "artifacts/anchored_ALL_hash_v1",
         "--site": "all", "--stage": stage,
+        "--hash-seed": "0",
         "--max-outer": "15", "--iterations": "20",
         "--closure-rounds": "3", "--exact-sep-batch": "384",
         "--workers": "15", "--threads": "1",
@@ -111,6 +112,7 @@ def test_rejects_wrong_branch(repo):
     ("train", "anchored_references.json"),
     ("certify", "anchored_progress.json"),
     ("evaluate", "anchored_progress.json"),
+    ("sensitivity", "anchored_progress.json"),
 ])
 def test_rejects_out_of_order_stages(repo, stage, prereq):
     base, env = repo

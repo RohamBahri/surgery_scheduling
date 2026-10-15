@@ -189,6 +189,7 @@ def test_single_feasible_schedule_lock_even_with_high_overtime():
     assert locked(c,.8,30.)
     c.allowed=((0,1),(1,))
     assert not unique_schedule(c)
+    assert not locked(c,.8,30.)
 
 
 def test_single_case_required_day_forces_one_slot():

@@ -17,8 +17,8 @@ from .anchored_core import (key, anchored_cut, anchored_score,
                             normalize_tangent, tangent_key, reference_fingerprint)
 from .anchored_master import pdca, prepare_components
 from .anchored_oracles import deployed, separate
-from .planner import display_and_duration, reachable
-from .weekly_planner import loads, evaluate
+from .planner import display_and_duration
+from .weekly_planner import evaluate
 from .weekly_training import save_json, asymmetric_error
 
 
@@ -44,10 +44,9 @@ def _week_task(task):
                 # deployed baselines. A time-limited optional MILP may supply
                 # its feasible incumbent; otherwise the original assignment
                 # is feasible by construction. Hindsight above MUST be exact.
-                status=str(chosen.get('status'))
-                if not (status.endswith('9') or 'TIME_LIMIT' in status):
-                    incomplete=f'{label}: {status}'
-                    break
+                # An optional reference needs only a feasible aspiration.
+                # Even an unfinished PRIMARY/HASH/UNIQUENESS solve may supply
+                # an incumbent; the original assignment is otherwise feasible.
                 z=chosen.get('assignment')
                 if z is None:
                     z=list(map(int,c.original))
@@ -141,16 +140,12 @@ def unique_schedule(component):
 
 
 def locked(component,alpha,h):
-    """Sufficient certificate of policy-independent deployed decisions/cost."""
-    if unique_schedule(component):
-        return True
-    original=component.original
-    rooms=set(map(int,original))
-    required_weekdays={int(day) for days in component.required_days for day in days}
-    if len(rooms)!=len(required_weekdays):
-        return False
-    _,upper=reachable(component.booked,alpha,h)
-    return bool(np.all(loads(component,original,upper)<=480.+1e-8))
+    """Only a unique feasible schedule is policy-independent under hash ties.
+
+    The old sufficient-load test relied on preferring performed room-days;
+    that preference is no longer part of deployment.
+    """
+    return unique_schedule(component)
 
 
 def _verify_week(task):

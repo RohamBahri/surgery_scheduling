@@ -5,20 +5,23 @@ experiment: reference proposals, actual deployment, training acceptance,
 regret certificates, and validation. The original weekly_planner is left
 byte-for-byte unchanged to preserve frozen historical feature matrices.
 
-The feasible integer schedules and the three-tier objective are identical to
-the original planner. Strengthening uses disaggregated x[i,j] <= used[j] arcs
-and fixes provably mandatory room-days open; it never restricts case schedules.
+The feasible integer schedules are unchanged, but deployment now uses a fixed
+history-independent hash, not movement and room-index tie stages. Valid
+strengthening adds x[i,j] <= used[j] and provably mandatory room-day openings.
 Time-limited solves remain uncertified.
 """
+import hashlib
 import math
+import os
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
 from .weekly_planner import (
     CAPACITY, TURNOVER, OVERTIME, Result, _cost, _assignment,
     _feasible_duration, _objective_tolerance, _check_reconstruction,
-    evaluate, gp_sum_moves,
+    evaluate, loads,
 )
 
 
@@ -52,7 +55,7 @@ def conservation_certificate(week, duration):
     sum_j max(CAPACITY-L_j,0)+OVERTIME*max(L_j-CAPACITY,0)
     >= max(K*CAPACITY-W,0)+OVERTIME*max(W-K*CAPACITY,0).
     A feasible original assignment matching the bound is globally optimal.
-    It is also the unique zero-move assignment.
+    A cost proof does not select a unique deployed hash-optimal assignment.
     """
     if len(mandatory_slots(week)) != week.k:
         return None
@@ -72,130 +75,242 @@ def conservation_certificate(week, duration):
                 value=original, bound=min(original,lb))
 
 
-def historical_wins_tie(week, durations, optimal_value):
-    """Sufficient, strictly interior certificate of zero-move tie optimality."""
-    orig = evaluate(week, week.original, durations)['cost']
-    eps = 1e-8 * max(1.,abs(float(optimal_value)))
-    return orig <= optimal_value + _objective_tolerance(optimal_value) - eps
+@dataclass
+class AnchoredResult(Result):
+    """Audit trail for the exact deployed selection, not merely its cost."""
+    primary_status: str = ""
+    hash_status: str = ""
+    uniqueness_status: str = ""
+    hash_seed: int = 0
+    hash_score: int | None = None
+    hash_unique: bool = False
+    primary_gurobi_seed: int | None = None
+    primary_configuration: str = ""
+    primary_attempts: tuple = ()
+    hash_attempts: tuple = ()
+    uniqueness_seconds: float = 0.
+    primary_tolerance: float = 0.
 
 
-def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=False):
-    """Minimize predicted cost; optionally balance peak load; then minimize
-    moved cases and choose the canonical case-wise assignment.
+def hash_weight(seed, case_id, weekday, room):
+    """Stable integer priority; neither performed assignments nor outcomes enter."""
+    message = f"{int(seed)}|{int(case_id)}|{int(weekday)}|{room}".encode("utf-8")
+    return 1 + int.from_bytes(hashlib.sha256(message).digest()[:8], "big") % (1 << 20)
 
-    The optional balance stage preserves the primary cost optimum. No realized
-    durations enter any stage. All stages must be certified for complete=True.
+
+def hash_score(week, assignment, seed=0):
+    return sum(hash_weight(seed, week.case_ids[i], *week.slots[int(j)])
+               for i, j in enumerate(assignment))
+
+
+def _hash_expression(week, x, seed):
+    import gurobipy as gp
+    return gp.quicksum(
+        hash_weight(seed, week.case_ids[i], *week.slots[j]) * x[i, j]
+        for i in range(week.n)
+        for j in week.allowed[int(week.surgeon[i])]
+    )
+
+
+def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
+               hash_seed=None):
+    """Certify primary cost, then a unique fixed-hash winner inside its tau set.
+
+    Uncertified time-limited primary, hash, or uniqueness solves cannot be
+    passed off as completed deployments. A bounded portfolio of Gurobi
+    configurations is used for difficult primary MIPs, without altering the
+    feasible set, duration data, or optimality requirements.
     """
     from gurobipy import GRB
-
-    if balance and not tie:
-        raise ValueError("Load balancing requires tie=True")
+    seed = int(os.getenv("SURGERY_ANCHORED_HASH_SEED", "0")
+               if hash_seed is None else hash_seed)
+    if seed < 0 or not math.isfinite(seconds) or seconds <= 0 or threads < 1:
+        raise ValueError("Invalid hash seed, time budget, or thread count")
     d = _feasible_duration(week, duration)
     week.validate()
     start = time.monotonic()
-    if not balance:
-        cert = conservation_certificate(week, d)
-        if cert is not None:
-            return Result(cert['assignment'], cert['value'], cert['bound'],
-                          True, 'ANALYTIC_CONSERVATION', time.monotonic()-start,
-                          True, True)
     if all(len(week.allowed[int(s)]) == 1 for s in week.surgeon):
-        a = [int(j) for j in week.original]
-        return Result(a, evaluate(week, a, d)["cost"], evaluate(week, a, d)["cost"],
-                      True, "ANALYTIC", 0., True, True)
+        z = list(map(int, week.original))
+        val = evaluate(week, z, d)["cost"]
+        return AnchoredResult(z, val, val, True, "ANALYTIC_UNIQUE", 0.,
+                              True, True, 0., 0.,
+                              primary_status="ANALYTIC_UNIQUE",
+                              hash_status="ANALYTIC_UNIQUE",
+                              uniqueness_status="UNIQUE_FEASIBLE",
+                              hash_seed=seed, hash_score=hash_score(week,z,seed),
+                              hash_unique=True)
 
+    cert = conservation_certificate(week, d)
     m, x, used, by_room = _model(week, seconds, threads)
+    attempts = []
+    hash_attempts = []
+    best_bound = None
+    primary_z = None
+    primary_cost = None
+    primary_opt = None
+    primary_status = hash_status = uniqueness_status = ""
+    config_name = ""
+    config_seed = None
+    selected = None
+    hash_best = None
+    hash_unique = False
+    uniqueness_elapsed = 0.
+    primary_elapsed = 0.
+    tol = 0.
+
+    def outcome(status, complete=False, primary_ok=False, tie_ok=False):
+        elapsed = time.monotonic() - start
+        z = selected if selected is not None else primary_z
+        checked = evaluate(week,z,d)["cost"] if z is not None else None
+        return AnchoredResult(
+            z, checked, best_bound, complete, status, elapsed,
+            primary_ok, tie_ok, primary_elapsed, max(0., elapsed-primary_elapsed),
+            primary_status=primary_status, hash_status=hash_status,
+            uniqueness_status=uniqueness_status, hash_seed=seed,
+            hash_score=hash_best, hash_unique=hash_unique,
+            primary_gurobi_seed=config_seed, primary_configuration=config_name,
+            primary_attempts=tuple(attempts),hash_attempts=tuple(hash_attempts),
+            uniqueness_seconds=uniqueness_elapsed, primary_tolerance=tol)
+
     try:
         primary = _cost(m, x, used, by_room, d, exact=False, name="plan")
         m.setObjective(primary, GRB.MINIMIZE)
-        m.optimize()
-        primary_elapsed = time.monotonic() - start
-        optimal = m.Status == GRB.OPTIMAL
-        bound = float(m.ObjBound) if m.SolCount or m.Status == GRB.TIME_LIMIT else None
-        a = _assignment(week, x) if m.SolCount else None
-        if a is None:
-            return Result(None, None, bound, False, str(m.Status), time.monotonic() - start,
-                          primary_seconds=primary_elapsed)
-        optimum = _check_reconstruction(m.ObjVal, evaluate(week, a, d)["cost"])
-        bound = min(bound, optimum) if bound is not None else None
-        if not optimal or not tie:
-            return Result(a, optimum, bound, optimal, str(m.Status),
-                          time.monotonic() - start, optimal, not tie and optimal,
-                          primary_seconds=primary_elapsed)
+        if cert is not None:
+            primary_opt = cert["value"]
+            primary_z = list(map(int, cert["assignment"]))
+            primary_cost = primary_opt
+            best_bound = cert["bound"]
+            primary_status, config_name = "ANALYTIC_CONSERVATION", "analytic"
+        else:
+            configs = (("default-0",0,0,-1,-1),
+                       ("focused-11",11,3,2,2),
+                       ("default-41",41,0,-1,-1),
+                       ("focused-73",73,3,2,2))
+            cap = float(seconds if not tie else .65*seconds)
+            for idx,(name,gseed,focus,cuts,symmetry) in enumerate(configs):
+                remaining = cap-(time.monotonic()-start)
+                if remaining <= .005:
+                    break
+                budget = (min(45., remaining*.30) if idx == 0
+                          else min(60., remaining*.45) if idx == 1
+                          else remaining*.50 if idx == 2 else remaining)
+                if idx:
+                    m.reset()
+                m.Params.Seed = gseed
+                m.Params.MIPFocus = focus
+                m.Params.Cuts = cuts
+                m.Params.Symmetry = symmetry
+                # Internal concurrent MIP shares the caller's thread allocation.
+                m.Params.ConcurrentMIP = 2 if idx and threads >= 2 else 1
+                m.Params.TimeLimit = max(.001, budget)
+                m.optimize()
+                attempts.append(dict(configuration=name, gurobi_seed=gseed,
+                                     status=str(m.Status), seconds=float(m.Runtime)))
+                if m.SolCount:
+                    z = _assignment(week,x)
+                    checked = _check_reconstruction(m.ObjVal,
+                                   evaluate(week,z,d)["cost"])
+                    if primary_cost is None or checked < primary_cost:
+                        primary_z,primary_cost = z,checked
+                if m.Status in (GRB.OPTIMAL,GRB.TIME_LIMIT,GRB.SUBOPTIMAL):
+                    bound = float(m.ObjBound)
+                    if math.isfinite(bound):
+                        best_bound = bound if best_bound is None else max(best_bound,bound)
+                if m.Status == GRB.OPTIMAL:
+                    primary_opt = float(m.ObjVal)
+                    primary_status = "OPTIMAL"
+                    config_name, config_seed = name, gseed
+                    break
+            if primary_opt is None:
+                primary_elapsed = time.monotonic()-start
+                primary_status = attempts[-1]["status"] if attempts else "NO_TIME"
+                return outcome("PRIMARY_UNRESOLVED")
+        primary_elapsed = time.monotonic()-start
+        if best_bound is not None:
+            # A numerical dual bound must not exceed a reconstructed feasible
+            # primal: this is the conservative input to the regret certificate.
+            best_bound = min(float(best_bound),float(primary_cost))
+        tol = _objective_tolerance(primary_opt)
+        if not tie:
+            selected = primary_z
+            return outcome("OPTIMAL_PRIMARY", True, True, True)
 
-        if not balance and historical_wins_tie(week, d, m.ObjVal):
-            z = list(map(int, week.original))
-            historical_cost = evaluate(week, z, d)['cost']
-            return Result(z, historical_cost, bound, True,
-                          'OPTIMAL_ZERO_MOVES', time.monotonic()-start,
-                          True, True, primary_elapsed, 0.)
-        m.addConstr(primary <= float(m.ObjVal) + _objective_tolerance(m.ObjVal))
-        if balance:
-            import gurobipy as gp
-            peak = m.addVar(lb=0., name="max_predicted_room_load")
-            for j, cases in enumerate(by_room):
-                total_load = (
-                    gp.quicksum((float(d[i]) + TURNOVER) * x[i, j] for i in cases)
-                    - TURNOVER * used[j]
-                )
-                m.addConstr(peak >= total_load)
-            m.setObjective(peak, GRB.MINIMIZE)
-            m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
+        m.addConstr(primary <= primary_opt+tol, name="primary_tie_set")
+        for ordinal in (0,1):
+            priority = _hash_expression(week,x,seed+ordinal)
+            m.setObjective(priority, GRB.MINIMIZE)
+            m.Params.Cutoff = GRB.INFINITY
+            m.Params.TimeLimit = max(.001, seconds-(time.monotonic()-start))
             m.optimize()
-            if m.SolCount:
-                a = _assignment(week, x)
-            if m.Status != GRB.OPTIMAL:
-                checked = evaluate(week, a, d)["cost"]
-                elapsed = time.monotonic() - start
-                return Result(a, checked, bound, False, "BALANCE_TIE_" + str(m.Status),
-                              elapsed, True, False,
-                              primary_elapsed, elapsed-primary_elapsed)
-            # Keep the optimized peak without allowing movement from its
-            # certified minimum (feasibility allowance for floating point).
-            m.addConstr(peak <= float(m.ObjVal) + .002)
-        moved = gp_sum_moves(x, week)
-        m.setObjective(moved, GRB.MINIMIZE)
-        m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
-        m.optimize()
-        if m.SolCount:
-            a = _assignment(week, x)
-        if m.Status != GRB.OPTIMAL:
-            checked = evaluate(week, a, d)["cost"]
-            elapsed = time.monotonic() - start
-            return Result(a, checked, bound, False, "MOVE_TIE_" + str(m.Status),
-                          elapsed, True, False, primary_elapsed, elapsed-primary_elapsed)
-        best_moves = int(round(m.ObjVal))
-        m.addConstr(moved <= best_moves)
-        # Exactly lexicographic over case_id-ordered slot assignments.
-        # Keep each integer score <1e6 to avoid Gurobi numeric instability.
-        base = week.k + 1
-        chunk_size = max(1, int(math.log(1e6) / math.log(base)))
-        canonical_complete = True
-        for first in range(0, week.n, chunk_size):
-            ids = list(range(first, min(week.n, first + chunk_size)))
-            canonical = sum(
-                base ** (len(ids) - pos - 1) * j * x[i, j]
-                for pos, i in enumerate(ids)
-                for j in week.allowed[int(week.surgeon[i])]
-            )
-            m.setObjective(canonical, GRB.MINIMIZE)
-            m.Params.TimeLimit = max(.001, seconds - (time.monotonic() - start))
+            hash_status = str(m.Status)
+            hash_attempts.append(dict(stage=ordinal,hash_seed=seed+ordinal,
+                                      status=hash_status, seconds=float(m.Runtime)))
+            if m.Status != GRB.OPTIMAL or not m.SolCount:
+                return outcome("HASH_UNRESOLVED",primary_ok=True)
+            selected = _assignment(week,x)
+            hash_best = hash_score(week,selected,seed+ordinal)
+            if abs(m.ObjVal-hash_best) > .25:
+                raise AssertionError("Reconstructed integer hash objective differs")
+            # Keep the optimum of every preceding hash as a subordinate
+            # constraint. Integer coefficients make best+0.5 a strict cutoff.
+            m.addConstr(priority <= hash_best, name=f"hash_tie_{ordinal}")
+            winner = list(selected)
+            exclude = m.addConstr(
+                sum(x[i,int(winner[i])] for i in range(week.n)) <= week.n-1,
+                name=f"exclude_hash_{ordinal}")
+            m.setObjective(priority, GRB.MINIMIZE)
+            m.Params.Cutoff = hash_best+.5
+            m.Params.TimeLimit = max(.001, seconds-(time.monotonic()-start))
+            t_unique = time.monotonic()
             m.optimize()
-            if m.SolCount:
-                a = _assignment(week, x)
-            if m.Status != GRB.OPTIMAL:
-                canonical_complete = False
-                break
-            for i in ids:
-                m.addConstr(x[i, int(a[i])] == 1)
-        checked = evaluate(week, a, d)["cost"]
-        if checked > optimum + 2 * _objective_tolerance(optimum):
-            raise AssertionError("Lexicographic tie changed the primary cost materially")
-        elapsed = time.monotonic() - start
-        return Result(a, checked, bound, canonical_complete,
-                      'OPTIMAL' if canonical_complete else 'CANONICAL_TIE_' + str(m.Status),
-                      elapsed, True, canonical_complete,
-                      primary_elapsed, elapsed-primary_elapsed)
+            uniqueness_elapsed += time.monotonic()-t_unique
+            hash_attempts[-1]['uniqueness_status'] = str(m.Status)
+            hash_attempts[-1]['uniqueness_seconds'] = time.monotonic()-t_unique
+            if m.Status in (GRB.INFEASIBLE,GRB.CUTOFF):
+                hash_unique = True
+                uniqueness_status = "UNIQUE_CERTIFIED"
+            elif m.Status == GRB.OPTIMAL and m.SolCount:
+                if m.ObjVal > hash_best+.5:
+                    hash_unique = True
+                    uniqueness_status = "UNIQUE_CERTIFIED"
+                else:
+                    uniqueness_status = "HASH_COLLISION_CERTIFIED"
+            else:
+                uniqueness_status = "UNIQUE_UNVERIFIED_"+str(m.Status)
+            m.remove(exclude)
+            m.update()
+            m.Params.Cutoff = GRB.INFINITY
+            selected = winner
+            if hash_unique:
+                if evaluate(week,selected,d)["cost"] > primary_opt+tol+1e-6:
+                    raise AssertionError("Deployed assignment exceeds primary tie tolerance")
+                return outcome("OPTIMAL",True,True,True)
+            if uniqueness_status.startswith("UNIQUE_UNVERIFIED"):
+                return outcome("HASH_UNIQUENESS_UNRESOLVED",primary_ok=True)
+
+        # Two actual score collisions: deterministic exact lexicographic
+        # fallback, restricted to the optima of both hash criteria.
+        base = week.k+1
+        chunk = max(1,int(math.log(1e6)/math.log(base)))
+        for first in range(0,week.n,chunk):
+            indices = list(range(first,min(week.n,first+chunk)))
+            lex = sum(base**(len(indices)-pos-1)*j*x[i,j]
+                      for pos,i in enumerate(indices)
+                      for j in week.allowed[int(week.surgeon[i])])
+            m.setObjective(lex,GRB.MINIMIZE)
+            m.Params.TimeLimit = max(.001,seconds-(time.monotonic()-start))
+            m.optimize()
+            if m.Status != GRB.OPTIMAL or not m.SolCount:
+                uniqueness_status = "LEX_FALLBACK_UNRESOLVED"
+                return outcome("HASH_COLLISION_FALLBACK_UNRESOLVED",primary_ok=True)
+            selected = _assignment(week,x)
+            for i in indices:
+                m.addConstr(x[i,int(selected[i])] == 1)
+        hash_unique = True
+        uniqueness_status = "LEX_FALLBACK_CERTIFIED"
+        if evaluate(week,selected,d)["cost"] > primary_opt+tol+1e-6:
+            raise AssertionError("Lex fallback exceeds primary tie tolerance")
+        return outcome("OPTIMAL",True,True,True)
     finally:
         m.dispose()
 
@@ -256,7 +371,8 @@ def evaluate_week(task):
             "cases", "abs_error", "asym_error", "pred_cost",
             "realized_cost", "oracle_cost", "regret", "vf_bound",
             "idle", "overtime", "moved_cases",
-            "room_days_over_720", "changed_days")}
+            "room_days_over_720", "room_days_over_960",
+            "room_days_over_1440", "changed_days")}
         success = oracle_ok
         full = dict(zip(map(int, week.case_ids), map(float, durations)))
         for c, o in zip(comps, oracle):
@@ -269,6 +385,7 @@ def evaluate_week(task):
                 break
             pred = evaluate(c, planned.assignment, d)
             real = evaluate(c, planned.assignment, c.actual)
+            realized_loads = loads(c,planned.assignment,c.actual)
             error = c.actual - d
             asymmetric = float(asymmetric_error(error).sum())
             regret = real["cost"] - o.value
@@ -281,6 +398,8 @@ def evaluate_week(task):
                 "regret": regret, "vf_bound": bound, "idle": real["idle"],
                 "overtime": real["overtime"], "moved_cases": real["moved_cases"],
                 "room_days_over_720": real["room_days_over_720"],
+                "room_days_over_960": int(np.count_nonzero(realized_loads>960.)),
+                "room_days_over_1440": int(np.count_nonzero(realized_loads>1440.)),
                 "changed_days": real["moved_weekdays"]
             }
             for field, val in quantities.items():

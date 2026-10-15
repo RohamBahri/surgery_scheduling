@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from .anchored_core import OVER, TURN, CAP, fixed_slope_lower, phi
-from .weekly_planner import evaluate, _cost, _assignment
+from .weekly_planner import evaluate, loads, _cost, _assignment
 from .anchored_weekly_solver import solve_week, _model, solve_adversary
 
 
@@ -144,17 +144,21 @@ def deployed(component, durations, *, seconds=300., threads=1,
     """Exact deterministic deployment (tie=True); optional hindsight primary."""
     planned=solve_week(component,durations,seconds=seconds,threads=threads,tie=not hindsight)
     if planned.assignment is None:
-        return {'complete':False,'status':planned.status,'assignment':None}
+        return {'complete':False,'status':planned.status,'assignment':None,
+                'planner':planned.as_dict()}
     a=list(map(int,planned.assignment))
     cp=evaluate(component,a,durations)['cost']
     real=evaluate(component,a,component.actual)
     ca=real['cost']
+    room_loads=loads(component,a,component.actual)
     return {'complete':bool(planned.complete),'status':planned.status,
-            'assignment':a,'predicted_cost':cp,'realized_cost':ca,
+            'planner':planned.as_dict(),'assignment':a,'predicted_cost':cp,'realized_cost':ca,
             'realized_overtime_minutes':real['overtime'],
             'realized_idle_minutes':real['idle'],
             'moved_cases':real['moved_cases'],
             'room_days_over_720':real['room_days_over_720'],
+            'room_days_over_960':int(np.count_nonzero(room_loads>960.)),
+            'room_days_over_1440':int(np.count_nonzero(room_loads>1440.)),
             'max_realized_room_load':real['max_room_load'],
             'primary_bound':planned.bound,'seconds':planned.seconds}
 
@@ -170,7 +174,7 @@ def certified_bound(component, anchor, duration, oracle_cost, deployed_cost,
     if plan.assignment is None or plan.bound is None or not np.isfinite(plan.bound):
         return {'certified':False,'reason':'no planner primal+dual'}
     if not plan.complete:
-        return {'certified':False,'reason':'planner lexicographic tie incomplete'}
+        return {'certified':False,'reason':'planner hash deployment incomplete'}
     oracle=separate(component,duration,anchor['beta'],gamma,
                     slopes=anchor['slopes'],exact=exact,seconds=seconds,threads=threads)
     if oracle['upper'] is None or not np.isfinite(oracle['upper']):

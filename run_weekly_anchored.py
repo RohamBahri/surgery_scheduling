@@ -10,6 +10,7 @@ No 2013 outcomes are read. No validation-based hyperparameter selection.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
@@ -54,6 +55,8 @@ def settings(args,meta,source,policies):
             'closure_rounds':args.closure_rounds,'max_outer':args.max_outer,
              'exact_sep_batch':args.exact_sep_batch,
              'learner_variant':'schedule_specific_exact_tangent_adaptive_v3',
+             'planner_tie_rule':'integer_hash_unique_v1',
+             'hash_seed':args.hash_seed,
             'policy':'booked + exact response(clip(X@w)), all 74 shared features',
             'target':'verified empirical scheduling regret',
             'period':'2011-12 development training; no 2013 outcomes'}
@@ -293,6 +296,8 @@ def evaluate(args):
             'realized_cost':float(g.realized_cost.sum()),
             'mae':float(g.abs_error.sum()/g.cases.sum()),
             'room_days_over_720':int(g.room_days_over_720.sum()),
+            'room_days_over_960':int(g.room_days_over_960.sum()),
+            'room_days_over_1440':int(g.room_days_over_1440.sum()),
             'overtime_minutes':float(g.overtime.sum()),
             'moved_cases':int(g.moved_cases.sum())}
     for (group,name),g in df.groupby(['group','method']):
@@ -317,6 +322,93 @@ def evaluate(args):
     print(json.dumps(summary,indent=2),flush=True)
 
 
+
+def sensitivity(args):
+    """Prespecified hash seeds 1--4; keep seed-0 training and validation frozen.
+
+    Separate resumable outputs; changing the selector here does not change
+    weights, fitted baselines, the training checkpoint, or the 2013 holdout.
+    """
+    if args.site!='all' or args.hash_seed!=0:
+        raise ValueError('Sensitivity uses the frozen all-site hash-seed-0 model')
+    meta,frames,_,_,_,policies,ident=initialize(args)
+    model_path=args.output/'anchored_progress.json'
+    model=json.loads(model_path.read_text())
+    if not model.get('complete') or model.get('training_cases')!=18705:
+        raise ValueError('Sensitivity requires a completed full-cohort model')
+    policies['ANCHORED']=np.asarray(model['w'],float)
+    split=args.sensitivity_split
+    frame=frames[split]
+    X=frame['X'].astype(float)
+    booked=frame['booked']
+    methods=(['ANCHORED'] if split=='train'
+             else ['BOOKED','CASE','LASSO','VF','VF_GAP','ANCHORED'])
+    predictions={}
+    for method in methods:
+        if method=='BOOKED':
+            predictions[method]=booked.copy()
+        else:
+            _,pred=display_and_duration(X@policies[method],booked,args.alpha,args.h)
+            predictions[method]=pred
+    weeks=load_weeks(args.workbook,meta,split)
+    expected_weeks=180 if split=='train' else 54
+    if len(weeks)!=expected_weeks:
+        raise ValueError('Sensitivity split lost site-weeks')
+    idx=check_week_cases(weeks,frame)
+    identity={'base_settings':ident,'model_sha256':sha(model_path),
+              'split':split,'hash_seeds':[1,2,3,4],'methods':methods}
+    marker=args.output/f'hash_sensitivity_{split}_identity.json'
+    if marker.exists():
+        if json.loads(marker.read_text())!=identity:
+            raise ValueError('Sensitivity identity mismatch: use a fresh run')
+    else:
+        save_json(marker,identity)
+    report={'status':'FROZEN-POLICY HASH SENSITIVITY',
+            'split':split,'seed0_deployment_is_the_primary_result':True,
+            'model_sha256':identity['model_sha256'],'methods':methods,'seeds':{}}
+    for seed in (1,2,3,4):
+        os.environ['SURGERY_ANCHORED_HASH_SEED']=str(seed)
+        path=args.output/f'hash_sensitivity_{split}_seed_{seed}.csv'
+        records={}
+        if path.exists():
+            for record in pd.read_csv(path).to_dict('records'):
+                records[(record['group'],record['monday'],record['method'])]=record
+        tasks=[]
+        for week in weeks:
+            keys=[(week.group,week.monday,method) for method in methods]
+            if all(records.get(k,{}).get('complete')==True for k in keys):
+                continue
+            for k in keys:records.pop(k,None)
+            rows=np.array([idx[int(cid)] for cid in week.case_ids],int)
+            tasks.append((week,{name:pred[rows] for name,pred in predictions.items()},
+                          args.seconds,args.threads))
+        def persist(rows):
+            for row in rows:
+                records[(row['group'],row['monday'],row['method'])]=row
+            temp=path.with_suffix('.tmp')
+            pd.DataFrame(list(records.values())).to_csv(temp,index=False)
+            temp.replace(path)
+        if args.workers==1:
+            for task in tasks:persist(_eval_week(task))
+        elif tasks:
+            with ProcessPoolExecutor(max_workers=min(args.workers,len(tasks)),
+                                     mp_context=mp.get_context('spawn')) as pool:
+                future=[pool.submit(_eval_week,t) for t in tasks]
+                for job in as_completed(future):persist(job.result())
+        df=pd.DataFrame(records.values())
+        if len(df)!=expected_weeks*len(methods) or not df.complete.eq(True).all():
+            raise RuntimeError(f'Seed {seed} incomplete on {split}; retry to resume')
+        report['seeds'][str(seed)]={
+            name:{'regret_per_case':float(g.regret.sum()/g.cases.sum()),
+                  'realized_cost':float(g.realized_cost.sum()),
+                  'room_days_over_960':int(g.room_days_over_960.sum()),
+                  'room_days_over_1440':int(g.room_days_over_1440.sum())}
+            for name,g in df.groupby('method')}
+        save_json(args.output/f'hash_sensitivity_{split}_summary.json',report)
+    os.environ['SURGERY_ANCHORED_HASH_SEED']='0'
+    print(json.dumps(report,indent=2),flush=True)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('workbook',type=Path)
@@ -327,7 +419,12 @@ def main():
     p.add_argument('--exact-sep-batch',type=int,default=96,
                    help='Exact tangent separation components per round; 0 checks every active component')
     p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--stage',choices=('references','train','certify','evaluate'),required=True)
+    p.add_argument('--stage',choices=('references','train','certify','evaluate','sensitivity'),required=True)
+    p.add_argument('--sensitivity-split',choices=('train','validation'),
+                   default='validation',
+                   help='Frozen-weight multi-hash analysis, never model selection')
+    p.add_argument('--hash-seed',type=int,default=0,
+                   help='Fixed deployment hash seed, recorded in run identity')
     p.add_argument('--report-gap',action='store_true',
                    help='Also solve primary GAP planner/adversary in --stage certify')
     p.add_argument('--site',choices=('all','TGH','TWH-main','TWH-day'),default='all')
@@ -349,6 +446,9 @@ def main():
     p.add_argument('--master-threads',type=int,default=4,
                    help='Gurobi threads for the sequential continuous master QP')
     args=p.parse_args()
+    if args.hash_seed < 0:
+        p.error('hash seed must be nonnegative')
+    os.environ['SURGERY_ANCHORED_HASH_SEED'] = str(args.hash_seed)
     if (args.workers<1 or args.threads<1 or args.workers*args.threads>15
             or not 1<=args.master_threads<=15
             or args.gamma<1 or not 0<args.alpha<=1 or args.h<=0
@@ -363,6 +463,7 @@ def main():
                                 args.seconds,args.threads,args.workers)
     elif args.stage=='train':train(args)
     elif args.stage=='certify':certify(args)
+    elif args.stage=='sensitivity':sensitivity(args)
     else:evaluate(args)
 
 if __name__=='__main__':main()

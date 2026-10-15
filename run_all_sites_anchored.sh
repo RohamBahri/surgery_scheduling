@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Clean shared-policy experiment across all three UHN room groups.
-# Reuses frozen rich features and baseline policies, never old anchored checkpoints.
+# Reuses frozen rich features and baseline policies, never old tie-rule checkpoints.
 set -euo pipefail
 usage() {
-  printf 'Usage: bash run_all_sites_anchored.sh {references|train|certify|evaluate} [--dry-run]\n' >&2
+  printf 'Usage: bash run_all_sites_anchored.sh {references|train|certify|evaluate|sensitivity} [--dry-run]\n' >&2
 }
 if [[ $# -lt 1 || $# -gt 2 ]]; then usage; exit 2; fi
 STAGE="$1"
-case "$STAGE" in references|train|certify|evaluate) ;; *) usage; exit 2 ;; esac
+case "$STAGE" in references|train|certify|evaluate|sensitivity) ;; *) usage; exit 2 ;; esac
 DRY_RUN=0
 if [[ $# -eq 2 ]]; then
   [[ "$2" == "--dry-run" ]] || { usage; exit 2; }
@@ -22,7 +22,7 @@ fi
 WORKBOOK='data/UHNOperating_RoomScheduling2011-2013.xlsx'
 ARTIFACTS='artifacts/weekly_rich_v2'
 GAP_MODEL='artifacts/weekly_gap_v1/gap_progress.json'
-OUT="${OUT:-artifacts/anchored_ALL_clean_v1}"
+OUT="${OUT:-artifacts/anchored_ALL_hash_v1}"
 PYTHON="${PYTHON:-python3.14}"
 for required in run_weekly_anchored.py "$WORKBOOK" \
   "$ARTIFACTS/learning_settings.json" "$ARTIFACTS/model_case.json" \
@@ -36,7 +36,7 @@ if [[ "$STAGE" == train && ! -f "$OUT/anchored_references.json" ]]; then
   echo 'Error: run references first.' >&2
   exit 2
 fi
-if [[ "$STAGE" == certify || "$STAGE" == evaluate ]]; then
+if [[ "$STAGE" == certify || "$STAGE" == evaluate || "$STAGE" == sensitivity ]]; then
   if [[ ! -f "$OUT/anchored_progress.json" ]]; then
     echo 'Error: run train first.' >&2
     exit 2
@@ -49,6 +49,7 @@ ARGS=(
   --output "$OUT"
   --site all
   --stage "$STAGE"
+  --hash-seed 0
   --max-outer 15
   --iterations 20
   --closure-rounds 3
@@ -76,7 +77,7 @@ if ! "$PYTHON" -c 'import gurobipy; import numpy; import pandas'; then
 fi
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 printf 'Stage: %s\nOutput: %s\n' "$STAGE" "$OUT"
-if [[ "$STAGE" == evaluate ]]; then
+if [[ "$STAGE" == evaluate || "$STAGE" == sensitivity ]]; then
   echo '2012 development validation only; 2013 holdout is untouched.'
 fi
 if command -v caffeinate >/dev/null 2>&1; then
