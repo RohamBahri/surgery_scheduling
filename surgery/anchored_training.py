@@ -200,12 +200,18 @@ def verify_policy(output,name,weeks,index,X,booked,w,alpha,h,
 
 def _sep_week(task):
     """Solve exact schedule-specific tangent maximization on chosen components."""
-    entries,duration,gamma,seconds,threads=task
+    if len(task)==5:
+        entries,duration,gamma,seconds,threads=task
+        tight_surrogate=False
+    else:
+        entries,duration,gamma,seconds,threads,tight_surrogate=task
     results={}
     for b in entries:
         c=b['component'];anchor=b['anchor']
         r=separate(c,duration[b['rows']],anchor['beta'],gamma,exact=True,
-                   seconds=seconds,threads=threads)
+                   seconds=seconds,threads=threads,
+                   min_realized_cost=(evaluate(c,anchor['assignment'],c.actual)['cost']
+                                      if tight_surrogate else None))
         results[b['key']]=r
     return results
 
@@ -224,7 +230,7 @@ def _separation_priority(block, current_duration, proposal_duration, gamma):
 
 def enrich_cuts(output,tag,blocks,duration,gamma,library,
                 seconds=90.,threads=1,workers=15,*,prior_duration=None,
-                batch=96,round_id=0):
+                batch=96,round_id=0,tight_surrogate=False):
     """Adaptive exact-tangent cut generation for the *training* loss.
 
     An exact Gurobi maximization is evaluated on a priority batch, not all
@@ -258,6 +264,7 @@ def enrich_cuts(output,tag,blocks,duration,gamma,library,
     path=output/f'anchored_exact_separation_{tag}.json'
     digest=hashlib.sha256()
     digest.update(np.ascontiguousarray(duration,dtype=np.float64).tobytes())
+    digest.update(b'TIGHT' if tight_surrogate else b'ORIGINAL')
     for b in sorted(selected,key=lambda b:b['key']):
         digest.update(b['key'].encode('utf8'))
         digest.update(reference_fingerprint(b['anchor']['beta']).encode('ascii'))
@@ -272,7 +279,7 @@ def enrich_cuts(output,tag,blocks,duration,gamma,library,
             continue
         c=b['component']
         groups.setdefault((c.group,c.monday),[]).append(b)
-    tasks=[(items,duration,gamma,seconds,threads) for items in groups.values()]
+    tasks=[(items,duration,gamma,seconds,threads,tight_surrogate) for items in groups.values()]
     def persist(answer):
         checkpoint.update(answer)
         save_json(path,doc)
@@ -330,7 +337,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
            master_threads=None,
           improvement=1e-4,sep_batch=96,ridge=0.,reference=0.,
           reference_w=None,line_fractions=(1.,.5,.25,.125),
-          terminal_separation=False,max_terminal_restarts=1,trust_growth=1.):
+          terminal_separation=False,max_terminal_restarts=1,trust_growth=1.,
+          tight_surrogate=False):
     """Full-cohort training with finite-budget outer search.
 
     Claims: fixed-library majorization and actual empirical-cost improvement
@@ -373,7 +381,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             raise AssertionError('Deployed training cost below certified hindsight optimum')
         _,current_duration=display_and_duration(X@w,booked,alpha,h)
         blocks=prepare_components(weeks,index,refs,state['library'],
-                                  current=incumbent,current_duration=current_duration)
+                                  current=incumbent,current_duration=current_duration,
+                                  tight_surrogate=tight_surrogate)
         blocks=[b for b in blocks if b['key'] not in excluded]
         if not blocks:raise RuntimeError('All components analytically locked: no learnable schedule changes')
         proposals=[]
@@ -393,7 +402,7 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             close=enrich_cuts(output,f'{k}_{cut_round}_{candidate_id}',blocks,dur,gamma,
                               state['library'],sep_seconds,threads,workers,
                               prior_duration=current_duration,batch=sep_batch,
-                              round_id=k*closure_rounds+cut_round)
+                              round_id=k*closure_rounds+cut_round,tight_surrogate=tight_surrogate)
             inner.append({'pdca':outcome['inner'],'adaptive_exact_tangent_separation':close,
                           'restricted_objective':outcome['restricted_objective']})
             save_json(state_path,state)
@@ -491,7 +500,7 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
                     np.ascontiguousarray(probe_duration,dtype=np.float64).tobytes()
                 ).hexdigest()[:12],blocks,probe_duration,gamma,state['library'],
                     sep_seconds,threads,workers,prior_duration=current_duration,
-                    batch=0,round_id=k)
+                    batch=0,round_id=k,tight_surrogate=tight_surrogate)
                 state['history'][-1]['terminal_separation']=terminal
             gained=(sum(len(v) for v in state['library'].values())>size_before_round
                     or improved_references>0)
@@ -522,5 +531,6 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
         (state['history'][-1].get('terminal_separation') or
          state['history'][-1]['inner'][-1]['adaptive_exact_tangent_separation']).get('all_closed',False))
     state['deployment_verified']=True
+    state['tight_surrogate']=bool(tight_surrogate)
     save_json(state_path,state)
     return state
