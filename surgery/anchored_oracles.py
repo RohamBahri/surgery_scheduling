@@ -52,7 +52,7 @@ def reconcile_maximization_bounds(checked, solver_objective, solver_bound):
 
 
 def separate(component, d, beta, gamma, *, slopes=None, exact=False,
-             seconds=120., threads=1):
+             seconds=120., threads=1, min_realized_cost=None):
     """Max J(z;actual)-gamma*T(z;d), including primary room opening.
 
     For exact=False, slopes[j] must be given for each physical room (0..2.75).
@@ -87,6 +87,11 @@ def separate(component, d, beta, gamma, *, slopes=None, exact=False,
     m,x,used,byroom=_model(component,seconds,threads)
     try:
         realized=_cost(m,x,used,byroom,component.actual,exact=True,name='anchor_actual')
+        if min_realized_cost is not None:
+            if not np.isfinite(min_realized_cost):
+                raise ValueError('Nonfinite realized-cost restriction')
+            m.addConstr(realized >= float(min_realized_cost)-1e-6,
+                        name='non_dominating_competitor')
         if not exact:
             lower=TURN*used.sum()+gp.quicksum(
                 float(slopes[j]) * (
@@ -165,7 +170,7 @@ def deployed(component, durations, *, seconds=300., threads=1,
 
 def certified_bound(component, anchor, duration, oracle_cost, deployed_cost,
                     gamma, *, seconds=300.,threads=1,exact=True,report_gap=False,
-                    deployed_record=None):
+                    deployed_record=None,tight_surrogate=False):
     """A rigorous tie-safe anchored upper bound, even with an incomplete MAX.
 
     A finite MAX dual upper bound is required; otherwise no claim is made.
@@ -208,7 +213,9 @@ def certified_bound(component, anchor, duration, oracle_cost, deployed_cost,
     if not plan.complete:
         return {'certified':False,'reason':'planner hash deployment incomplete'}
     oracle=separate(component,duration,anchor['beta'],gamma,
-                    slopes=anchor['slopes'],exact=exact,seconds=seconds,threads=threads)
+                    slopes=anchor['slopes'],exact=exact,seconds=seconds,threads=threads,
+                    min_realized_cost=(evaluate(component,anchor['assignment'],component.actual)['cost']
+                                       if tight_surrogate else None))
     if oracle['upper'] is None or not np.isfinite(oracle['upper']):
         return {'certified':False,'reason':'no separation dual','oracle':oracle}
     phi_anchor=phi(component,anchor['assignment'],duration)
