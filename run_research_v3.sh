@@ -3,12 +3,12 @@
 # Each distinct variant MUST have a distinct OUT; old hash-v2 outputs untouched.
 set -euo pipefail
 usage() {
-  echo "Usage: bash run_research_v3.sh {features|lasso|case|vf|gap|references|train|certify|evaluate|sensitivity|audit|boosted-fit|boosted-evaluate|scenario-audit} [--dry-run]" >&2
+  echo "Usage: bash run_research_v3.sh {features|lasso|case|vf|gap|references|train|certify|evaluate|sensitivity|audit|boosted-fit|boosted-evaluate|scenario-audit|flexible-audit} [--dry-run]" >&2
 }
 [[ $# -ge 1 && $# -le 2 ]] || { usage; exit 2; }
 STAGE="$1"; DRY=0
 case "$STAGE" in
-  features|lasso|case|vf|gap|references|train|certify|evaluate|sensitivity|audit|boosted-fit|boosted-evaluate|scenario-audit) ;;
+  features|lasso|case|vf|gap|references|train|certify|evaluate|sensitivity|audit|boosted-fit|boosted-evaluate|scenario-audit|flexible-audit) ;;
   *) usage; exit 2 ;;
 esac
 if [[ $# -eq 2 ]]; then [[ "$2" == "--dry-run" ]] || { usage; exit 2; }; DRY=1; fi
@@ -56,6 +56,13 @@ case "$STAGE" in
     cmd=("$PYTHON" run_anchored_extras.py --stage boosted-evaluate
        --artifacts "$ARTIFACTS" --output "$OUT" --workbook "$WORKBOOK"
        --workers "$WORKERS" --seconds 600);;
+  flexible-audit)
+    cmd=("$PYTHON" run_anchored_extras.py --stage flexible-audit
+       --artifacts "$ARTIFACTS" --output "$OUT" --workbook "$WORKBOOK"
+       --max-flex-components "${MAX_FLEX_COMPONENTS:-5}"
+       --max-flex-cases "${MAX_FLEX_CASES:-3}"
+       --grid-levels "${GRID_LEVELS:-3}"
+       --workers "$WORKERS" --seconds 90);;
   scenario-audit)
     cmd=("$PYTHON" run_anchored_extras.py --stage scenario-audit
        --artifacts "$ARTIFACTS" --output "$OUT" --workbook "$WORKBOOK"
