@@ -149,3 +149,29 @@ def test_lp_link_strengthening_is_present_and_mandatory_slot_is_fixed():
         assert all(u[j].LB==0. for j in set(range(c.k))-improved.mandatory_slots(c))
     finally:
         m.dispose()
+
+
+
+def test_bound_reuses_exact_deployment_certificate_without_solving_planner(monkeypatch):
+    """A failed redundant planner solve cannot invalidate a verified deployment."""
+    pytest.importorskip('gurobipy')
+    c=example()
+    d=c.booked.copy()
+    record=oracles.deployed(c,d,seconds=90.,threads=1)
+    assert record['complete'] and record['planner']['hash_unique']
+    from surgery.anchored_core import slopes_from_reference
+    anchor=dict(assignment=list(record['assignment']),
+                beta=d.tolist(),
+                slopes=slopes_from_reference(c,record['assignment'],d).tolist())
+    monkeypatch.setattr(oracles,'solve_week',lambda *a,**kw:
+                        (_ for _ in ()).throw(AssertionError('redundant solve')))
+    monkeypatch.setattr(oracles,'separate',lambda *a,**kw:
+                        dict(complete=True,upper=1e9,lower=0.,status='MOCK_CERTIFIED'))
+    bound=oracles.certified_bound(c,anchor,d,0.,None,2.,
+                                 deployed_record=record,seconds=90.,threads=1)
+    assert bound['certified']
+    assert bound['regret']==pytest.approx(record['realized_cost'])
+    assert bound['planner']['hash_unique']
+    invalid=dict(record,planner=dict(record['planner'],hash_score=-1))
+    with pytest.raises(ValueError,match='hash score'):
+        oracles.certified_bound(c,anchor,d,0.,None,2.,deployed_record=invalid)
