@@ -328,12 +328,18 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
           outer=5,iterations=10,closure_rounds=2,seconds=300.,
           sep_seconds=90.,master_seconds=300.,threads=1,workers=15,
            master_threads=None,
-          improvement=1e-4,sep_batch=96):
+          improvement=1e-4,sep_batch=96,ridge=0.,reference=0.,
+          reference_w=None,line_fractions=(1.,.5,.25,.125),
+          terminal_separation=False,max_terminal_restarts=1,trust_growth=1.):
     """Full-cohort training with finite-budget outer search.
 
     Claims: fixed-library majorization and actual empirical-cost improvement
     for accepted steps. Does NOT claim optimality of original bilevel problem.
     """
+    if (ridge<0 or reference<0 or trust_growth<1. or
+            not line_fractions or any(x<=0 for x in line_fractions) or
+            max_terminal_restarts<0):
+        raise ValueError('Invalid regularization or line-search configuration')
     if not isinstance(sep_batch, int) or sep_batch < 0:
         raise ValueError('sep_batch must be a nonnegative integer (0 means all)')
     output=Path(output);output.mkdir(parents=True,exist_ok=True)
@@ -346,7 +352,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
     state_path=output/'anchored_progress.json'
     state=json.loads(state_path.read_text()) if state_path.exists() else {
         'w':list(map(float,initial)),'accepted':[],'outer':0,
-        'library':{},'complete':False}
+        'library':{},'complete':False,'initial_w':list(map(float,initial)),
+        'terminal_restarts':0,'trust_scale':1.}
     if state.get('complete'):
         return state
     active=[c for week in weeks for c in week.components() if not locked(c,alpha,h)]
@@ -357,6 +364,7 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
     print(f'Active {len(active)} components; {len(excluded)} analytically locked',flush=True)
     while state['outer']<outer:
         k=state['outer'];w=np.asarray(state['w'],float)
+        size_before_round=sum(len(v) for v in state['library'].values())
         incumbent=verify_policy(output,f'current_{k}',weeks,index,X,booked,w,alpha,h,
                                 seconds,threads,workers)
         old_total=sum(v['realized_cost'] for v in incumbent.values())
@@ -377,7 +385,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             blocks=[b for b in blocks if b['key'] not in excluded]
             outcome=pdca(blocks,X,booked,candidate,alpha,h,gamma,lam,
                          iterations,prox,coef_prox,master_seconds,
-                          master_threads if master_threads is not None else threads)
+                          master_threads if master_threads is not None else threads,
+                          ridge=ridge,reference=reference,reference_w=reference_w)
             candidate=np.asarray(outcome['w'],float)
             _,dur=display_and_duration(X@candidate,booked,alpha,h)
             candidate_id=hashlib.sha256(np.ascontiguousarray(dur,dtype=np.float64).tobytes()).hexdigest()[:12]
@@ -391,10 +400,16 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             if close['all_closed'] and close['added']==0:
                 break
         trials=[];accepted=False
-        previous_library_size=sum(len(v) for v in state['library'].values())
+        separation_added=sum(x['adaptive_exact_tangent_separation']['added'] for x in inner)
+        separation_untested=max(x['adaptive_exact_tangent_separation']['untested'] for x in inner)
         improved_references=0
-        for j,fraction in enumerate((1.,.5,.25,.125)):
+        for j,base_fraction in enumerate(line_fractions):
+            fraction=float(base_fraction)*float(state.get('trust_scale',1.))
             trial=w+fraction*(candidate-w)
+            if np.any(np.abs(trial)>150.):
+                trials.append({'fraction':fraction,'verified':False,'accepted':False,
+                               'reason':'coefficient_box_violation'})
+                continue
             trial_id=hashlib.sha256(np.ascontiguousarray(trial,dtype=np.float64).tobytes()).hexdigest()[:12]
             plan=verify_policy(output,f'trial_{k}_{j}_{trial_id}',weeks,index,X,booked,trial,
                                alpha,h,seconds,threads,workers,
@@ -446,30 +461,52 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             if score['accepted']:
                 state['w']=trial.tolist();accepted=True
                 state['accepted'].append({'outer':k,'before':old_regret,'after':regret,
-                                          'fraction':fraction})
+                                          'fraction':fraction,'w':trial.tolist(),
+                                          'prediction_mae':score['prediction_mae'],
+                                          'rms_recommendation_change':feature_effect,
+                                          'max_abs_coefficient':float(np.max(np.abs(trial))),
+                                          'separation_added':separation_added})
+                state['terminal_restarts']=0
+                state['trust_scale']=min(2.,float(state.get('trust_scale',1.))*trust_growth)
                 break
         state.setdefault('history',[]).append({'outer':k+1,'before':old_regret,
-                            'inner':inner,'candidates':trials,'accepted':accepted})
+                            'inner':inner,'candidates':trials,'accepted':accepted,
+                            'separation_added':separation_added,
+                            'separation_untested':separation_untested,
+                            'library_size_before':size_before_round,
+                            'library_size_after':sum(len(v) for v in state['library'].values())})
         state['outer']=k+1
         save_json(state_path,state)
         if not accepted:
-            gained=(sum(len(v) for v in state['library'].values())
-                    >previous_library_size or improved_references>0)
-            if not gained:
-                if any(not x.get('verified',True) for x in trials):
-                    # A policy with unresolved candidate deployments cannot
-                    # be declared finished, and cannot reach validation.
-                    # Keep the same outer index so a later run with larger
-                    # solver budgets retries this search step.
-                    state['stopping']='unresolved_candidate_deployment'
-                    state['outer']=k
-                    state['complete']=False
-                    save_json(state_path,state)
-                    return state
-                state['stopping']='no_verified_improvement_at_tested_steps'
+            if any(x.get('reason')=='unresolved_deployed_solver' for x in trials):
+                state['stopping']='unresolved_candidate_deployment'
+                state['outer']=k
+                state['complete']=False
+                save_json(state_path,state)
+                return state
+            terminal=None
+            if terminal_separation:
+                _,probe_duration=display_and_duration(X@candidate,booked,alpha,h)
+                terminal=enrich_cuts(output,f'terminal_{k}_'+hashlib.sha256(
+                    np.ascontiguousarray(probe_duration,dtype=np.float64).tobytes()
+                ).hexdigest()[:12],blocks,probe_duration,gamma,state['library'],
+                    sep_seconds,threads,workers,prior_duration=current_duration,
+                    batch=0,round_id=k)
+                state['history'][-1]['terminal_separation']=terminal
+            gained=(sum(len(v) for v in state['library'].values())>size_before_round
+                    or improved_references>0)
+            restarts=int(state.get('terminal_restarts',0))
+            if (terminal_separation and gained
+                    and restarts<max_terminal_restarts and k+1<outer):
+                state['terminal_restarts']=restarts+1
+                state['trust_scale']=max(.25,float(state.get('trust_scale',1.))/trust_growth)
+                print('New cuts or references: bounded restart from incumbent',flush=True)
+            else:
+                if terminal is not None and not terminal['all_closed']:
+                    state['stopping']='no_improvement_terminal_separation_incomplete'
+                else:
+                    state['stopping']='no_verified_improvement_at_tested_steps'
                 break
-            print('No accepted policy; new competitor/reference information '
-                  'permits another outer attempt from the unchanged incumbent',flush=True)
     else:
         state['stopping']='outer_budget'
     state['complete']=True
@@ -478,5 +515,12 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
     state['training_cases']=int(n)
     state['training_site_weeks']=len(weeks)
     state['model_claim']='monotone verified empirical regret, not global bilevel optimality'
+    state['training_finished']=True
+    state['final_policy_frozen']=True
+    state['separation_closed']=bool(
+        state.get('history') and
+        (state['history'][-1].get('terminal_separation') or
+         state['history'][-1]['inner'][-1]['adaptive_exact_tangent_separation']).get('all_closed',False))
+    state['deployment_verified']=True
     save_json(state_path,state)
     return state
