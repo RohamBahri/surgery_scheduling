@@ -22,7 +22,7 @@ fi
 WORKBOOK='data/UHNOperating_RoomScheduling2011-2013.xlsx'
 ARTIFACTS='artifacts/weekly_rich_v2'
 GAP_MODEL='artifacts/weekly_gap_v1/gap_progress.json'
-OUT="${OUT:-artifacts/anchored_ALL_hash_v1}"
+OUT="${OUT:-artifacts/anchored_ALL_hash_v2}"
 PYTHON="${PYTHON:-python3.14}"
 WORKERS="${WORKERS:-15}"
 for required in run_weekly_anchored.py "$WORKBOOK" \
