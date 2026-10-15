@@ -56,6 +56,7 @@ def settings(args,meta,source,policies):
             'line_fractions':args.line_fractions,'trust_growth':args.trust_growth,
             'terminal_separation':args.terminal_separation,
             'max_terminal_restarts':args.max_terminal_restarts,
+            'initial_method':args.initial_method,
             'pDCA_iterations':args.iterations,
             'closure_rounds':args.closure_rounds,'max_outer':args.max_outer,
              'exact_sep_batch':args.exact_sep_batch,
@@ -154,7 +155,7 @@ def train(args):
     if len(refs)!=sum(len(w.components()) for w in weeks) or any(
             not v.get('complete') for v in refs.values()):
         raise ValueError('References are incomplete')
-    state=learn(args.output,weeks,index,data,refs,policies.get('SEED',policies['CASE']),args.alpha,args.h,
+    state=learn(args.output,weeks,index,data,refs,policies.get('SEED',policies[args.initial_method]),args.alpha,args.h,
                 gamma=args.gamma,lam=args.lambda_l1,
                 prox=args.prox,coef_prox=args.coef_prox,outer=args.max_outer,
                 iterations=args.iterations,closure_rounds=args.closure_rounds,
@@ -426,6 +427,7 @@ def main():
     p.add_argument('workbook',type=Path)
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--gap-model',type=Path)
+    p.add_argument('--initial-method',choices=('CASE','LASSO','VF','VF_GAP'),default='CASE')
     p.add_argument('--initial-policy',type=Path,
                    help='Optional completed feature-compatible policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
     p.add_argument('--exact-sep-batch',type=int,default=96,
