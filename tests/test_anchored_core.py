@@ -574,3 +574,53 @@ def test_fresh_experiment_rejects_mismatched_source_without_migration(
     result=runner.initialize(args)
     assert len(result[2])==60
     assert json.loads((output/'anchored_settings.json').read_text())==identity
+
+
+
+def test_tighter_non_dominating_surrogate_is_valid_on_enumerated_schedules():
+    """For every anchor, a competitor below the anchor's realized cost can
+    be excluded: the anchor itself covers its smaller realized-regret case.
+    With a primary tau tie, add gamma times the worst primary slack.
+    """
+    from itertools import product
+    from surgery.weekly_planner import _objective_tolerance
+    from surgery.anchored_weekly_solver import hash_score
+    c=component()
+    schedules=[]
+    for z in product(*[c.allowed[int(s)] for s in c.surgeon]):
+        try:
+            evaluate(c,z,c.booked)
+        except ValueError:
+            continue
+        schedules.append(list(z))
+    hindsight=min(evaluate(c,z,c.actual)['cost'] for z in schedules)
+    for delta in (-20.,0.,20.):
+        d=np.asarray(c.booked,float)+np.array([delta,-delta,delta,0.])
+        costs=[evaluate(c,z,d)['cost'] for z in schedules]
+        minimum=min(costs)
+        tau=_objective_tolerance(minimum)
+        selected=min((z for z,cost in zip(schedules,costs)
+                      if cost<=minimum+tau+1e-8),
+                     key=lambda z:(hash_score(c,z,0),tuple(z)))
+        regret=evaluate(c,selected,c.actual)['cost']-hindsight
+        for y in schedules:
+            a=dict(assignment=y,beta=c.booked.copy(),
+                   slopes=slopes_from_reference(c,y,c.booked))
+            yr=evaluate(c,y,c.actual)['cost']
+            kept=[z for z in schedules
+                  if evaluate(c,z,c.actual)['cost']>=yr-1e-6]
+            full=anchored_score(c,a,schedules,d,hindsight,gamma=2.,exact=True)
+            tight=anchored_score(c,a,kept,d,hindsight,gamma=2.,exact=True)
+            assert tight<=full+1e-7
+            assert tight+2.*tau>=regret-1e-5
+
+
+def test_tighter_exact_oracle_respects_minimum_realized_cost():
+    pytest.importorskip('gurobipy')
+    from surgery.anchored_oracles import separate
+    c=component()
+    threshold=evaluate(c,c.original,c.actual)['cost']
+    result=separate(c,c.booked,c.booked,2.,exact=True,
+                    min_realized_cost=threshold,seconds=45.,threads=1)
+    assert result['complete'],result
+    assert evaluate(c,result['assignment'],c.actual)['cost']>=threshold-1e-4
