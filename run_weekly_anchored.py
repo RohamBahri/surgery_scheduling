@@ -202,9 +202,10 @@ def certify(args):
                             X,booked,w,args.alpha,args.h,
                             seconds=args.seconds,threads=args.threads,
                             workers=args.workers)
+    tight_surrogate=bool(getattr(args,'tight_surrogate',False))
     blocks=prepare_components(weeks,index,refs,model['library'],
                               current=incumbent,current_duration=duration,
-                              tight_surrogate=args.tight_surrogate)
+                              tight_surrogate=tight_surrogate)
     path=args.output/'anchored_bound_certificates.json'
     report=json.loads(path.read_text()) if path.exists() else {}
     groups={}
@@ -214,7 +215,7 @@ def certify(args):
             continue
         c=b['component']
         groups.setdefault((c.group,c.monday),[]).append(b)
-    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap,incumbent,args.tight_surrogate)
+    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap,incumbent,tight_surrogate)
            for v in groups.values()]
     def persist(rows):
         report.update(rows);save_json(path,report)
