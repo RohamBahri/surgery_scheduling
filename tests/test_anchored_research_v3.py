@@ -49,7 +49,7 @@ def test_offline_service_columns_absent_and_remaining_effects_auditable():
     assert 'procedure_bias' in enc.names and 'surgeon_bias' in enc.names
 
 def test_response_audit_counts_adoption_without_postoperative_outcomes():
-    X=np.array([[1.,0.],[1.,1.],[1.,9.]])
+    X=np.array([[1.,0.],[1.,1.],[1.,4.5]])
     w=np.array([0.,20.])
     b=np.array([120.,120.,120.])
     result=response_regions(X,w,b,.8,30.)
