@@ -69,10 +69,18 @@ Set a NEW OUT path and preserve ALL variables across stages:
     export TERMINAL_SEPARATION=1
     export TIGHT_SURROGATE=1
     export MAX_TERMINAL_RESTARTS=1
+    export REFERENCES_FROM=artifacts/anchored_leakfix_v1
     bash run_research_v3.sh references
+    unset REFERENCES_FROM
     bash run_research_v3.sh train
     bash run_research_v3.sh certify
     bash run_research_v3.sh evaluate
+
+REFERENCES_FROM is optional, but strongly recommended for multiple
+variants. It copies only fully completed, fingerprint-compatible exact
+reference libraries (same workbook, feature matrices, baseline
+coefficients, hash seed and planner code). All new policy evaluations
+and training oracles still run independently.
 
 Terminal separation is over all active components and can be expensive.
 Each component retains a strict solver budget. Unresolved components
@@ -93,7 +101,7 @@ converge globally or generalize automatically.
     export INITIAL=LASSO
     export RIDGE=0.001
     export REFERENCE_PENALTY=0
-    bash run_research_v3.sh references
+    REFERENCES_FROM=artifacts/anchored_leakfix_v1 bash run_research_v3.sh references
     bash run_research_v3.sh train
     bash run_research_v3.sh certify
     bash run_research_v3.sh evaluate
