@@ -84,6 +84,17 @@ def test_all_stages_execute_with_frozen_flags(repo, stage):
     assert "--report-gap" not in args
 
 
+
+def test_worker_override_without_modifying_script(repo):
+    base, env = repo
+    env["WORKERS"] = "1"
+    result = run(base, env, "references")
+    assert result.returncode == 0, result.stderr
+    args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
+    assert args[args.index("--workers") + 1] == "1"
+
+
+
 def test_dry_run_outputs_same_args_without_python_or_license(repo):
     base, env = repo
     env["MOCK_IMPORT_EXIT"] = "1"
