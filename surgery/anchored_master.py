@@ -23,7 +23,8 @@ def envelopes(terms):
     return result
 
 
-def prepare_components(weeks,index,refs,library,*,current=None,current_duration=None):
+def prepare_components(weeks,index,refs,library,*,current=None,current_duration=None,
+                       tight_surrogate=False):
     """Select lowest-realized-cost references; prefer current on cost ties."""
     if (current is None)!=(current_duration is None):
         raise ValueError('Supply both incumbent schedules and durations')
@@ -65,11 +66,16 @@ def prepare_components(weeks,index,refs,library,*,current=None,current_duration=
             # Reference assignments and prior separated cuts both represent
             # *schedule-specific* tangents at this iteration's reference beta.
             for r in anchors:
+                if tight_surrogate and float(r['realized_cost']) < best_cost-1e-6:
+                    continue
                 cut=normalize_tangent(c,r['assignment'],beta)
                 fingerprint=tangent_key(cut)
                 if fingerprint not in seen:
                     seen.add(fingerprint);cuts.append(cut)
             for entry in library.get(k,[]):
+                if (tight_surrogate and
+                        evaluate(c,entry['assignment'],c.actual)['cost'] < best_cost-1e-6):
+                    continue
                 cut=normalize_tangent(c,entry,beta)
                 fingerprint=tangent_key(cut)
                 if fingerprint not in seen:
