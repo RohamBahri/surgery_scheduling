@@ -251,9 +251,10 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             hash_best = hash_score(week,selected,seed+ordinal)
             if abs(m.ObjVal-hash_best) > .25:
                 raise AssertionError("Reconstructed integer hash objective differs")
-            # Keep the optimum of every preceding hash as a subordinate
-            # constraint. Integer coefficients make best+0.5 a strict cutoff.
-            m.addConstr(priority <= hash_best, name=f"hash_tie_{ordinal}")
+            # Check uniqueness WITHOUT fixing the hash to its incumbent score.
+            # The objective and integer cutoff already prove whether another
+            # schedule can attain this score. The extra constraint needlessly
+            # makes the exclusion MIP harder on large components.
             winner = list(selected)
             exclude = m.addConstr(
                 sum(x[i,int(winner[i])] for i in range(week.n)) <= week.n-1,
@@ -287,6 +288,10 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
                 return outcome("OPTIMAL",True,True,True)
             if uniqueness_status.startswith("UNIQUE_UNVERIFIED"):
                 return outcome("HASH_UNIQUENESS_UNRESOLVED",primary_ok=True)
+            # A certified collision needs the preceding hash optimum fixed
+            # before optimizing any lower-priority hash or canonical fallback.
+            m.addConstr(priority <= hash_best, name=f"hash_tie_{ordinal}")
+            m.update()
 
         # Two actual score collisions: deterministic exact lexicographic
         # fallback, restricted to the optima of both hash criteria.
