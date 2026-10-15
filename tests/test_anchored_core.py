@@ -443,7 +443,9 @@ def test_learn_accepts_exact_sep_batch_and_completes_outer_loop(tmp_path, monkey
     assert result['complete'] and result['outer']==1
     assert result['feature_dimensions']==74
     assert result['training_cases']==c.n
-    assert result['stopping']=='outer_budget'
+    assert result['stopping']=='no_verified_improvement_at_tested_steps'
+    assert result['training_finished'] is True
+    assert result['separation_closed'] is True
 
 
 def test_certify_anchors_at_final_deployed_policy_on_realized_ties(
