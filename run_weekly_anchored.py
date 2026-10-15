@@ -56,7 +56,7 @@ def settings(args,meta,source,policies):
             'line_fractions':args.line_fractions,'trust_growth':args.trust_growth,
             'terminal_separation':args.terminal_separation,
             'max_terminal_restarts':args.max_terminal_restarts,
-            'initial_method':args.initial_method,
+            'initial_method':args.initial_method,'tight_surrogate':args.tight_surrogate,
             'pDCA_iterations':args.iterations,
             'closure_rounds':args.closure_rounds,'max_outer':args.max_outer,
              'exact_sep_batch':args.exact_sep_batch,
@@ -169,19 +169,20 @@ def train(args):
                  line_fractions=tuple(float(q) for q in args.line_fractions.split(',')),
                  terminal_separation=args.terminal_separation,
                  max_terminal_restarts=args.max_terminal_restarts,
-                 trust_growth=args.trust_growth)
+                 trust_growth=args.trust_growth,tight_surrogate=args.tight_surrogate)
     print('Anchored result:',state['stopping'],'accepted moves=',len(state['accepted']),flush=True)
 
 
 def _certificate_week(task):
-    blocks,duration,gamma,seconds,threads,report_gap,verified=task
+    blocks,duration,gamma,seconds,threads,report_gap,verified,tight_surrogate=task
     from surgery.anchored_oracles import certified_bound
     result={}
     for b in blocks:
         c=b['component'];d=duration[b['rows']]
         result[b['key']]=certified_bound(c,b['anchor'],d,b['oracle_cost'],
                 None,gamma,seconds=seconds,threads=threads,exact=True,
-                report_gap=report_gap,deployed_record=verified[b['key']])
+                report_gap=report_gap,deployed_record=verified[b['key']],
+                tight_surrogate=tight_surrogate)
     return result
 
 
@@ -202,7 +203,8 @@ def certify(args):
                             seconds=args.seconds,threads=args.threads,
                             workers=args.workers)
     blocks=prepare_components(weeks,index,refs,model['library'],
-                              current=incumbent,current_duration=duration)
+                              current=incumbent,current_duration=duration,
+                              tight_surrogate=args.tight_surrogate)
     path=args.output/'anchored_bound_certificates.json'
     report=json.loads(path.read_text()) if path.exists() else {}
     groups={}
@@ -212,7 +214,7 @@ def certify(args):
             continue
         c=b['component']
         groups.setdefault((c.group,c.monday),[]).append(b)
-    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap,incumbent)
+    tasks=[(v,duration,args.gamma,args.seconds,args.threads,args.report_gap,incumbent,args.tight_surrogate)
            for v in groups.values()]
     def persist(rows):
         report.update(rows);save_json(path,report)
@@ -453,6 +455,7 @@ def main():
     p.add_argument('--line-fractions',default='1,0.5,0.25,0.125')
     p.add_argument('--trust-growth',type=float,default=1.)
     p.add_argument('--terminal-separation',action='store_true')
+    p.add_argument('--tight-surrogate',action='store_true',help='Valid but narrower non-dominating competitor set')
     p.add_argument('--max-terminal-restarts',type=int,default=1)
     p.add_argument('--iterations',type=int,default=12)
     p.add_argument('--closure-rounds',type=int,default=2)
