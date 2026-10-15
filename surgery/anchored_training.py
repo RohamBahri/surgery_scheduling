@@ -18,7 +18,7 @@ from .anchored_core import (key, anchored_cut, anchored_score,
 from .anchored_master import pdca, prepare_components
 from .anchored_oracles import deployed, separate
 from .planner import display_and_duration, reachable
-from .weekly_planner import loads
+from .weekly_planner import loads, evaluate
 from .weekly_training import save_json, asymmetric_error
 
 
@@ -40,13 +40,33 @@ def _week_task(task):
             d=np.array([full[label][int(cid)] for cid in c.case_ids],float)
             chosen=deployed(c,d,seconds=seconds,threads=threads)
             if not chosen['complete']:
-                incomplete=f'{label}: {chosen["status"]}'
-                break
-            references.append({'source':label,'type':(
-                'shared-policy' if label not in ('BOX_CLIP','BOX_PAD') else 'box-aspiration'),
-                'beta':d.tolist(),'assignment':chosen['assignment'],
-                'realized_cost':chosen['realized_cost'],
-                'predicted_cost':chosen['predicted_cost']})
+                # Reference schedules are feasible *aspirations*, not claimed
+                # deployed baselines. A time-limited optional MILP may supply
+                # its feasible incumbent; otherwise the original assignment
+                # is feasible by construction. Hindsight above MUST be exact.
+                status=str(chosen.get('status'))
+                if not (status.endswith('9') or 'TIME_LIMIT' in status):
+                    incomplete=f'{label}: {status}'
+                    break
+                z=chosen.get('assignment')
+                if z is None:
+                    z=list(map(int,c.original))
+                objective_certified=False
+                kind='uncertified-feasible-aspiration'
+            else:
+                z=chosen['assignment']
+                objective_certified=True
+                kind=('box-aspiration' if label in ('BOX_CLIP','BOX_PAD')
+                      else 'shared-policy')
+            # Independent feasibility and cost check for every proposed
+            # reference, including an incomplete solver incumbent.
+            pred=evaluate(c,z,d)
+            real=evaluate(c,z,c.actual)
+            references.append({'source':label,'type':kind,
+                'beta':d.tolist(),'assignment':list(map(int,z)),
+                'realized_cost':real['cost'],'predicted_cost':pred['cost'],
+                'reference_optimality_certified':objective_certified,
+                'solver_status':chosen.get('status')})
         if incomplete:
             rows[k]={'complete':False,'failure':incomplete}
         else:
@@ -57,7 +77,7 @@ def _week_task(task):
 
 def build_reference_library(output,weeks,index,data,policy_weights,alpha,h,
                             seconds=300.,threads=1,workers=15):
-    """Certify each reference by the TRUE tie-broken planner, including probes."""
+    """Exact hindsight plus feasible, explicitly labeled schedule aspirations."""
     output=Path(output); path=output/'anchored_references.json'
     state=json.loads(path.read_text()) if path.exists() else {}
     X=data['X'].astype(float);booked=data['booked'];actual=data['actual']
@@ -96,7 +116,7 @@ def build_reference_library(output,weeks,index,data,policy_weights,alpha,h,
     missing=[key(c) for week in weeks for c in week.components()
              if not state.get(key(c),{}).get('complete')]
     if missing:
-        raise RuntimeError(f'{len(missing)} reference components incomplete; rerun with larger --seconds; e.g. {missing[:3]}')
+        raise RuntimeError(f'{len(missing)} reference components lack an EXACT hindsight or a valid feasible proposal; e.g. {missing[:3]}')
     return state
 
 
@@ -145,7 +165,7 @@ def _verify_week(task):
 
 
 def verify_policy(output,name,weeks,index,X,booked,w,alpha,h,
-                  seconds=300.,threads=1,workers=15):
+                  seconds=300.,threads=1,workers=15,*,allow_incomplete=False):
     """Full deterministic planner, append-safe cache tied to exact predictions."""
     import hashlib
     output=Path(output)
@@ -176,8 +196,10 @@ def verify_policy(output,name,weeks,index,X,booked,w,alpha,h,
             for x in as_completed(future):persist(x.result())
     pending=[key(c) for week in weeks for c in week.components()
              if not state.get(key(c),{}).get('complete')]
-    if pending:
-        raise RuntimeError(f'{len(pending)} deployed tie-breaks unresolved (e.g. {pending[:3]}); rerun with higher --seconds')
+    if pending and not allow_incomplete:
+        details={k:state.get(k,{}).get('status') for k in pending[:5]}
+        raise RuntimeError(f'{len(pending)} exact deployed plans unresolved '
+                           f'(examples {details}); retry with more --seconds')
     return state
 
 
@@ -310,6 +332,7 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
           *,gamma=2.,lam=0.,prox=.15,coef_prox=1e-5,
           outer=5,iterations=10,closure_rounds=2,seconds=300.,
           sep_seconds=90.,master_seconds=300.,threads=1,workers=15,
+           master_threads=None,
           improvement=1e-4,sep_batch=96):
     """Full-cohort training with finite-budget outer search.
 
@@ -358,7 +381,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
                                       current=incumbent,current_duration=current_duration)
             blocks=[b for b in blocks if b['key'] not in excluded]
             outcome=pdca(blocks,X,booked,candidate,alpha,h,gamma,lam,
-                         iterations,prox,coef_prox,master_seconds,threads)
+                         iterations,prox,coef_prox,master_seconds,
+                          master_threads if master_threads is not None else threads)
             candidate=np.asarray(outcome['w'],float)
             _,dur=display_and_duration(X@candidate,booked,alpha,h)
             candidate_id=hashlib.sha256(np.ascontiguousarray(dur,dtype=np.float64).tobytes()).hexdigest()[:12]
@@ -378,14 +402,23 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             trial=w+fraction*(candidate-w)
             trial_id=hashlib.sha256(np.ascontiguousarray(trial,dtype=np.float64).tobytes()).hexdigest()[:12]
             plan=verify_policy(output,f'trial_{k}_{j}_{trial_id}',weeks,index,X,booked,trial,
-                               alpha,h,seconds,threads,workers)
+                               alpha,h,seconds,threads,workers,
+                               allow_incomplete=True)
+            pending=[ck for ck,v in plan.items() if not v.get('complete')]
+            if pending:
+                trials.append({'fraction':fraction,'verified':False,
+                               'accepted':False,
+                               'reason':'unresolved_deployed_solver',
+                               'pending_components':pending[:10],
+                               'pending_count':len(pending)})
+                continue
             total=sum(v['realized_cost'] for v in plan.values())
             regret=(total-sum(refs[key]['oracle_cost'] for key in plan))/n
             if regret < -.02:
                 raise AssertionError('Candidate plan beat certified hindsight optimum')
             _,pred=display_and_duration(X@trial,booked,alpha,h)
             feature_effect=float(np.sqrt(np.mean((X@(trial-w))**2)))
-            score={'fraction':fraction,'regret_per_case':regret,'cost_per_case':total/n,
+            score={'fraction':fraction,'verified':True,'regret_per_case':regret,'cost_per_case':total/n,
                    'realized_overtime_minutes':float(sum(v['realized_overtime_minutes'] for v in plan.values())),
                    'room_days_over_720':int(sum(v['room_days_over_720'] for v in plan.values())),
                    'max_realized_room_load':float(max(v['max_realized_room_load'] for v in plan.values())),
@@ -428,7 +461,9 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             gained=(sum(len(v) for v in state['library'].values())
                     >previous_library_size or improved_references>0)
             if not gained:
-                state['stopping']='no_verified_improvement_at_tested_steps'
+                state['stopping']=('unresolved_candidate_deployment' if any(
+                    not x.get('verified',True) for x in trials)
+                    else 'no_verified_improvement_at_tested_steps')
                 break
             print('No accepted policy; new competitor/reference information '
                   'permits another outer attempt from the unchanged incumbent',flush=True)

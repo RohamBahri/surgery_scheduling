@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 
 from run_weekly_rich import load_matrices,source_fingerprint
-from run_weekly_train import load_weeks,check_week_cases,evaluate_week
+from run_weekly_train import load_weeks,check_week_cases
+from surgery.anchored_weekly_solver import evaluate_week
 from surgery.planner import display_and_duration
 from surgery.weekly_training import save_json
 from surgery.anchored_training import build_reference_library, learn, verify_policy
@@ -26,16 +27,10 @@ from surgery.anchored_core import key
 from surgery.anchored_master import prepare_components
 from surgery.anchored_oracles import certified_bound
 
-# Exact pre-fix code digest from the interrupted TGH extended-budget run.
-# This allowlist is intentionally narrow: only this audited maintenance change
-# may migrate saved settings while keeping all mathematical hyperparameters.
-ORACLE_NUMERIC_FIX_PREDECESSOR_SHA = (
-    'db51063aaaa62a4e7c17e4a76dd04706768a4848dcaf71d8a37a21e9a307c552'
-)
-
 SOURCE_FILES=('run_weekly_anchored.py','surgery/anchored_core.py',
               'surgery/anchored_oracles.py','surgery/anchored_master.py',
-              'surgery/anchored_training.py')
+              'surgery/anchored_training.py',
+              'surgery/anchored_weekly_solver.py')
 
 
 def sha(path):
@@ -109,39 +104,9 @@ def initialize(args):
     if path.exists():
         previous=json.loads(path.read_text())
         if previous!=ident:
-            safe_migration=(
-                args.resume_oracle_fix
-                and previous.get('trainer_source_sha256')
-                    ==ORACLE_NUMERIC_FIX_PREDECESSOR_SHA
-                and set(previous)==set(ident)
-                and all(previous[k]==v for k,v in ident.items()
-                        if k!='trainer_source_sha256'))
-            if not safe_migration:
-                raise ValueError(
-                    'Anchored experiment code/data/model/settings changed. '
-                    'Use a new output directory; for the specific Oct 14 '
-                    'numeric-oracle fix, use --resume-oracle-fix only when '
-                    'all other saved settings match exactly.')
-            progress=args.output/'anchored_progress.json'
-            if not progress.exists():
-                raise ValueError('Oracle-fix migration requires an interrupted training checkpoint')
-            previous_progress=json.loads(progress.read_text())
-            if previous_progress.get('complete'):
-                raise ValueError('Do not migrate completed experiments')
-            audit={'reason':'numeric MAX dual-bound tolerance audit only',
-                   'previous_code_sha256':previous['trainer_source_sha256'],
-                   'resumed_code_sha256':ident['trainer_source_sha256'],
-                   'previous_outer':previous_progress.get('outer'),
-                   'accepted_steps_before_migration':len(previous_progress.get('accepted',[])),
-                   'previous_settings':previous,
-                   'new_settings':ident}
-            migration=args.output/'anchored_source_migration.json'
-            if migration.exists():
-                raise ValueError('Migration audit file already exists; refusing duplicate migration')
-            save_json(migration,audit)
-            save_json(path,ident)
-            print('Audited oracle numeric fix: resumed interrupted training '
-                  'without changing data, coefficients or hyperparameters',flush=True)
+            raise ValueError('Anchored experiment code/data/models/settings changed. '
+                             'Use a NEW output directory; previous checkpoints '
+                             'cannot be migrated into this experiment.')
     else:
         save_json(path,ident)
     weeks=load_weeks(args.workbook,meta,'train')
@@ -186,7 +151,8 @@ def train(args):
                 iterations=args.iterations,closure_rounds=args.closure_rounds,
                 seconds=args.seconds,sep_seconds=args.sep_seconds,
                 master_seconds=args.master_seconds,threads=args.threads,
-                workers=args.workers,improvement=args.min_improvement,
+                workers=args.workers,master_threads=args.master_threads,
+                improvement=args.min_improvement,
                  sep_batch=args.exact_sep_batch)
     print('Anchored result:',state['stopping'],'accepted moves=',len(state['accepted']),flush=True)
 
@@ -356,8 +322,6 @@ def main():
     p.add_argument('workbook',type=Path)
     p.add_argument('--artifacts',type=Path,required=True)
     p.add_argument('--gap-model',type=Path)
-    p.add_argument('--resume-oracle-fix',action='store_true',
-                   help='One-time audited migration of the interrupted extended TGH checkpoint after numeric oracle fix')
     p.add_argument('--initial-policy',type=Path,
                    help='Optional completed 74-feature policy, e.g. v1 progress JSON; seed experiment, never claim its initial gain')
     p.add_argument('--exact-sep-batch',type=int,default=96,
@@ -382,8 +346,11 @@ def main():
     p.add_argument('--seconds',type=float,default=300.)
     p.add_argument('--sep-seconds',type=float,default=90.)
     p.add_argument('--master-seconds',type=float,default=300.)
+    p.add_argument('--master-threads',type=int,default=4,
+                   help='Gurobi threads for the sequential continuous master QP')
     args=p.parse_args()
     if (args.workers<1 or args.threads<1 or args.workers*args.threads>15
+            or not 1<=args.master_threads<=15
             or args.gamma<1 or not 0<args.alpha<=1 or args.h<=0
             or args.lambda_l1<0 or args.prox<=0 or args.coef_prox<=0
             or args.max_outer<1 or args.iterations<1 or args.closure_rounds<1

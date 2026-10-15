@@ -24,7 +24,6 @@ def repo(tmp_path):
     base = tmp_path / "repo with spaces"
     base.mkdir()
     shutil.copy2(SOURCE, base / SOURCE.name)
-    shutil.copy2(SOURCE.parent / "rescue_anchored_references.py", base / "rescue_anchored_references.py")
     (base / "run_weekly_anchored.py").write_text("# Stub runner\n")
     (base / "data").mkdir()
     (base / "data/UHNOperating_RoomScheduling2011-2013.xlsx").write_bytes(b"mock workbook")
@@ -60,7 +59,7 @@ def test_bash_syntax():
 @pytest.mark.parametrize("stage", STAGES)
 def test_all_stages_execute_with_frozen_flags(repo, stage):
     base, env = repo
-    out = base / "artifacts/anchored_ALL_extended"
+    out = base / "artifacts/anchored_ALL_clean_v1"
     out.mkdir(parents=True)
     (out / "anchored_references.json").write_text("{}")
     (out / "anchored_progress.json").write_text('{"complete":true}')
@@ -71,16 +70,16 @@ def test_all_stages_execute_with_frozen_flags(repo, stage):
     expected = {
         "--artifacts": "artifacts/weekly_rich_v2",
         "--gap-model": "artifacts/weekly_gap_v1/gap_progress.json",
-        "--output": "artifacts/anchored_ALL_extended",
+        "--output": "artifacts/anchored_ALL_clean_v1",
         "--site": "all", "--stage": stage,
         "--max-outer": "15", "--iterations": "20",
         "--closure-rounds": "3", "--exact-sep-batch": "384",
         "--workers": "15", "--threads": "1",
-        "--seconds": "300", "--sep-seconds": "90", "--master-seconds": "300",
+        "--master-threads": "4", "--seconds": "600",
+        "--sep-seconds": "90", "--master-seconds": "300",
     }
     assert args[2:] == [value for pair in expected.items() for value in pair]
     assert "--initial-policy" not in args
-    assert "--resume-oracle-fix" not in args
     assert "--report-gap" not in args
 
 
@@ -144,87 +143,10 @@ def test_spaces_in_absolute_output_path_are_preserved(repo):
     assert args[args.index("--output") + 1] == str(dest)
 
 
-def test_rescue_only_targets_incomplete_components(repo):
+
+def test_rejects_removed_rescue_commands(repo):
     base, env = repo
-    dest = base / "artifacts/anchored_ALL_extended"
-    dest.mkdir(parents=True)
-    (dest / "anchored_references.json").write_text('{"foo":{"complete":false}}')
-    result = run(base, env, "rescue-references")
-    assert result.returncode == 0, result.stderr
-    args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
-    assert args[:2] == ["rescue_anchored_references.py",
-                        "data/UHNOperating_RoomScheduling2011-2013.xlsx"]
-    assert args[args.index("--seconds") + 1] == "1800"
-    assert args[args.index("--threads") + 1] == "4"
-    assert "--stage" not in args
-    assert "--initial-policy" not in args
-    env["RESCUE_SECONDS"] = "3600"
-    env["RESCUE_THREADS"] = "2"
-    result = run(base, env, "rescue-references")
-    assert result.returncode == 0, result.stderr
-    args = Path(env["ARGS_CAPTURE"]).read_text().splitlines()
-    assert args[args.index("--seconds") + 1] == "3600"
-    assert args[args.index("--threads") + 1] == "2"
-
-
-def test_rescue_requires_existing_checkpoint(repo):
-    base, env = repo
-    result = run(base, env, "rescue-references")
-    assert result.returncode == 2
-    assert "run references" in result.stderr
-
-
-def test_rescue_dry_run_does_not_require_solver(repo):
-    base, env = repo
-    dest = base / "artifacts/anchored_ALL_extended"
-    dest.mkdir(parents=True)
-    (dest / "anchored_references.json").write_text('{}')
-    env["MOCK_IMPORT_EXIT"] = "1"
-    result = run(base, env, "rescue-references", dry=True)
-    assert result.returncode == 0, result.stderr
-    assert "rescue_anchored_references.py" in result.stdout
-    assert "--seconds 1800" in result.stdout
-    assert not Path(env["ARGS_CAPTURE"]).exists()
-
-
-def test_diagnose_incomplete_references_uses_readonly_mode(repo):
-    base,env=repo
-    out=base/"artifacts/anchored_ALL_extended"
-    out.mkdir(parents=True)
-    (out/"anchored_references.json").write_text('{"component":{"complete":false}}')
-    res=run(base,env,"diagnose-references")
-    assert res.returncode==0,res.stderr
-    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
-    assert args[0]=="rescue_anchored_references.py"
-    assert "--diagnose-only" in args
-    assert "--stage" not in args
-    assert "--initial-policy" not in args
-    assert "--resume-oracle-fix" not in args
-
-
-
-def test_finalize_references_is_explicit_120s_feasible_fallback(repo):
-    base,env=repo
-    out=base/"artifacts/anchored_ALL_extended"
-    out.mkdir(parents=True)
-    (out/"anchored_references.json").write_text('{"VF":{"complete":false}}')
-    res=run(base,env,"finalize-references")
-    assert res.returncode==0,res.stderr
-    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
-    assert args[0]=="rescue_anchored_references.py"
-    assert "--allow-feasible" in args
-    assert "--diagnose-only" not in args
-    assert "--stage" not in args
-    assert args[args.index("--seconds")+1]=="120"
-    assert args[args.index("--threads")+1]=="4"
-    env["RESCUE_SECONDS"]="45"
-    res=run(base,env,"finalize-references")
-    assert res.returncode==0,res.stderr
-    args=Path(env["ARGS_CAPTURE"]).read_text().splitlines()
-    assert args[args.index("--seconds")+1]=="45"
-
-
-def test_finalize_references_requires_checkpoint(repo):
-    base,env=repo
-    res=run(base,env,"finalize-references")
-    assert res.returncode==2 and "references" in res.stderr
+    for stage in ('rescue-references','finalize-references','diagnose-references'):
+        result = run(base, env, stage)
+        assert result.returncode == 2
+        assert 'Usage:' in result.stderr

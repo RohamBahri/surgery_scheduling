@@ -9,7 +9,8 @@ import time
 import numpy as np
 
 from .anchored_core import OVER, TURN, CAP, fixed_slope_lower, phi
-from .weekly_planner import evaluate, solve_week, _model, _cost, _assignment
+from .weekly_planner import evaluate, _cost, _assignment
+from .anchored_weekly_solver import solve_week, _model, solve_adversary
 
 
 def reconcile_maximization_bounds(checked, solver_objective, solver_bound):
@@ -190,7 +191,6 @@ def certified_bound(component, anchor, duration, oracle_cost, deployed_cost,
             'separation_exact':oracle['complete'],'separation':oracle,
             'planner':plan.as_dict()}
     if report_gap:
-        from .weekly_planner import solve_adversary
         primary=solve_week(component,duration,seconds=seconds,threads=threads,tie=False)
         adversary=solve_adversary(component,duration,gamma=gamma,seconds=seconds,threads=threads)
         if (primary.value is not None and primary.bound is not None
