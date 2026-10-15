@@ -429,6 +429,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('workbook',type=Path)
     p.add_argument('--artifacts',type=Path,required=True)
+    p.add_argument('--reuse-references-from',type=Path,
+                   help='Optional prior compatible experiment root, reference stage only')
     p.add_argument('--gap-model',type=Path)
     p.add_argument('--initial-method',choices=('CASE','LASSO','VF','VF_GAP'),default='CASE')
     p.add_argument('--initial-policy',type=Path,
@@ -491,9 +493,27 @@ def main():
             or min(args.seconds,args.sep_seconds,args.master_seconds)<=0):
         p.error('Invalid finite solver budgets, scenario, or regularization settings')
     if args.stage=='references':
-        _,_,weeks,index,data,policies,_=initialize(args)
-        build_reference_library(args.output,weeks,index,data,policies,args.alpha,args.h,
-                                args.seconds,args.threads,args.workers)
+        _,_,weeks,index,data,policies,ident=initialize(args)
+        if args.reuse_references_from is not None:
+            source=args.reuse_references_from
+            old=json.loads((source/'anchored_settings.json').read_text())
+            for field in ('feature_source_sha256','workbook_sha256',
+                          'matrix_sha256','baseline_models_sha256','site','hash_seed',
+                          'trainer_source_sha256'):
+                if old.get(field)!=ident.get(field):
+                    raise ValueError('Reference reuse identity mismatch: '+field)
+            records=json.loads((source/'anchored_references.json').read_text())
+            expected={key(c) for week in weeks for c in week.components()}
+            if set(records)!=expected or any(not v.get('complete') for v in records.values()):
+                raise ValueError('Reference source has missing or incomplete components')
+            target=args.output/'anchored_references.json'
+            if target.exists() and json.loads(target.read_text())!=records:
+                raise ValueError('Destination references already differ; use a new OUT')
+            save_json(target,records)
+            print('Reused exact hindsight/reference library from',source,flush=True)
+        else:
+            build_reference_library(args.output,weeks,index,data,policies,args.alpha,args.h,
+                                    args.seconds,args.threads,args.workers)
     elif args.stage=='train':train(args)
     elif args.stage=='certify':certify(args)
     elif args.stage=='sensitivity':sensitivity(args)
