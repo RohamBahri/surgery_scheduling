@@ -624,3 +624,25 @@ def test_tighter_exact_oracle_respects_minimum_realized_cost():
                     min_realized_cost=threshold,seconds=45.,threads=1)
     assert result['complete'],result
     assert evaluate(c,result['assignment'],c.actual)['cost']>=threshold-1e-4
+
+
+
+def test_tight_master_filters_cheaper_realized_library_competitors():
+    from surgery.anchored_core import key, normalize_tangent
+    from surgery.anchored_master import prepare_components
+    c=component()
+    original=list(map(int,c.original))
+    worse=[0]*c.n
+    assert evaluate(c,original,c.actual)['cost'] < evaluate(c,worse,c.actual)['cost']
+    b=c.booked.tolist()
+    refs={key(c):dict(complete=True,oracle_cost=0.,references=[
+        dict(source='EXPENSIVE',assignment=worse,beta=b,
+             realized_cost=evaluate(c,worse,c.actual)['cost'],
+             predicted_cost=evaluate(c,worse,c.booked)['cost'])])}
+    lib={key(c):[normalize_tangent(c,original,c.booked)]}
+    index={int(cid):i for i,cid in enumerate(c.case_ids)}
+    original_blocks=prepare_components([c],index,refs,lib,tight_surrogate=False)
+    tight_blocks=prepare_components([c],index,refs,lib,tight_surrogate=True)
+    assert len(original_blocks)==len(tight_blocks)==1
+    assert len(original_blocks[0]['cuts'])>len(tight_blocks[0]['cuts'])
+    assert tight_blocks[0]['cuts'][0]['assignment']==worse
