@@ -390,7 +390,8 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
         inner=[]
         for cut_round in range(closure_rounds):
             blocks=prepare_components(weeks,index,refs,state['library'],
-                                      current=incumbent,current_duration=current_duration)
+                                      current=incumbent,current_duration=current_duration,
+                                      tight_surrogate=tight_surrogate)
             blocks=[b for b in blocks if b['key'] not in excluded]
             outcome=pdca(blocks,X,booked,candidate,alpha,h,gamma,lam,
                          iterations,prox,coef_prox,master_seconds,
