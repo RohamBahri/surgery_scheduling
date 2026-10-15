@@ -164,13 +164,45 @@ def deployed(component, durations, *, seconds=300., threads=1,
 
 
 def certified_bound(component, anchor, duration, oracle_cost, deployed_cost,
-                    gamma, *, seconds=300.,threads=1,exact=True,report_gap=False):
+                    gamma, *, seconds=300.,threads=1,exact=True,report_gap=False,
+                    deployed_record=None):
     """A rigorous tie-safe anchored upper bound, even with an incomplete MAX.
 
     A finite MAX dual upper bound is required; otherwise no claim is made.
     Delta of deployed primary cost is bounded using an exact MIN lower bound.
     """
-    plan=solve_week(component,duration,seconds=seconds,threads=threads,tie=True)
+    if deployed_record is None:
+        plan=solve_week(component,duration,seconds=seconds,threads=threads,tie=True)
+    else:
+        # A complete result from the EXACT SAME duration-keyed verification
+        # cache is a deployment certificate, not just an assignment warm-start.
+        import os
+        from .anchored_weekly_solver import AnchoredResult, hash_score
+        if not deployed_record.get('complete') or 'planner' not in deployed_record:
+            raise ValueError('Cannot reuse an incomplete deployment record')
+        payload=deployed_record['planner']
+        if not (payload.get('complete') and payload.get('primary_complete')
+                and payload.get('tie_complete') and payload.get('hash_unique')):
+            raise ValueError('Missing primary/hash/uniqueness deployment certificate')
+        expected_seed=int(os.getenv('SURGERY_ANCHORED_HASH_SEED','0'))
+        if int(payload.get('hash_seed',-1)) != expected_seed:
+            raise ValueError('Hash seed mismatch in reused deployment record')
+        if payload.get('assignment') != deployed_record.get('assignment'):
+            raise ValueError('Planner and deployment assignment mismatch')
+        if hash_score(component,payload['assignment'],expected_seed) != payload.get('hash_score'):
+            raise ValueError('Reused hash score mismatch')
+        checked=evaluate(component,payload['assignment'],duration)['cost']
+        if (abs(checked-float(payload['value']))>1e-4
+                or abs(checked-float(deployed_record['predicted_cost']))>1e-4):
+            raise ValueError('Reused predicted-cost reconstruction mismatch')
+        checked_real=evaluate(component,payload['assignment'],component.actual)['cost']
+        if abs(checked_real-float(deployed_record['realized_cost']))>1e-4:
+            raise ValueError('Reused realized-cost reconstruction mismatch')
+        if (payload.get('bound') is None or
+                not np.isfinite(payload['bound']) or
+                float(payload['bound'])>checked+1e-4):
+            raise ValueError('Invalid reused primary lower bound')
+        plan=AnchoredResult(**payload)
     if plan.assignment is None or plan.bound is None or not np.isfinite(plan.bound):
         return {'certified':False,'reason':'no planner primal+dual'}
     if not plan.complete:
