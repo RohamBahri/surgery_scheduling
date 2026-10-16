@@ -21,6 +21,7 @@ WORKBOOK="${WORKBOOK:-data/UHNOperating_RoomScheduling2011-2013.xlsx}"
 ARTIFACTS="${ARTIFACTS:-artifacts/weekly_rich_leakfix_v1}"
 GAP_DIR="${GAP_DIR:-artifacts/weekly_gap_leakfix_v1}"
 OUT="${OUT:-artifacts/anchored_leakfix_v1}"
+HISTORY_MODE="${HISTORY_MODE:-leave_date_out}"
 WORKERS="${WORKERS:-15}"
 INITIAL="${INITIAL:-CASE}"
 RIDGE="${RIDGE:-0}"
@@ -34,7 +35,8 @@ SCENARIO_GRID="${SCENARIO_GRID:-0.5:30,0.8:30,1:30,0.8:60}"
 cmd=()
 case "$STAGE" in
   features)
-    cmd=("$PYTHON" run_weekly_rich.py "$WORKBOOK" --stage features --output "$ARTIFACTS");;
+    cmd=("$PYTHON" run_weekly_rich.py "$WORKBOOK" --stage features --output "$ARTIFACTS"
+       --history-mode "$HISTORY_MODE");;
   lasso)
     cmd=("$PYTHON" run_weekly_rich.py "$WORKBOOK" --stage fit --output "$ARTIFACTS");;
   case|vf)
