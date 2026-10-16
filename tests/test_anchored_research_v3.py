@@ -82,6 +82,9 @@ def test_full_offline_history_preserves_informative_features_without_lodo_contra
     training=enc.fit_transform(data)
     deployment_like=enc.transform(data)
     assert REMOVED_SERVICE_FEATURES.isdisjoint(enc.names)
+    # Full-offline variant must agree on *every* feature for the same
+    # offline training case; it retains procedure/surgeon and pair signals.
+    np.testing.assert_allclose(training,deployment_like,atol=1e-9)
     for name in ('hist_procedure_mean_abs_error',
                  'hist_surgeon_under_rate',
                  'hist_pair_residual_interaction',
@@ -89,8 +92,8 @@ def test_full_offline_history_preserves_informative_features_without_lodo_contra
         assert name in enc.names
         k=enc.names.index(name)
         np.testing.assert_allclose(training[:,k],deployment_like[:,k],atol=1e-9)
-    # The preserved legacy encoder is LODO, so no assertion that all
-    # train/deployment columns are identical or completely label-free.
+    # Agreement removes the train-only contrast, NOT the small direct
+    # contribution of each training label to its group's full-sample mean.
 
 
 def test_boosted_raw_preoperative_features_exclude_all_actual_outcomes():
