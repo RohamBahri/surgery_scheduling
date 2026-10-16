@@ -37,19 +37,44 @@ def audit_features(encoder,training,fit_X):
     if full_X.shape!=fit_X.shape:
         raise ValueError('Training/transform feature schema inconsistent')
     date_error=training.assign(error=training.actual-training.booked)
-    means=date_error.groupby(['service','date'],sort=False).error.transform('mean').to_numpy(float)
     summary={}
+    def historical_level(name):
+        if 'pair' in name or 'joint' in name:
+            return ('service','procedure','surgeon')
+        if 'surgeon' in name:
+            return ('service','surgeon')
+        if 'procedure' in name:
+            return ('service','procedure')
+        if 'service' in name:
+            return ('service',)
+        return ()
+    outcomes={}
+    for name in encoder.names:
+        keys=historical_level(name)
+        if keys in outcomes:continue
+        cols=list(keys)
+        level_means=date_error.groupby(cols+['date'],sort=False).error.transform('mean')
+        group_means=(date_error.groupby(cols,sort=False).error.transform('mean')
+                     if cols else np.full(len(training),date_error.error.mean()))
+        outcomes[keys]=(level_means.to_numpy(float)
+                        - np.asarray(group_means,float))
+
     for j,name in enumerate(encoder.names):
         if j==0:continue
         train=np.asarray(fit_X[:,j],float)
         full=np.asarray(full_X[:,j],float)
         diff=train-full
+        keys=historical_level(name)
+        # The contrast is the OWN feature-level/date residual, not merely
+        # the service/date residual used in earlier exploratory audits.
+        means=outcomes[keys]
         with np.errstate(invalid='ignore'):
             corr=np.corrcoef(diff,means)[0,1] if np.std(diff)>1e-9 and np.std(means)>1e-9 else None
         summary[name]=dict(
             lodo_vs_full_rms=float(np.sqrt(np.mean(diff**2))),
             lodo_vs_full_max=float(np.max(np.abs(diff))),
-            empirical_correlation_with_date_error=None if corr is None or not np.isfinite(corr) else float(corr),
+            historical_level=list(keys),
+            empirical_correlation_with_level_date_outcome=None if corr is None or not np.isfinite(corr) else float(corr),
             fit_sd=float(np.std(train)),full_sd=float(np.std(full)))
     return full_X,summary
 
