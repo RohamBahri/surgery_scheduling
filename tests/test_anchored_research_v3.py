@@ -74,3 +74,32 @@ def test_ridge_and_reference_score_penalties_match_closed_form():
     assert anchored-baseline==pytest.approx(expected)
     with pytest.raises(ValueError,match='Reference policy'):
         restricted_value([],X,b,w,.8,30.,2.,reference=.1)
+
+
+def test_full_offline_history_preserves_informative_features_without_lodo_contrast():
+    data=sample(days=10)
+    enc=RichCorrectionEncoder(history_mode='full_offline')
+    training=enc.fit_transform(data)
+    deployment_like=enc.transform(data)
+    assert REMOVED_SERVICE_FEATURES.isdisjoint(enc.names)
+    for name in ('hist_procedure_mean_abs_error',
+                 'hist_surgeon_under_rate',
+                 'hist_pair_residual_interaction',
+                 'proportional_booked_x_procedure'):
+        assert name in enc.names
+        k=enc.names.index(name)
+        np.testing.assert_allclose(training[:,k],deployment_like[:,k],atol=1e-9)
+    # The preserved legacy encoder is LODO, so no assertion that all
+    # train/deployment columns are identical or completely label-free.
+
+
+def test_boosted_raw_preoperative_features_exclude_all_actual_outcomes():
+    from run_anchored_extras import _raw_preoperative
+    cases=sample(days=7)
+    raw=_raw_preoperative(cases)
+    altered=cases.copy()
+    altered['actual']=999999.
+    import pandas as pd
+    pd.testing.assert_frame_equal(raw,_raw_preoperative(altered))
+    assert all('error' not in s and 'hist_' not in s
+               for s in raw.columns)
