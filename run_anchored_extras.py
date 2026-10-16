@@ -190,24 +190,28 @@ def _check_output_identity(path,identity):
         save_json(path,identity)
 
 def evaluate_boosted(args):
-    meta,frames,model,settings=_frozen_identity(args.artifacts,args.output)
+    # Independent forecast baseline: no ANCHORED training is required.
+    meta,frames=load_matrices(args.artifacts)
     path=args.output/'boosted_predictions.npz'
     identpath=args.output/'boosted_identity.json'
     if not path.exists() or not identpath.exists():
         raise ValueError('Run boosted-fit first')
-    if json.loads(identpath.read_text())['feature_hash']!=meta['matrix_sha256']:
+    boosted_identity=json.loads(identpath.read_text())
+    if (boosted_identity.get('feature_hash')!=meta['matrix_sha256']
+            or boosted_identity.get('workbook_sha256')!=digest(args.workbook)
+            or boosted_identity.get('feature_source')!=source_fingerprint()):
         raise ValueError('Boosted score identity mismatch')
     valid=frames['validation'];b=valid['booked']
     with np.load(path) as x:
         if not np.array_equal(x['validation_case_id'],valid['case_id']):
             raise ValueError('Boosted predictions case order mismatch')
         score=x['validation_score']
-    _,pred=display_and_duration(score,b,settings.get('alpha',.8),settings.get('h',30.))
+    _,pred=display_and_duration(score,b,args.alpha,args.h)
     weeks=load_weeks(args.workbook,meta,'validation')
     idx=check_week_cases(weeks,valid)
     _check_output_identity(args.output/'boosted_evaluation_identity.json',
-          dict(model_sha=digest(path),anchored_sha=digest(args.output/'anchored_progress.json'),
-               feature=meta['matrix_sha256']))
+          dict(prediction_sha=digest(path),workbook_sha=digest(args.workbook),
+               alpha=args.alpha,h=args.h,feature=meta['matrix_sha256']))
     df=_score_weeks(weeks,idx,{'BOOSTED':pred},args.seconds,1,args.workers,
                    args.output/'boosted_validation.csv')
     result=_describe(df,54)
@@ -346,11 +350,14 @@ def main():
     p.add_argument('--workers',type=int,default=15)
     p.add_argument('--seconds',type=float,default=600.)
     p.add_argument('--scenarios',default='.5:30,.8:30,1:30,.8:60')
+    p.add_argument('--alpha',type=float,default=.8)
+    p.add_argument('--h',type=float,default=30.)
     p.add_argument('--max-flex-components',type=int,default=5)
     p.add_argument('--max-flex-cases',type=int,default=3)
     p.add_argument('--grid-levels',type=int,default=3)
     args=p.parse_args()
-    if (args.workers<1 or args.seconds<=0 or args.max_flex_components<1
+    if (args.workers<1 or args.seconds<=0 or not 0<args.alpha<=1 or args.h<=0
+            or args.max_flex_components<1
             or not 1<=args.max_flex_cases<=5 or not 2<=args.grid_levels<=5):
         p.error('Invalid worker count or wall time')
     if args.stage!='boosted-fit' and args.workbook is None:
