@@ -175,7 +175,7 @@ The +/-150 coefficient box remains unchanged for comparison.
 
 ## 6. Nonlinear predictive baseline
 
-After feature generation and baseline fitting:
+After feature generation (ANCHORED training is NOT required):
 
     export OUT=artifacts/anchored_leakfix_v1
     bash run_research_v3.sh boosted-fit
@@ -188,7 +188,8 @@ Training predictions are grouped 5-fold calendar-week OOF;
 the predictor used for 2012 validation is fitted to all 18,705
 training cases, without validation labels. This is a forecasting
 baseline, not a decision-aware boosted correction policy.
-The evaluation re-solves the exact deployed weekly planner.
+The evaluation re-solves the exact deployed weekly planner and is
+independent of the ANCHORED checkpoint.
 
 ## 7. Frozen-policy behavioral sensitivity
 
