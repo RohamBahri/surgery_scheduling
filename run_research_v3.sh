@@ -53,7 +53,7 @@ case "$STAGE" in
        --artifacts "$ARTIFACTS" --output "$OUT" --stage audit);;
   boosted-fit)
     cmd=("$PYTHON" run_anchored_extras.py --stage boosted-fit --artifacts "$ARTIFACTS"
-       --output "$OUT");;
+       --output "$OUT" --workbook "$WORKBOOK");;
   boosted-evaluate)
     cmd=("$PYTHON" run_anchored_extras.py --stage boosted-evaluate
        --artifacts "$ARTIFACTS" --output "$OUT" --workbook "$WORKBOOK"
