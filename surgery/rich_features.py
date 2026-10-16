@@ -308,7 +308,18 @@ class RichCorrectionEncoder:
         if 'actual' not in f or not np.isfinite(f.actual.to_numpy(float)).all():
             raise ValueError('Training needs finite realized durations to estimate history')
         self.base = Encoder()
-        old = self.base.fit_transform(f)  # IMPORTANT: unchanged LODO estimator
+        old = self.base.fit_transform(f)  # Existing encoder estimates/shrinkage
+        if self.history_mode=='full_offline':
+            # Preserve the ORIGINAL surgery.data.Encoder implementation.
+            # Re-express its four legacy learned effects with the same
+            # full-training fitted summaries used at deployment. This
+            # removes training-only LODO contrast without dropping any of
+            # the effects or changing the base estimator code.
+            full_scores=self.base._scores(f)
+            raw=self.base._raw(f,full_scores)
+            old=np.column_stack([np.ones(len(f)),
+                                  (raw-self.base.mean)/self.base.scale])
+            self.base.training_scores=full_scores
         self.original_names = list(self.base.names)
         self.keep = [i for i,s in enumerate(self.original_names) if s != 'booked']
         if len(self.keep) != len(self.original_names)-1:
