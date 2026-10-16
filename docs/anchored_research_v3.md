@@ -34,6 +34,66 @@ does not impose expanding chronological histories. The code and case
 hashes invalidate incompatible checkpoints. Do not reuse old 74-feature
 coefficients against the new feature matrix.
 
+## 1B. Alternative full-offline historical information (separate experiment)
+
+There is a second, explicitly labeled feature configuration that **keeps**
+the shrunk procedure/surgeon/pair historical statistics, but calculates
+them from the entire designated offline training cohort for both the
+training matrix and deployment. It does NOT remove the base Encoder's
+four legacy LODO fields. It eliminates artificial leave-date-out
+differences in the added historical effects but still allows modest
+in-sample self-influence, especially for sparse categories. Do not call
+it entirely leak-free. It is a controlled, useful contrast with the
+default drop-three-column variant:
+
+    export ARTIFACTS=artifacts/weekly_rich_full_offline_v1
+    export GAP_DIR=artifacts/weekly_gap_full_offline_v1
+    export OUT=artifacts/anchored_full_offline_v1
+    export HISTORY_MODE=full_offline
+    bash run_research_v3.sh features
+    bash run_research_v3.sh lasso
+    bash run_research_v3.sh case
+    bash run_research_v3.sh vf
+    bash run_research_v3.sh gap
+    bash run_research_v3.sh audit
+    bash run_research_v3.sh references
+    bash run_research_v3.sh train
+    bash run_research_v3.sh certify
+
+**Do not start both costly full-cohort variants simultaneously.** Compare
+their training-only diagnostics first and predeclare the eventual evaluation
+comparisons. Keep the 2012 development set out of unrestricted model
+selection. The two feature variants cannot share references or learned
+policies because their matrix identities differ.
+
+## 1C. Controlled initialization and algorithm attribution
+
+Before applying tighter surrogate, trust growth, or regularization, run
+one LASSO-start control with identical search settings to the CASE-start
+baseline. All runs below reuse the expensive certified reference library
+from the CASE-start experiment when feature and planner identity match:
+
+    export ARTIFACTS=artifacts/weekly_rich_leakfix_v1
+    export GAP_DIR=artifacts/weekly_gap_leakfix_v1
+    export HISTORY_MODE=leave_date_out
+    export OUT=artifacts/anchored_leakfix_lasso_control_v1
+    export INITIAL=LASSO
+    export REFERENCES_FROM=artifacts/anchored_leakfix_v1
+    unset RIDGE REFERENCE_PENALTY TERMINAL_SEPARATION TIGHT_SURROGATE TRUST_GROWTH LINE_FRACTIONS
+    bash run_research_v3.sh references
+    unset REFERENCES_FROM
+    bash run_research_v3.sh train
+    bash run_research_v3.sh certify
+
+The contrast between the CASE-start and LASSO-start runs isolates
+initialization. Compare the LASSO-start search/regularization variants
+against **the LASSO-start control**, not against the CASE-start policy.
+With terminal separation OFF, v3 preserves the v2 pattern of
+continuing after a rejected direction when new cuts were found, subject
+to the outer-iteration budget. A terminal pass is optional, bounded and
+explicitly recorded. Only selected predeclared policies should receive
+2012 development evaluations.
+
 ## 2. Run diagnostics without Gurobi
 
     bash run_research_v3.sh audit
@@ -122,7 +182,9 @@ After feature generation and baseline fitting:
     bash run_research_v3.sh boosted-evaluate
 
 Fixed-configuration HistGradientBoostingRegressor predicts booking
-residuals. Training predictions are grouped 5-fold calendar-week OOF;
+residuals from **raw preoperative categories, booked time, calendar and
+lead-time variables**, not from the supervised historical encoding.
+Training predictions are grouped 5-fold calendar-week OOF;
 the predictor used for 2012 validation is fitted to all 18,705
 training cases, without validation labels. This is a forecasting
 baseline, not a decision-aware boosted correction policy.
