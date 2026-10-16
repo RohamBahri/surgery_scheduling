@@ -44,38 +44,86 @@ def _frozen_identity(artifacts, output):
         raise ValueError('ANCHORED artifact and feature identity mismatch')
     return meta,frames,model,settings
 
-def fit_boosted(args):
+def _raw_preoperative(frame):
+    """No outcome-derived history; all columns are known preoperatively."""
+    cat=('group','service','procedure','surgeon','patient_type')
+    x=frame[list(cat)].fillna('MISSING').astype(str).reset_index(drop=True)
+    booked=np.asarray(frame['booked'],float)
+    x['booked_minutes']=booked
+    x['log_booked_minutes']=np.log1p(booked)
+    day=pd.to_datetime(frame['date']).reset_index(drop=True)
+    x['day_of_week']=day.dt.weekday.astype(float)
+    x['month']=day.dt.month.astype(float)
+    for name in ('dtt','consult'):
+        if name in frame:
+            lead=(day-pd.to_datetime(frame[name]).reset_index(drop=True)).dt.days.astype(float)
+            x[name+'_lead_days']=np.where((lead>=0)&(lead<=3650),lead,np.nan)
+        else:
+            x[name+'_lead_days']=np.nan
+    return x
+
+
+def _boosted_estimator():
     from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.pipeline import Pipeline
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.impute import SimpleImputer
+    cat=('group','service','procedure','surgeon','patient_type')
+    num=('booked_minutes','log_booked_minutes','day_of_week','month',
+         'dtt_lead_days','consult_lead_days')
+    enc=ColumnTransformer([
+        ('categorical',OneHotEncoder(handle_unknown='ignore',
+                                    min_frequency=20,max_categories=40,
+                                    sparse_output=False),list(cat)),
+        ('numerical',SimpleImputer(strategy='median',keep_empty_features=True),
+                     list(num))
+    ],sparse_threshold=0.)
+    model=HistGradientBoostingRegressor(
+        loss='absolute_error',learning_rate=.05,max_iter=300,
+        max_leaf_nodes=15,max_depth=3,l2_regularization=10.,
+        min_samples_leaf=35,random_state=20261015)
+    return Pipeline([('preoperative_only',enc),('predictor',model)])
+
+
+def fit_boosted(args):
+    from run_weekly_rich import read_cohort, windows
     meta,frames=load_matrices(args.artifacts)
     train=frames['train'];valid=frames['validation']
-    X=np.asarray(train['X'],float)
+    if args.workbook is None:
+        raise ValueError('Raw preoperative boosted baseline needs the workbook')
+    _,cohort=read_cohort(args.workbook)
+    train_frame,valid_frame,_,_=windows(cohort,meta['start_week_index'],
+                                        meta['train_weeks'],meta['validation_weeks'])
+    if (not np.array_equal(train_frame.case_id.to_numpy(int),train['case_id'])
+            or not np.array_equal(valid_frame.case_id.to_numpy(int),valid['case_id'])):
+        raise ValueError('Raw preoperative case ordering differs from frozen cohort')
+    X=_raw_preoperative(train_frame)
+    Xv=_raw_preoperative(valid_frame)
     y=np.asarray(train['actual']-train['booked'],float)
-    # Calendar-week folds: no case from the excluded week enters that fold's
-    # predictor. No chronological history restriction and no validation labels.
+    # Grouped out-of-fold prediction with raw features only; no chronological
+    # restrictions and no target-encoded values in any predictor fold.
     dates=np.unique(train['monday'])
     fold_by_date={date:i%5 for i,date in enumerate(sorted(dates))}
     fold=np.asarray([fold_by_date[d] for d in train['monday']],int)
-    def estimator():
-        return HistGradientBoostingRegressor(
-            loss='absolute_error',learning_rate=.05,max_iter=300,
-            max_leaf_nodes=15,max_depth=3,l2_regularization=10.,
-            min_samples_leaf=35,random_state=20261015)
     pred=np.full(len(X),np.nan,float)
     for k in range(5):
-        fit=estimator()
-        fit.fit(X[fold!=k],y[fold!=k])
-        pred[fold==k]=fit.predict(X[fold==k])
+        model=_boosted_estimator()
+        model.fit(X.loc[fold!=k],y[fold!=k])
+        pred[fold==k]=model.predict(X.loc[fold==k])
     if not np.isfinite(pred).all():
         raise AssertionError('Missing out-of-fold predictions')
-    final=estimator()
+    final=_boosted_estimator()
     final.fit(X,y)
-    test_pred=final.predict(valid['X'].astype(float))
+    test_pred=final.predict(Xv)
     target=args.output/'boosted_predictions.npz'
     cfg=args.output/'boosted_identity.json'
     identity=dict(feature_hash=meta['matrix_sha256'],feature_source=source_fingerprint(),
-                  method='HistGradientBoosting_absolute_residual_v1',
+                  workbook_sha256=digest(args.workbook),
+                  method='HistGradientBoosting_raw_preoperative_absolute_residual_v2',
                   train_label_use='other calendar-week folds only',
                   fold_seed=20261015,folds=5,
+                  predictors=list(X.columns),
                   validation_training='all designated training cases; no validation labels')
     if target.exists() or cfg.exists():
         if not target.exists() or not cfg.exists() or json.loads(cfg.read_text())!=identity:
@@ -90,7 +138,8 @@ def fit_boosted(args):
                             validation_case_id=valid['case_id'])
         save_json(cfg,identity)
     print(json.dumps({'file':str(target),'train_oof_mae_raw':float(np.mean(np.abs(y-pred))),
-                      'features':X.shape[1],'n_train':len(X)},indent=2))
+                      'raw_preoperative_features':list(X.columns),'n_train':len(X)},indent=2))
+
 
 def _score_weeks(weeks,case_index,preds,seconds,threads,workers,path):
     records={}
