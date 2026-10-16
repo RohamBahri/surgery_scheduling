@@ -39,12 +39,16 @@ coefficients against the new feature matrix.
 There is a second, explicitly labeled feature configuration that **keeps**
 the shrunk procedure/surgeon/pair historical statistics, but calculates
 them from the entire designated offline training cohort for both the
-training matrix and deployment. It does NOT remove the base Encoder's
-four legacy LODO fields. It eliminates artificial leave-date-out
-differences in the added historical effects but still allows modest
-in-sample self-influence, especially for sparse categories. Do not call
-it entirely leak-free. It is a controlled, useful contrast with the
-default drop-three-column variant:
+training matrix and deployment. It ALSO retains all four legacy base
+encoder procedure/surgeon effects, but reconstructs their training
+values with the encoder's full-training summaries. For the same training
+case, the complete full-offline X is therefore equal to the deploy-like
+transform X, with no training-only LODO feature contrasts. The original
+surgery/data.py implementation and shrinkage estimator remain untouched.
+There is still in-sample self-influence because a group's full-sample
+history includes its own cases' outcomes, particularly for sparse
+categories; do not claim complete statistical independence. It is a
+controlled, information-preserving contrast with the minimal patch:
 
     export ARTIFACTS=artifacts/weekly_rich_full_offline_v1
     export GAP_DIR=artifacts/weekly_gap_full_offline_v1
