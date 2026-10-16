@@ -506,7 +506,12 @@ def learn(output,weeks,index,data,refs,initial,alpha,h,
             gained=(sum(len(v) for v in state['library'].values())>size_before_round
                     or improved_references>0)
             restarts=int(state.get('terminal_restarts',0))
-            if (terminal_separation and gained
+            if not terminal_separation and gained and k+1<outer:
+                # Preserve historical behavior when terminal verification
+                # is disabled: additional cuts may improve the next direction.
+                print('New competitor/reference information; continue within outer budget',
+                      flush=True)
+            elif (terminal_separation and gained
                     and restarts<max_terminal_restarts and k+1<outer):
                 state['terminal_restarts']=restarts+1
                 state['trust_scale']=max(.25,float(state.get('trust_scale',1.))/trust_growth)
