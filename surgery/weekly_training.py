@@ -40,7 +40,14 @@ def checksum_array(array):
 
 def response_with_derivative(raw, booked, alpha, h):
     """Match display_and_duration exactly, including clipping and attenuation."""
+    import os
     raw, booked = np.asarray(raw, float), np.asarray(booked, float)
+    if os.environ.get('SURGERY_RESEARCH_LINK', 'original') == 'inverse':
+        _, duration = display_and_duration(raw, booked, alpha, h)
+        cap = alpha * min(float(h), 180.)
+        lower = alpha * np.maximum(-min(float(h), 180.), 1. - booked)
+        derivative = ((raw > lower) & (raw < cap)).astype(float)
+        return duration, derivative
     lo = np.maximum(-180., 1. - booked)
     clipped = np.clip(raw, lo, 180.)
     _, duration = display_and_duration(raw, booked, alpha, h)

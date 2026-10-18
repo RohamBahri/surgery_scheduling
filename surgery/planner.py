@@ -21,8 +21,25 @@ def response(display, alpha, h):
 
 
 def display_and_duration(raw, booked, alpha, h):
-    b = np.asarray(booked)
-    u = np.clip(raw, np.maximum(-180, 1 - b), 180)
+    """Display advice using the original behavior, or an inverse-response link.
+
+    SURGERY_RESEARCH_LINK=inverse interprets raw as a *desired effective*
+    correction. The policy weights remain unconstrained by the response cap.
+    The original policy is the default for backwards compatibility.
+    """
+    import os
+    b = np.asarray(booked, dtype=float)
+    raw = np.asarray(raw, dtype=float)
+    mode = os.environ.get('SURGERY_RESEARCH_LINK', 'original')
+    if mode == 'inverse':
+        if h is None or not (0 < alpha <= 1 and h > 0):
+            raise ValueError('Inverse link requires finite positive alpha and h')
+        cap = min(float(h), 180.)
+        u = np.clip(raw / alpha, np.maximum(-cap, 1. - b), cap)
+    elif mode == 'original':
+        u = np.clip(raw, np.maximum(-180., 1. - b), 180.)
+    else:
+        raise ValueError('Unknown SURGERY_RESEARCH_LINK=' + mode)
     return u, b + response(u, alpha, h)
 
 

@@ -181,6 +181,17 @@ def hinge_response(booked, alpha=.8, h=30.):
     Uses finite differences of an explicitly known PWL function only to
     extract the slopes; the result is algebraic to floating-point precision.
     """
+    import os
+    if os.environ.get('SURGERY_RESEARCH_LINK', 'original') == 'inverse':
+        if not (0 < alpha <= 1 and h > 0 and booked > 0):
+            raise ValueError('Invalid inverse-link response parameters')
+        cap = min(float(h), 180.)
+        lower = alpha * max(-cap, 1. - float(booked))
+        upper = alpha * cap
+        # clip(score, lower, upper) as an exact DC/hinge expression.
+        return HingeDC(float(lower), ((float(lower), 1.),),
+                       ((float(upper), 1.),))
+
     if not (0 < alpha <= 1) or h <= 0 or booked <= 0:
         raise ValueError("Invalid response parameters or booking")
     lo, hi = max(-180., 1. - booked), 180.

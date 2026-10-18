@@ -101,7 +101,9 @@ def restricted_value(blocks, X, booked, w, alpha, h, gamma, lam=0., *, ridge=0.,
              for b in blocks)
     value=loss/len(booked)+lam*float(np.abs(np.asarray(w)[1:]).sum())
     if ridge:
-        value += ridge/2*float(np.dot(w[1:],w[1:]))
+        center = np.zeros_like(w) if reference_w is None else np.asarray(reference_w,float)
+        delta = np.asarray(w[1:],float) - center[1:]
+        value += ridge/2*float(delta@delta)
     if reference:
         if reference_w is None:
             raise ValueError('Reference policy required')
@@ -191,7 +193,10 @@ def solve_majorizer(blocks,X,booked,at,alpha,h,gamma,lam,
                 m.addConstr(v>=w[j]);m.addConstr(v>=-w[j]);l1+=v
         prox_score=gp.quicksum((score[i]-float(raw0[i]))**2 for i in range(n))
         prox_coef=gp.quicksum((w[j]-float(at[j]))**2 for j in range(p))
-        ridge_term=ridge/2*gp.quicksum(w[j]*w[j] for j in range(1,p))
+        ridge_center=(np.zeros(p) if reference_w is None
+                      else np.asarray(reference_w,float))
+        ridge_term=ridge/2*gp.quicksum(
+            (w[j]-float(ridge_center[j]))**2 for j in range(1,p))
         reference_term=0.
         if reference:
             ref_scores=X@np.asarray(reference_w,float)
