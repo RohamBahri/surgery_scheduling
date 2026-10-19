@@ -63,15 +63,18 @@ def add_context(base, weeks, index, *, variant='roster', scaler=None):
     names = all_names[:2] if variant == 'cohort' else all_names
     extra = np.full((len(X), len(names)), np.nan)
     for week in weeks:
-        load = float(np.sum(week.booked)) / (480.0 * week.k)
+        # Cohort-only outputs must not depend on roster capacity/eligibility.
+        load = (float(np.sum(week.booked)) / (480.0 * week.k)
+                if variant == 'roster' else None)
         for s in range(len(week.surgeon_ids)):
             loc = np.flatnonzero(week.surgeon == s)
             booked = float(np.sum(week.booked[loc]))
-            allowed = len(week.allowed[s])
+            allowed = len(week.allowed[s]) if variant == 'roster' else None
             for j in loc:
                 i = index[int(week.case_ids[j])]
-                values=(booked, float(len(loc)), load, float(allowed))
-                extra[i] = values[:len(names)]
+                values=((booked, float(len(loc))) if variant == 'cohort'
+                        else (booked, float(len(loc)), load, float(allowed)))
+                extra[i] = values
     if not np.isfinite(extra).all():
         raise RuntimeError('Missing weekly-context features')
     if scaler is None:
