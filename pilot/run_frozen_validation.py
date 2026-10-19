@@ -25,6 +25,9 @@ SEEDS = (0, 1, 2)
 # Exact SHA256 of the initial runner (commit f17b0d4), before the metadata-only
 # CASE selection-key fix. This migration is permitted ONLY before any freeze.
 PRE_FIX_RUNNER_SHA256 = '7802b23fcf792c5abe82c705d5af80155480079f7b0569be54bddd6b2373d6be'
+# Same original script including a trailing newline (the initial local file).
+# Both SHA-256 values were verified against the first committed runner bytes.
+PRE_FIX_RUNNER_SHA256_TRAILING_NEWLINE = 'a6eb369839a608552760e23fe044a44e9a5640f5f2aa846f6a9bf5579252d20f'
 SOURCES = ('pilot/run_pilot.py','pilot/run_fold_pilot.py','run_weekly_rich.py',
            'run_weekly_train.py','surgery/data.py','surgery/rich_features.py',
            'surgery/weekly_data.py','surgery/planner.py','surgery/weekly_training.py',
@@ -88,7 +91,8 @@ def assert_identity(args):
                             if k!='runner_sha256'}
             empty_policies=all(not (args.root/context/'case_policy.json').exists()
                                for context in ('none','cohort'))
-            if (recorded.get('runner_sha256')==PRE_FIX_RUNNER_SHA256
+            if (recorded.get('runner_sha256') in (PRE_FIX_RUNNER_SHA256,
+                    PRE_FIX_RUNNER_SHA256_TRAILING_NEWLINE)
                     and old_comparable==new_comparable and empty_policies
                     and not (args.root/'frozen_policies.json').exists()
                     and not (args.root/'validation'/'validation_scores.json').exists()):
@@ -99,7 +103,21 @@ def assert_identity(args):
                     scientific_settings_unchanged=True))
                 save(path,identity)
             else:
-                raise RuntimeError('Full-training settings changed; use a fresh ROOT')
+                changed = sorted(k for k in set(recorded) | set(identity)
+                                 if k != 'runner_sha256'
+                                 and recorded.get(k) != identity.get(k))
+                raise RuntimeError(
+                    'Full-training identity mismatch; refusing to overwrite the '
+                    'existing checkpoint. Changed scientific fields: '
+                    + repr(changed) + '; saved runner SHA256: '
+                    + str(recorded.get('runner_sha256'))
+                    + '; CASE policy files present: '
+                    + str(not empty_policies) + '; frozen: '
+                    + str((args.root/'frozen_policies.json').exists())
+                    + '; validation scores present: '
+                    + str((args.root/'validation'/'validation_scores.json').exists())
+                    + '. If only the runner SHA differs, share this message; '
+                    'do not delete training files or change the output root.')
     else:
         save(path,identity)
     return identity
