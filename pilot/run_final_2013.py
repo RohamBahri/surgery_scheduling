@@ -25,6 +25,7 @@ from surgery.anchored_training import build_reference_library, verify_policy, le
 from surgery.weekly_data import build_weeks, performed_events
 from surgery.rich_features import RichCorrectionEncoder
 
+RESPONSE_LINK = 'inverse'
 ALPHA, H, GAMMA = .8, 30., 2.
 LAMBDAS = (.0005,.001,.002,.004,.008,.016,.032)
 RIDGES = (.001,.003)
@@ -110,7 +111,7 @@ def identity(args):
     return dict(experiment='whole_2011_2012_train_repeatable_2013_evaluation',
                 workbook_sha256=sha(args.workbook),
                 source_sha256={p:sha(p) for p in SOURCE_FILES},
-                budget=BUDGET,alpha=ALPHA,h=H,gamma=GAMMA,
+                budget=BUDGET,alpha=ALPHA,h=H,gamma=GAMMA,link=RESPONSE_LINK,
                 lambdas=list(LAMBDAS),ridges=list(RIDGES),seeds=list(SEEDS),
                 methods=list(METHODS),
                 time_limits='fixed per independent MIP; incomplete solves must be reported, never scored',
@@ -130,7 +131,7 @@ def settings(args):
         old=json.loads(path.read_text())
         # Independent model checkpoints validate the model-specific settings.
         # Keep the old settings file byte-for-byte stable (used in their IDs).
-        for key in ('workbook_sha256','alpha','h','gamma','lambdas','ridges',
+        for key in ('workbook_sha256','alpha','h','gamma','link','lambdas','ridges',
                     'training_cutoff','feature_rule'):
             if old.get(key)!=state.get(key):
                 raise RuntimeError('Training data/model definition changed: '+key)
@@ -271,15 +272,18 @@ def train_case(args):
             doc=json.loads(path.read_text())
             if len(doc.get('w',[]))!=data['X'].shape[1]:
                 raise RuntimeError('CASE policy feature mismatch')
+            if doc.get('response_link') != RESPONSE_LINK:
+                raise RuntimeError('CASE checkpoint was not trained under the inverse link; use a fresh ROOT')
         else:
             core.case(a,data,dict(policy_role=context,experiment='full_pre2013_train',
                        experiment_selection='ANCHORED ridge 0.001 primary; 0.003 sensitivity',
-                       frozen_input_sha256=sha(args.root/'training_manifest.json')))
+                       frozen_input_sha256=sha(args.root/'training_manifest.json'),
+                       response_link=RESPONSE_LINK))
         print('Complete CASE:',context,flush=True)
 
 
 def training_settings(args,method,context='cohort'):
-    return dict(method=method,link='inverse',context=context,
+    return dict(method=method,link=RESPONSE_LINK,context=context,
                 train_sha256=sha(args.root/'training_data.npz'),
                 cohort_sha256=sha(args.root/'cohort'/'case_policy.json'),
                 experiment_sha256=sha(args.root/'experiment_settings.json'))
@@ -501,7 +505,7 @@ def score_test(args):
     paths=complete_policies(args)
     args.test_dir=test_directory(args,paths)
     methods=('BOOKED',*paths.keys())
-    os.environ['SURGERY_RESEARCH_LINK']='inverse'
+    os.environ['SURGERY_RESEARCH_LINK']=RESPONSE_LINK
     raw,cohort=read_cohort(args.workbook)
     test=split_rows(cohort,'test')
     if len(test)!=8774:
@@ -572,10 +576,14 @@ def score_test(args):
 
 
 def main():
+    # This must run before ANY feature fitting, reference or training worker is spawned.
+    # Setting it only in score_test() trains a different behavioral model.
+    os.environ['SURGERY_RESEARCH_LINK'] = RESPONSE_LINK
+    os.environ['SURGERY_ANCHORED_HASH_SEED'] = '0'
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage',required=True,
                    choices=('prepare','case','anchored','vf','gap','audit','test','summary'))
-    p.add_argument('--root',type=Path,default=Path('artifacts/final_2013_audited_v1'))
+    p.add_argument('--root',type=Path,default=Path('artifacts/final_2013_inverse_v2'))
     p.add_argument('--workbook',type=Path,default=Path('data/UHNOperating_RoomScheduling2011-2013.xlsx'))
     args=p.parse_args()
     if args.stage=='prepare':prepare(args);return
