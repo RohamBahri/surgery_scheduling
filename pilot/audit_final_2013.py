@@ -144,24 +144,38 @@ def audit_training(args):
         if method.startswith('ANCHORED'):
             candidates=[a for h in record.get('history',[]) for a in h.get('candidates',[])]
             incomplete=[a for a in candidates if a.get('reason')=='unresolved_deployed_solver']
+            masters=[row for h in record.get('history',[])
+                      for inner in h.get('inner',[]) for row in inner.get('pdca',[])]
+            failed_master=[row for row in masters if row.get('complete') is False]
             limits[method]=dict(training_outer=int(record.get('outer',0)),
                stopping=record.get('stopping'),unresolved_training_candidates=len(incomplete),
+               incomplete_master_qp=len(failed_master),
+               master_qp_statuses=dict(Counter(str(x.get('status')) for x in masters)),
                terminal_separation_closed=bool(record.get('separation_closed',False)),
                accepted_count=len(record.get('accepted',[])))
             if incomplete:unresolved+=len(incomplete)
+            if failed_master:unresolved+=len(failed_master)
         elif method=='VF_COHORT':
             steps=record.get('iterations',[])
             hitlimit=sum(any(p.get('iterations',0)>=run.BUDGET['vf_inner'] for p in s.get('fit_passes',[])) for s in steps)
+            unsuccessful=sum(any(p.get('optimizer_success') is False
+                        for p in step.get('fit_passes',[])) for step in steps)
             limits[method]=dict(stopping=record.get('stopping'),outer=len(steps),
                                 inner_iteration_limit_rounds=hitlimit,
+                                inner_not_converged_rounds=unsuccessful,
                                 accepted=sum(bool(x.get('accepted')) for x in steps))
         elif method=='GAP_COHORT':
             steps=record.get('history',[])
+            exact_last=steps[-1].get('certified_after',{}).get('all_weekly_oracles_exact',False) if steps else False
+            final_width=steps[-1].get('certified_after',{}).get('regularized_gap_interval_width_per_case') if steps else None
             limits[method]=dict(stopping=record.get('stopping'),outer=len(steps),
                                 overlapping_intervals=sum(a.get('comparison')=='OVERLAPPING_INTERVALS'
                                   for h in steps for a in h.get('candidates',[])),
+                                all_final_weekly_oracles_exact=exact_last,
+                                final_certificate_interval_width=final_width,
                                 paused=bool(record.get('paused')))
             if record.get('paused'):unresolved+=1
+            if not exact_last:unresolved+=1
         elif method.startswith('CASE'):
             bic=json.loads((p.parent/'case_bic_path.json').read_text())
             selected=min(bic,key=lambda x:x['bic_proxy'])
@@ -177,6 +191,8 @@ def audit_training(args):
     if unchecked:risk.append('more_than_40_extreme_components_not_checked_for_reallocations')
     if any(x.get('inner_iteration_limit_rounds',0) for x in limits.values()):
         risk.append('vf_inner_optimizer_reached_iteration_cap')
+    if any(x.get('inner_not_converged_rounds',0) for x in limits.values()):
+        risk.append('vf_lbfgs_not_converged')
     if any(not all(x.get('selected_optimizer_success',[True])) for x in limits.values()):
         risk.append('case_optimizer_nonconvergence')
     stats={name:dict(regret_per_case=sum(v['realized_cost']-oracle[k]['realized_cost']
