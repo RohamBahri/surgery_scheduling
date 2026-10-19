@@ -44,7 +44,7 @@ BUDGET = dict(workers=12, seconds=600, case_inner=650,
               anchored_master_seconds=300, anchored_master_threads=4,
               evaluation_seconds=900,
               evaluation_retry_seconds=1800, reference_retry_seconds=1200)
-METHODS = ('BOOKED','CASE_NONE','CASE_COHORT','ANCHORED_0p001',
+METHODS = ('BOOKED','CASE_NONE','CASE_COHORT','LASSO_COHORT','ANCHORED_0p001',
            'ANCHORED_0p003','VF_COHORT','GAP_COHORT')
 SOURCE_FILES = ('pilot/run_final_2013.py','pilot/audit_final_2013.py',
                 'pilot/run_pilot.py',
@@ -88,6 +88,7 @@ def method_paths(root):
     return {
         'CASE_NONE':root/'none'/'case_policy.json',
         'CASE_COHORT':root/'cohort'/'case_policy.json',
+        'LASSO_COHORT':root/'cohort'/'fold_lasso.json',
         'ANCHORED_0p001':root/'cohort'/'sensitivity'/label(.001)/'anchored'/'anchored_progress.json',
         'ANCHORED_0p003':root/'cohort'/'sensitivity'/label(.003)/'anchored'/'anchored_progress.json',
         'VF_COHORT':root/'cohort'/'vf'/'vf_progress.json',
@@ -374,7 +375,7 @@ def complete_policies(args):
         if not p.is_file():raise RuntimeError('Missing final fitted policy: '+str(p))
         doc=json.loads(p.read_text())
         n=len(features)+(2 if name not in ('CASE_NONE',) else 0)
-        w=np.asarray(doc['w'],dtype=float)
+        w=np.asarray(doc.get('w',doc.get('weights')),dtype=float)
         if w.shape!=(n,) or not np.isfinite(w).all():
             raise RuntimeError('Invalid fitted coefficient dimension: '+name)
         if name.startswith(('ANCHORED','VF_','GAP_')) and not doc.get('complete'):
@@ -487,10 +488,27 @@ def summarize(args):
         observed=float(table[:,0].sum()/table[:,1].sum())
         comps[name]=dict(difference_per_case=observed,
                          ci95=list(map(float,np.quantile(totals[:,0]/totals[:,1],[.025,.975]))))
+    # Compare primary also to the capped inverse-link LASSO cohort benchmark.
+    primary_lasso=[]
+    for monday in allweeks:
+        delta=0.;n=0
+        for site in sorted(s for w,s in timekeys if w==monday):
+            for seed in SEEDS:
+                a=index['ANCHORED_0p001',seed,monday,site]
+                b=index['LASSO_COHORT',seed,monday,site]
+                if a['cases']!=b['cases']:raise AssertionError('LASSO paired cohort mismatch')
+                delta+=a['regret']-b['regret'];n+=a['cases']
+        primary_lasso.append((delta/len(SEEDS),n/len(SEEDS)))
+    table=np.asarray(primary_lasso,float)
+    sample=rng.integers(0,len(allweeks),size=(10000,len(allweeks)))
+    weighted=table[sample].sum(axis=1)
+    lasso_comp=dict(difference_per_case=float(table[:,0].sum()/table[:,1].sum()),
+                    ci95=list(map(float,np.quantile(weighted[:,0]/weighted[:,1],[.025,.975]))))
     save(args.root/'test'/'test_summary.json',dict(
         final_2013_test=True,months='2013-01 through 2013-06',
         cases=ncases,calendar_weeks=len(allweeks),
         means=mean,paired_versus_cohort_case=comps,
+        primary_vs_lasso_cohort=lasso_comp,
         primary='ANCHORED_0p001',unadjusted_primary_ci=True,
         seeds='three deterministic tie-breaking variants; NOT independent observations',
         interpretation='One-time final 2013 holdout, never selected a method on test outcomes'))
@@ -515,7 +533,7 @@ def score_test(args):
     if list(names)!=traincontext['names']:raise RuntimeError('Changed final context feature names')
     tr={'X':base,'booked':test.booked.to_numpy(float),'actual':test.actual.to_numpy(float)}
     co={'X':cohortX,'booked':tr['booked'],'actual':tr['actual']}
-    vec={name:np.asarray(json.loads(path.read_text())['w'],float)
+    vec={name:np.asarray((lambda d:d.get('w',d.get('weights')))(json.loads(path.read_text())),float)
          for name,path in method_paths(args.root).items()}
     vec['BOOKED']=np.zeros(base.shape[1])
     out=args.root/'test';out.mkdir(parents=True,exist_ok=True)
