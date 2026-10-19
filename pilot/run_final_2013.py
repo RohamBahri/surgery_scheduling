@@ -580,6 +580,11 @@ def main():
     # Setting it only in score_test() trains a different behavioral model.
     os.environ['SURGERY_RESEARCH_LINK'] = RESPONSE_LINK
     os.environ['SURGERY_ANCHORED_HASH_SEED'] = '0'
+    from surgery.planner import display_and_duration
+    _, checked = display_and_duration(np.array([10.,40.,100.]),
+                                      np.full(3,200.), ALPHA, H)
+    if not np.allclose(checked - 200., [10.,24.,24.]):
+        raise RuntimeError('Inverse surgeon-response link was not activated')
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage',required=True,
                    choices=('prepare','case','anchored','vf','gap','audit','test','summary'))
