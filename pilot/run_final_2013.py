@@ -42,7 +42,8 @@ BUDGET = dict(workers=12, seconds=600, case_inner=650,
               anchored_outer=4, anchored_inner=20, anchored_closure=2,
               anchored_sep_batch=192, anchored_sep_seconds=180,
               anchored_master_seconds=300, anchored_master_threads=4,
-              evaluation_seconds=900)
+              evaluation_seconds=900,
+              evaluation_retry_seconds=1800, reference_retry_seconds=1200)
 METHODS = ('BOOKED','CASE_NONE','CASE_COHORT','ANCHORED_0p001',
            'ANCHORED_0p003','VF_COHORT','GAP_COHORT')
 SOURCE_FILES = ('pilot/run_final_2013.py','pilot/audit_final_2013.py',
@@ -281,9 +282,15 @@ def train_anchored(args):
     a=fixed_args(args,root)
     refroot=root/'train_refs';refroot.mkdir(parents=True,exist_ok=True)
     refs=refroot/'anchored_references.json'
-    build_reference_library(refroot,weeks,index,data,
-        {'CASE_COHORT':np.asarray(json.loads(case.read_text())['w'],float)},
-        ALPHA,H,float(BUDGET['seconds']),1,BUDGET['workers'])
+    reference_policies={'CASE_COHORT':np.asarray(json.loads(case.read_text())['w'],float)}
+    try:
+        build_reference_library(refroot,weeks,index,data,reference_policies,
+             ALPHA,H,float(BUDGET['seconds']),1,BUDGET['workers'])
+    except RuntimeError as error:
+        if 'lack an EXACT' not in str(error):raise
+        print('Retry only unfinished reference components with larger solver limit',flush=True)
+        build_reference_library(refroot,weeks,index,data,reference_policies,
+             ALPHA,H,float(BUDGET['reference_retry_seconds']),1,BUDGET['workers'])
     for ridge in RIDGES:
         target=root/'sensitivity'/label(ridge)
         target.mkdir(parents=True,exist_ok=True)
@@ -514,7 +521,14 @@ def score_test(args):
     out=args.root/'test';out.mkdir(parents=True,exist_ok=True)
     # The sole reading/scoring of 2013 outcomes starts after the frozen hash check.
     args.fold='2013_final';args.seconds=BUDGET['evaluation_seconds'];args.workers=BUDGET['workers']
-    oracle=hindsight(args,weeks)
+    try:
+        oracle=hindsight(args,weeks)
+    except RuntimeError as error:
+        if 'hindsight oracle incomplete' not in str(error) and 'oracle incomplete' not in str(error):
+            raise
+        print('Retrying unresolved hindsight components with longer time limit',flush=True)
+        args.seconds=BUDGET['evaluation_retry_seconds']
+        oracle=hindsight(args,weeks)
     file=out/'test_scores.json'
     report=json.loads(file.read_text()) if file.exists() else dict(
         frozen_sha256=frozen_sha,test_cases=len(test),
@@ -528,9 +542,16 @@ def score_test(args):
         for name in METHODS:
             if name in report['finished'].get(str(seed),[]):continue
             obj=tr if name in ('BOOKED','CASE_NONE') else co
-            results=verify_policy(out/('seed_'+str(seed)),name,weeks,index,
-                obj['X'],obj['booked'],vec[name],ALPHA,H,
-                BUDGET['evaluation_seconds'],1,BUDGET['workers'])
+            try:
+                results=verify_policy(out/('seed_'+str(seed)),name,weeks,index,
+                    obj['X'],obj['booked'],vec[name],ALPHA,H,
+                    BUDGET['evaluation_seconds'],1,BUDGET['workers'])
+            except RuntimeError as error:
+                if 'exact deployed plans unresolved' not in str(error):raise
+                print('Retrying only incomplete deployment components:',name,seed,flush=True)
+                results=verify_policy(out/('seed_'+str(seed)),name,weeks,index,
+                    obj['X'],obj['booked'],vec[name],ALPHA,H,
+                    BUDGET['evaluation_retry_seconds'],1,BUDGET['workers'])
             scored=group_rows_by_calendar(weeks,results,oracle,seed,name)
             if sum(x['cases'] for x in scored)!=len(test):
                 raise RuntimeError('Final scoring omitted test cases')
