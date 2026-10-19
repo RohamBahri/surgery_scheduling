@@ -47,18 +47,19 @@ def load_training(args):
     return meta, data, weeks, index
 
 
-def add_context(base, weeks, index):
+def add_context(base, weeks, index, *, variant='roster', scaler=None):
     """Four booked-workload and eligibility features, never realized durations.
 
     WARNING: Week.slots and Week.allowed are derived from performed schedules
     and are NOT independently verified as known at recommendation time.
     """
     X = np.asarray(base, float)
-    extra = np.full((len(X), 4), np.nan)
-    names = ('site_week_booked_capacity_ratio',
-             'surgeon_week_booked_capacity_ratio',
-             'surgeon_week_case_count',
-             'surgeon_eligible_room_days')
+    extra = np.full((len(X), len(names)), np.nan)
+    all_names = ('surgeon_week_booked_minutes', 'surgeon_week_case_count',
+                 'site_week_booked_capacity_ratio', 'surgeon_eligible_room_days')
+    if variant not in ('cohort','roster'):
+        raise ValueError('Context variant must be cohort or roster')
+    names = all_names[:2] if variant == 'cohort' else all_names
     for week in weeks:
         load = float(np.sum(week.booked)) / (480.0 * week.k)
         for s in range(len(week.surgeon_ids)):
@@ -67,11 +68,18 @@ def add_context(base, weeks, index):
             allowed = len(week.allowed[s])
             for j in loc:
                 i = index[int(week.case_ids[j])]
-                extra[i] = (load, booked / (480. * max(allowed, 1)),
-                            float(len(loc)), float(allowed))
-    if not np.isfinite(extra).all() or (np.std(extra, axis=0) < 1e-8).any():
-        raise RuntimeError('Missing or constant weekly-context features')
-    mean, sd = extra.mean(axis=0), extra.std(axis=0)
+                values=(booked, float(len(loc)), load, float(allowed))
+                extra[i] = values[:len(names)]
+    if not np.isfinite(extra).all():
+        raise RuntimeError('Missing weekly-context features')
+    if scaler is None:
+        mean, sd = extra.mean(axis=0), extra.std(axis=0)
+        if (sd < 1e-8).any():
+            raise RuntimeError('Constant weekly-context feature in fitting fold')
+    else:
+        mean,sd=map(lambda x:np.asarray(x,float),scaler)
+        if len(mean)!=len(names) or len(sd)!=len(names) or (sd<=0).any():
+            raise RuntimeError('Context transform scaler has incompatible dimension')
     return np.column_stack((X, (extra-mean)/sd)), names, mean.tolist(), sd.tolist()
 
 
@@ -145,7 +153,14 @@ def setup(args):
 
 
 def initial_weights(args, p):
-    obj = json.loads((args.artifacts/'lasso_policy.json').read_text())
+    # Fold runner provides a LASSO fitted on this fold ONLY.
+    file = args.out/'fold_lasso.json'
+    if file.exists():
+        obj = json.loads(file.read_text())
+    elif not getattr(args,'fold_safe',False):
+        obj = json.loads((args.artifacts/'lasso_policy.json').read_text())
+    else:
+        raise RuntimeError('Fold LASSO initializer missing')
     w = np.asarray(obj['weights'], float)
     if len(w)>p:
         raise RuntimeError('Baseline coefficient dimension mismatch')
@@ -165,7 +180,7 @@ def case(args, data, settings):
     rows = []
     for lam in sorted(args.lambda_grid, reverse=True):
         candidates = [fit_fixed(X,b,a,args.alpha,args.h,lam,start,
-                                iterations=args.inner) for start in starts]
+                                iterations=getattr(args,'case_inner',args.inner)) for start in starts]
         chosen = min(candidates,key=lambda x:x['objective'])
         w = np.asarray(chosen['w'],float)
         post,_ = response_with_derivative(X@w,b,args.alpha,args.h)
@@ -173,8 +188,9 @@ def case(args, data, settings):
         effect = np.abs(w[1:])*X[:,1:].std(axis=0)
         df = 1+int(np.count_nonzero(effect>0.05))
         # Quasi-BIC proxy on asymmetric loss, not a claim of exact likelihood df.
-        bic = float(n*np.log(max(loss,1e-9))+df*np.log(n))
+        bic = float(2*n*np.log(max(loss,1e-9))+df*np.log(n))
         row = dict(lambda_l1=lam, bic_proxy=bic, asymmetric_loss_per_case=loss,
+                   bic_formula='2*n*log(mean asymmetric loss)+df*log(n)',
                    active_effects_over_005min=df-1, coefficients=w.tolist(),
                    optimization=chosen['passes'])
         rows.append(row)
