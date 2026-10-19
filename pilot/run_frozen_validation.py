@@ -24,7 +24,7 @@ LAMBDA_GRID = (0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032)
 SEEDS = (0, 1, 2)
 # Exact SHA256 of the initial runner (commit f17b0d4), before the metadata-only
 # CASE selection-key fix. This migration is permitted ONLY before any freeze.
-PRE_FIX_RUNNER_SHA256 = 'a6eb369839a608552760e23fe044a44e9a5640f5f2aa846f6a9bf5579252d20f'
+PRE_FIX_RUNNER_SHA256 = '7802b23fcf792c5abe82c705d5af80155480079f7b0569be54bddd6b2373d6be'
 SOURCES = ('pilot/run_pilot.py','pilot/run_fold_pilot.py','run_weekly_rich.py',
            'run_weekly_train.py','surgery/data.py','surgery/rich_features.py',
            'surgery/weekly_data.py','surgery/planner.py','surgery/weekly_training.py',
