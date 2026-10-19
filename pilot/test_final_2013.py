@@ -12,7 +12,7 @@ from pilot import run_final_2013 as f
 class Final2013Tests(unittest.TestCase):
     def test_final_policy_grid_and_methods_are_fixed(self):
         self.assertEqual(f.METHODS[0],'BOOKED')
-        self.assertEqual(f.METHODS[3],'ANCHORED_0p001')
+        self.assertEqual(f.METHODS[4],'ANCHORED_0p001')
         self.assertEqual(f.RIDGES,(.001,.003))
         self.assertEqual(f.SEEDS,(0,1,2))
         self.assertEqual(f.BUDGET['anchored_inner'],20)
@@ -22,7 +22,7 @@ class Final2013Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td)
             loc=f.method_paths(root)
-            self.assertEqual(len(loc),6)
+            self.assertEqual(len(loc),7)
             self.assertTrue(all('validation' not in str(p) for p in loc.values()))
             self.assertIn('cohort/sensitivity/ridge_0p001',str(loc['ANCHORED_0p001']))
 
@@ -71,6 +71,7 @@ class Final2013Tests(unittest.TestCase):
             summary=json.loads((root/'test'/'test_summary.json').read_text())
             self.assertEqual(summary['calendar_weeks'],2)
             self.assertEqual(summary['means']['ANCHORED_0p001'],8.)
+            self.assertAlmostEqual(summary['primary_vs_lasso_cohort']['difference_per_case'],-2.)
             self.assertAlmostEqual(summary['paired_versus_cohort_case']
                                    ['ANCHORED_0p001']['difference_per_case'],-2.)
 
