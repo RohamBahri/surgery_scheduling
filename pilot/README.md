@@ -1,93 +1,92 @@
-# Decision-model pilot: training-only experiment
+# Decision-model pilot v2 (training-only, held-out weeks)
 
-This branch adds a **short-run, isolated experiment** comparing response-aware
-CASE, VF, VF-GAP, and ANCHORED under identical training data and deterministic
-weekly planners. It varies two policy links (original versus inverse-monotone)
-and two predictor sets (71 case features versus those plus four retrospective
-weekly-context features).
+**Run the new `pilot/run_fold_pilot.sh`; do not invoke the old in-sample
+`pilot/run_pilot.py` directly.** The old launcher redirects to the new
+runner. Source changes are already in the branch; no ZIP/installer is needed.
 
-The response and ridge changes are already applied to the Python source files
-in this branch. **Do not run an installer.** The original nonmonotone response
-remains the default outside the explicitly configured pilot.
+## Pull, test and run
 
-## Getting started
+From the repository root:
 
-From the project root:
+```bash
+git fetch origin
+git switch decision-model-pilot-v1
+git pull --ff-only
+python3.14 -m unittest discover -s pilot -p "test_*.py" -v
 
-1. Pull/check out `decision-model-pilot-v1`.
-2. Run `python3.14 -m unittest discover -s pilot -p 'test_*.py' -v`.
-3. Run `PYTHON=python3.14 bash pilot/run_fast_pilot.sh`.
-4. Run `python3.14 pilot/summarize.py artifacts/decision_model_pilot_v1`.
+# Phase I: statistical CASE, original/inverse link, no/cohort/roster features
+caffeinate -i bash pilot/run_fold_pilot.sh case
+caffeinate -i bash pilot/run_fold_pilot.sh score
 
-The runner expects the frozen training feature set in
-`artifacts/weekly_rich_leakfix_v1/`, the training reference library at
-`artifacts/anchored_leakfix_v1/anchored_references.json`, and the historical
-workbook at `data/UHNOperating_RoomScheduling2011-2013.xlsx`.
-Override their locations with `ARTIFACTS`, `REFS`, and `WORKBOOK`.
-All new outputs use `ROOT=artifacts/decision_model_pilot_v1` by default.
+# Phase II: decision-aware learners, NO context first
+CONTEXTS=none caffeinate -i bash pilot/run_fold_pilot.sh decision
+caffeinate -i bash pilot/run_fold_pilot.sh score
 
-## What it does
+# Phase III, only if warranted: cohort and reconstructed-roster context
+CONTEXTS="cohort roster" caffeinate -i bash pilot/run_fold_pilot.sh decision
+caffeinate -i bash pilot/run_fold_pilot.sh score
 
-**Phase I:** fits four CASE models, choosing their L1 penalty along a
-predeclared grid with a *quasi-BIC proxy* based on training asymmetric
-post-response loss. Compares their verified realized training regret with
-BOOKED under the same hash seeds.
+python3.14 pilot/summarize_folds.py artifacts/decision_model_pilot_v2
+```
 
-**Phase II:** starts VF, VF-GAP, and ANCHORED from the corresponding CASE
-coefficients using the inverse-monotone response link, once without weekly
-context and once with it. ANCHORED uses a residual-to-CASE ridge penalty.
-The run uses 2 outer iterations, 35 inner iterations for VF/GAP, 12 pDCA
-iterations and 128 separation components for ANCHORED. The pilot uses three
-hash seeds (0, 1, 2) for planning evaluation. These are short exploratory
-budgets and **do not establish convergence**.
+Send `artifacts/decision_model_pilot_v2/fold_heldout_summary.json` first.
+Also useful: each `*/fold_*/case_bic_path.json`,
+`*/fold_*/case_policy.json`, `*/fold_*/heldout_scores.json`,
+`*/fold_*/fold_identity.json`, plus the VF/VF-GAP/ANCHORED progress JSONs.
 
-The four extra standardized weekly features are:
-- Site-week booked workload divided by 480 times staffed room-days;
-- Surgeon-week booked workload divided by 480 times eligible room-days;
-- Surgeon-week number of booked cases;
-- Number of eligible surgeon room-days.
+The script uses 500 L-BFGS iterations per CASE smoothing pass; short
+decision-aware budgets (VF/GAP 35 inner/2 outer; ANCHORED 12 pDCA,
+one closure round, 2 outer, 128-component separation batch). It checks
+three hash seeds (0,1,2). Override PYTHON, WORKBOOK, ARTIFACTS, ROOT, WORKERS
+as needed. Set METHODS="vf anchored" to omit VF-GAP, for example.
 
-**Information limitation:** the operative room-day roster and surgeon
-eligibility are **retrospectively reconstructed from performed surgery
-timestamps**. These weekly features use booked durations rather than realized
-durations, but they are *not verified as prospectively observable*. Any gain is
-conditional on the reconstructed roster; do not claim deployment feasibility
-without prospectively observed roster data.
+## Cross-fold data protocol
 
-## Behavioral link
+Sort the original training cohort's 60 calendar Mondays, hold out odd
+weeks versus even weeks, then swap. Each fit uses 30 calendar weeks
+(90 site-weeks), evaluates on the other 30, and **refits the entire
+historical feature encoder within the fitting fold**. It also refits
+normalizers, CASE BIC penalty selection, and a fold-specific LASSO start.
+Decision-aware training, its oracle references and ANCHORED's centered
+ridge all use fitting-fold cases only. Evaluation-fold realized durations
+are used solely to score already fitted policies.
 
-The inverse link interprets the shared score as a desired effective
-correction and displays `clip(score/alpha, max(1-booked,-h), h)`.
-With correctly specified response parameters, the effective correction is
-`clip(score, alpha*max(1-booked,-h), alpha*h)`.
-This removes the decreasing-response region without constraining the latent
-linear coefficient model. It is not automatically robust if the actual
-behavioral threshold differs from the assumed one. The exact ANCHORED hinge
-decomposition and the CASE/VF/GAP training derivatives are adjusted together.
+No development-validation results or 2013 test results are used.
+This is an offline odd/even screening comparison, not a time-forward
+deployment simulation.
 
-## Scientific limitations
+## Methods and important limitations
 
-- CASE's penalty selector is a **BIC-like approximation**, not the exact
-  Gaussian LASSO BIC nor a fully justified effective-degrees-of-freedom
-  estimate in a saturated model.
-- Existing leave-date-out feature encodings retain the same
-  training/deployment feature-stability considerations.
-- Seeds represent arbitrary planner tie-breaking, not independent samples.
-- VF-GAP may pause when solver intervals overlap. Missing or incomplete
-  methods must remain reported as incomplete, not silently ranked.
-- Reused reference assignments and hindsight costs are training-only.
-- The code reads the workbook to reconstruct weekly cases, but only
-  *training-site-week outcomes* are fitted or scored. It does not evaluate
-  the 2012 validation weeks or the 2013 holdout.
+CASE L1 selection uses a training-only **asymmetric-Laplace quasi-BIC**:
+`2*n*log(mean asymmetric error)+df*log(n)`. Counting nonzero effects
+as effective degrees of freedom under a clipped link is approximate.
 
-## Files to report
+Inverse link: latent score represents desired effective correction;
+display is clipped inverse of nominal surgeon response. The folded
+LASSO anchor initializes the latent score **without alpha scaling**.
+Original nonmonotone response remains the default outside the pilot.
 
-Start with `artifacts/decision_model_pilot_v1/pilot_summary.json`.
-For reproducibility also send the four `case_bic_path.json` and
-`case_policy.json` files, plus the two inverse-link sets of:
-`vf/vf_progress.json`, `gap/gap_progress.json`,
-`anchored/anchored_progress.json`, and each
-`pilot_training_comparison.json`.
+ANCHORED is trained from CASE with CASE-centered coefficient ridge.
+Three predeclared penalty strengths (0.0003, 0.001, 0.003) are all
+reported as sensitivity experiments; choosing the winning strength from
+these same outer-fold scores would create selection bias.
 
-Use the pilot to determine which learner merits a longer run. Do not use
-these limited-iteration outcomes as a final manuscript comparison.
+Feature specifications:
+- none: refitted case-level features only;
+- cohort: surgeon-week total booked minutes and surgeon-week case count;
+- roster: cohort features plus site-week booked load/capacity and surgeon
+  eligible room-day count.
+
+Context features are standardized on fitting-fold data and transformed
+using the same scalers for held-out weeks. **Staffed room-days and
+eligibility are reconstructed retrospectively from performed surgeries,
+not verified as known at recommendation time.** Thus roster-context
+results are conditional on assumed advance roster knowledge.
+
+VF, VF-GAP and ANCHORED are the actual existing optimizers with
+shortened search budgets, not surrogate stand-ins. VF-GAP can pause
+with overlapping exact-oracle intervals; do not rank incomplete methods.
+Hash seeds alter deterministic tie-breaking, not independent datasets.
+The summary bootstraps 60 calendar weeks as paired clusters. The
+experiment is exploratory and does not establish global optimizer
+convergence or superiority on future years.
