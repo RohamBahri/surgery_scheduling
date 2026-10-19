@@ -12,7 +12,9 @@ import json
 import os
 import shutil
 from pathlib import Path
+import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 
@@ -54,12 +56,12 @@ def add_context(base, weeks, index, *, variant='roster', scaler=None):
     and are NOT independently verified as known at recommendation time.
     """
     X = np.asarray(base, float)
-    extra = np.full((len(X), len(names)), np.nan)
     all_names = ('surgeon_week_booked_minutes', 'surgeon_week_case_count',
                  'site_week_booked_capacity_ratio', 'surgeon_eligible_room_days')
     if variant not in ('cohort','roster'):
         raise ValueError('Context variant must be cohort or roster')
     names = all_names[:2] if variant == 'cohort' else all_names
+    extra = np.full((len(X), len(names)), np.nan)
     for week in weeks:
         load = float(np.sum(week.booked)) / (480.0 * week.k)
         for s in range(len(week.surgeon_ids)):

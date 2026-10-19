@@ -15,7 +15,9 @@ import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
 from pathlib import Path
+import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from pilot import run_pilot as core
