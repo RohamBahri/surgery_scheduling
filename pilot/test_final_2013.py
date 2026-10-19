@@ -74,6 +74,35 @@ class Final2013Tests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'link'):
                     run.settings(args)
 
+    def test_vf_first_checkpoint_creates_directory_and_resumes(self):
+        # Regression: the first completed group-week must be saveable even
+        # when the VF output directory has not previously been created.
+        import numpy as np
+        from surgery import weekly_training as wt
+
+        week=SimpleNamespace(group='TGH',monday='2012-09-03',
+                             case_ids=np.asarray([2,3],dtype=int))
+        def fake_plan(task):
+            return dict(key=task[0].group+'|'+task[0].monday,
+                        sha256=task[2],complete=True,assignment=[],
+                        predicted_cost=0.,status='OPTIMAL')
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/'cohort'/'vf'
+            inputs=dict(root=root,weeks=[week],X=np.ones((2,1)),
+                        booked=np.asarray([120.,130.]),
+                        index={2:0,3:1},w=np.asarray([10.]),
+                        outer=0,alpha=.8,h=30.,seconds=1.,threads=1,workers=1)
+            with patch.object(wt,'planning_task',side_effect=fake_plan) as plan:
+                result=wt.solve_training_plans(**inputs)
+                self.assertEqual(plan.call_count,1)
+            path=root/'vf_plans_outer_00.json'
+            self.assertTrue(path.is_file())
+            self.assertEqual(json.loads(path.read_text()),result)
+            with patch.object(wt,'planning_task',
+                              side_effect=AssertionError('checkpoint was not reused')) as plan:
+                self.assertEqual(wt.solve_training_plans(**inputs),result)
+                plan.assert_not_called()
+
     def test_policy_versions_receive_distinct_test_folders(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td)
