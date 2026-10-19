@@ -35,6 +35,24 @@ class FrozenCheckpointTests(unittest.TestCase):
             path.write_text(json.dumps(rows[:-1]))
             self.assertIsNone(frozen.recover_complete_case_path(path,settings,3))
 
+    def test_original_runner_with_trailing_newline_can_resume(self):
+        with tempfile.TemporaryDirectory() as work:
+            root=Path(work)
+            args=SimpleNamespace(root=root)
+            new={'experiment':'frozen','runner_sha256':'NEW_SHA',
+                 'source_sha256':{'pilot/run_pilot.py':'UNCHANGED'},
+                 'selection':'ridge 0.001 primary'}
+            recorded=dict(new,runner_sha256=
+                frozen.PRE_FIX_RUNNER_SHA256_TRAILING_NEWLINE)
+            (root/'full_training_settings.json').write_text(json.dumps(recorded))
+            with patch.object(frozen,'initial_identity',return_value=new):
+                frozen.assert_identity(args)
+            self.assertEqual(json.loads(
+                (root/'full_training_settings.json').read_text()),new)
+            migration=json.loads((root/'metadata_fix_migration.json').read_text())
+            self.assertEqual(migration['previous_runner_sha256'],
+                             frozen.PRE_FIX_RUNNER_SHA256_TRAILING_NEWLINE)
+
     def test_precise_identity_migration_only_before_frozen_policies(self):
         with tempfile.TemporaryDirectory() as work:
             root=Path(work)
