@@ -3,7 +3,7 @@
 set -euo pipefail
 PYTHON="${PYTHON:-python3.14}"
 WORKBOOK="${WORKBOOK:-data/UHNOperating_RoomScheduling2011-2013.xlsx}"
-ROOT="${ROOT:-artifacts/final_2013_audited_v1}"
+ROOT="${ROOT:-artifacts/final_2013_inverse_v2}"
 run() { "$PYTHON" pilot/run_final_2013.py --stage "$1" --root "$ROOT" --workbook "$WORKBOOK"; }
 case "${1:-help}" in
   prepare) run prepare ;;
