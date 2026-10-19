@@ -28,6 +28,7 @@ C_OVER, C_UNDER, TURNOVER, CAPACITY = 1.75, 1.0, 30., 480.
 
 def save_json(path, payload):
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
     temporary.replace(path)
@@ -266,6 +267,7 @@ def fit_vf(root, weeks, X, booked, actual, index, alpha, h, lam,
     increase the unsmoothed *true* schedule-aware VF objective.
     """
     root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
     path = root / "vf_progress.json"
     state = json.loads(path.read_text()) if path.exists() else {
         "settings": settings, "w": list(start), "iterations": []}
