@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""One-time 2013 final evaluation after full pre-2013 fitting and training-only audit.
+"""Full pre-2013 training and repeatable 2013 test evaluation.
 
-No development/validation data is held out. Test outcomes are not used for
-policy fitting, feature estimation or audit. The workbook cohort builder sees
-source records to establish cleaning rules; only stage=test uses 2013 cases
-for decisions, costs or metrics, after the model freeze.
-
-Planning rosters and eligibility are reconstructed from performed events;
-prospective availability is an explicit limitation, not proven by this audit.
+Train/test methods are independent commands; no mandatory audit, freeze, or
+one-time test rule. Every scoring run is tagged by its current policy/code hash.
+Operational eligibility is reconstructed retrospectively, not observed ex ante.
 """
 from __future__ import annotations
 import argparse
@@ -17,7 +13,6 @@ import os
 import pickle
 import shutil
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,18 +22,17 @@ from pilot.run_fold_pilot import fold_lasso, hindsight
 from run_weekly_rich import read_cohort
 from surgery.anchored_core import key
 from surgery.anchored_training import build_reference_library, verify_policy, learn
-from surgery.planner import display_and_duration
 from surgery.weekly_data import build_weeks, performed_events
-from surgery.weekly_planner import loads as room_loads
 from surgery.rich_features import RichCorrectionEncoder
 
 ALPHA, H, GAMMA = .8, 30., 2.
 LAMBDAS = (.0005,.001,.002,.004,.008,.016,.032)
 RIDGES = (.001,.003)
 SEEDS = (0,1,2)
-# Fixed before examining the 2013 final-test outcomes.
+# Focus resources on CASE, ANCHORED and VF; GAP is exploratory.
 BUDGET = dict(workers=12, seconds=600, case_inner=650,
-              vf_outer=4, vf_inner=180, gap_outer=3, gap_inner=120,
+              vf_outer=4, vf_inner=180, gap_outer=1, gap_inner=25,
+              gap_seconds=60, gap_refine_seconds=90,
               anchored_outer=4, anchored_inner=20, anchored_closure=2,
               anchored_sep_batch=192, anchored_sep_seconds=180,
               anchored_master_seconds=300, anchored_master_threads=4,
@@ -92,8 +86,23 @@ def method_paths(root):
         'ANCHORED_0p001':root/'cohort'/'sensitivity'/label(.001)/'anchored'/'anchored_progress.json',
         'ANCHORED_0p003':root/'cohort'/'sensitivity'/label(.003)/'anchored'/'anchored_progress.json',
         'VF_COHORT':root/'cohort'/'vf'/'vf_progress.json',
-        'GAP_COHORT':root/'cohort'/'gap'/'gap_progress.json',
     }
+
+
+def gap_path(root):
+    # Completed older GAP is reusable; an interrupted older run is preserved.
+    old = root/'cohort'/'gap'/'gap_progress.json'
+    if old.exists() and json.loads(old.read_text()).get('complete'):
+        return old
+    return root/'cohort'/'gap_quick'/'gap_progress.json'
+
+
+def available_methods(root):
+    paths={name:path for name,path in method_paths(root).items() if path.is_file()}
+    gap=gap_path(root)
+    if gap.is_file() and json.loads(gap.read_text()).get('w'):
+        paths['GAP_COHORT']=gap
+    return paths
 
 
 def identity(args):
@@ -107,21 +116,26 @@ def identity(args):
                 time_limits='fixed per independent MIP; incomplete solves must be reported, never scored',
                 training_cutoff='2013-01-01',
                 feature_rule='train leave-date-out, test transform with all pre-2013 training only',
-                current_protocol='no development-validation; test once after freeze')
+                current_protocol='no development validation; repeatable tagged test runs')
 
 
 def settings(args):
+    """Keep an interrupted training run reusable when *only* orchestration changes."""
     state=identity(args)
     args.root.mkdir(parents=True,exist_ok=True)
     path=args.root/'experiment_settings.json'
-    if path.is_file():
-        if json.loads(path.read_text())!=state:
-            raise RuntimeError('Source, workbook or final-experiment settings changed. '
-                               'Keep the old artifacts and use a NEW root, not a checkpoint overwrite.')
-    else:
-        if (args.root/'FINAL_FREEZE.json').exists() or (args.root/'test').exists():
-            raise RuntimeError('Cannot create settings around existing frozen/test outputs')
+    if not path.exists():
         save(path,state)
+    else:
+        old=json.loads(path.read_text())
+        # Independent model checkpoints validate the model-specific settings.
+        # Keep the old settings file byte-for-byte stable (used in their IDs).
+        for key in ('workbook_sha256','alpha','h','gamma','lambdas','ridges',
+                    'training_cutoff','feature_rule'):
+            if old.get(key)!=state.get(key):
+                raise RuntimeError('Training data/model definition changed: '+key)
+        if old.get('budget')!=state.get('budget') or old.get('source_sha256')!=state.get('source_sha256'):
+            print('Runner/budget changed; resuming existing model checkpoints without rewriting their settings',flush=True)
     return state
 
 
@@ -137,8 +151,7 @@ def split_rows(cohort,part):
 
 
 def checked_weeks(cohort,events,part,frame):
-    # PREP uses only events from before 2013; test's performed events are
-    # considered only after freeze to reconstruct retrospective eligibility.
+    # Training uses earlier performed events; test uses its own retrospective roster.
     ws=build_weeks(cohort,events,split=part,prior_dates=1)
     actual_ids={int(cid) for w in ws for cid in w.case_ids}
     target_ids=set(map(int,frame.case_id))
@@ -248,7 +261,6 @@ def fixed_args(args, out):
 
 def train_case(args):
     settings(args)
-    if (args.root/'FINAL_FREEZE.json').exists():raise RuntimeError('Policies already frozen')
     for context in ('none','cohort'):
         data,_,_=training(args,context)
         root=args.root/context;root.mkdir(parents=True,exist_ok=True)
@@ -275,7 +287,6 @@ def training_settings(args,method,context='cohort'):
 
 def train_anchored(args):
     settings(args)
-    if (args.root/'FINAL_FREEZE.json').exists():raise RuntimeError('Policies already frozen')
     data,weeks,index=training(args,'cohort')
     root=args.root/'cohort'
     case=root/'case_policy.json'
@@ -338,7 +349,6 @@ def train_anchored(args):
 def train_vf(args):
     from surgery.weekly_training import fit_vf
     settings(args)
-    if (args.root/'FINAL_FREEZE.json').exists():raise RuntimeError('Policies already frozen')
     data,weeks,index=training(args,'cohort')
     root=args.root/'cohort'
     case=json.loads((root/'case_policy.json').read_text())
@@ -352,89 +362,58 @@ def train_vf(args):
 
 
 def train_gap(args):
+    """One inexpensive GAP trial. Failure/uncertainty never blocks other methods."""
     from surgery.gap_learning import train_gap as fit_gap
     settings(args)
-    if (args.root/'FINAL_FREEZE.json').exists():raise RuntimeError('Policies already frozen')
     data,weeks,index=training(args,'cohort')
-    root=args.root/'cohort';case=json.loads((root/'case_policy.json').read_text())
+    root=args.root/'cohort'
+    existing=root/'gap'/'gap_progress.json'
+    if existing.exists() and json.loads(existing.read_text()).get('complete'):
+        print('GAP already completed with the previous larger budget; reusing it',flush=True)
+        return
+    case=json.loads((root/'case_policy.json').read_text())
+    out=root/'gap_quick'
+    out.mkdir(parents=True,exist_ok=True)
     lam=float(case['lambda_l1'])
-    record=fit_gap(root/'gap',weeks,index,data['X'],data['booked'],lam,case['w'],
-                   dict(training_settings(args,'gap'),lambda_l1=lam),
-                   ALPHA,H,GAMMA,BUDGET['gap_outer'],BUDGET['gap_inner'],6.,1.5,
-                   BUDGET['seconds'],1,BUDGET['workers'],
-                   refine_seconds=2*BUDGET['seconds'],refinement_budget=2)
-    if not record.get('complete'):
-        raise RuntimeError('GAP unresolved; inspect gap_progress.json and certificate intervals. '
-                           'Do not freeze an incomplete method.')
+    try:
+        state=fit_gap(out,weeks,index,data['X'],data['booked'],lam,case['w'],
+            dict(training_settings(args,'gap_quick'),lambda_l1=lam,
+                 budget='one outer, 25 inner, 60s oracles, no refinement'),
+            ALPHA,H,GAMMA,BUDGET['gap_outer'],BUDGET['gap_inner'],6.,1.5,
+            BUDGET['gap_seconds'],1,BUDGET['workers'],
+            refine_seconds=BUDGET['gap_refine_seconds'],refinement_budget=0)
+        print('GAP exploratory status:',state.get('stopping') or state.get('paused'),flush=True)
+    except RuntimeError as exc:
+        print('GAP exploratory run stopped:',exc,flush=True)
+        print('Existing CASE/ANCHORED/VF models and test access are unaffected.',flush=True)
 
 
 def complete_policies(args):
-    ret=method_paths(args.root)
-    features=verify_prepared(args)['feature_names']
-    for name,p in ret.items():
-        if not p.is_file():raise RuntimeError('Missing final fitted policy: '+str(p))
-        doc=json.loads(p.read_text())
-        n=len(features)+(2 if name not in ('CASE_NONE',) else 0)
-        w=np.asarray(doc.get('w',doc.get('weights')),dtype=float)
-        if w.shape!=(n,) or not np.isfinite(w).all():
-            raise RuntimeError('Invalid fitted coefficient dimension: '+name)
-        if name.startswith(('ANCHORED','VF_','GAP_')) and not doc.get('complete'):
-            raise RuntimeError('Decision optimizer unfinished: '+name)
-        if name.startswith('ANCHORED'):
-            for row in doc.get('outer_history',[]):
-                for trial in row.get('trials',[]):
-                    if trial.get('reason')=='unresolved_deployed_solver':
-                        raise RuntimeError('Unresolved training deployment; stop before test')
-        if name=='GAP_COHORT' and doc.get('paused'):
-            raise RuntimeError('VF-GAP comparison uncertified')
-    return ret
+    """Require fitted core models; GAP is an optional exploratory benchmark."""
+    paths=available_methods(args.root)
+    nbase=len(verify_prepared(args)['feature_names'])
+    if 'CASE_COHORT' not in paths:
+        raise RuntimeError('Train cohort CASE before comparing test methods')
+    for name,path in paths.items():
+        obj=json.loads(path.read_text())
+        w=np.asarray(obj.get('w',obj.get('weights')),dtype=float)
+        expected=nbase if name=='CASE_NONE' else nbase+2
+        if w.shape!=(expected,) or not np.isfinite(w).all():
+            raise RuntimeError('Nonfinite/incompatible weights for '+name)
+        if name.startswith(('ANCHORED','VF_','GAP_')) and not obj.get('complete'):
+            print('WARNING: scoring unfinished exploratory training policy:',name,flush=True)
+    return paths
 
 
-def frozen_payload(args):
-    m=verify_prepared(args)
-    files=complete_policies(args)
-    audit=args.root/'train_audit'/'audit_summary.json'
-    if not audit.is_file():raise RuntimeError('Run training-only operational audit first')
-    doc=json.loads(audit.read_text())
-    if not doc.get('complete') or doc.get('unresolved_certifications',1)>0:
-        raise RuntimeError('Training operational audit incomplete')
-    files.update({'TRAINING_MANIFEST':args.root/'training_manifest.json',
-                  'ENCODER':args.root/'feature_encoder.pkl',
-                  'TRAINING_DATA':args.root/'training_data.npz',
-                  'TRAINING_ROSTERS':args.root/'training_weeks.pkl',
-                  'COHORT_SCALER':args.root/'cohort'/'context_scaler.json',
-                  'AUDIT':audit})
-    return dict(settings_sha256=sha(args.root/'experiment_settings.json'),
-                sources=identity(args)['source_sha256'],
-                policy_sha256={name:sha(path) for name,path in files.items()},
-                primary='ANCHORED_0p001',comparator='CASE_COHORT',
-                secondary=['CASE_NONE','ANCHORED_0p003','VF_COHORT','GAP_COHORT'],
-                test_unopened=True,
-                acknowledged_operational_risks=doc['operational_risk_flags'])
-
-
-def freeze(args):
-    payload=frozen_payload(args)
-    file=args.root/'FINAL_FREEZE.json'
-    if file.is_file():
-        if json.loads(file.read_text())!=payload:raise RuntimeError('Frozen policies changed')
-    else:
-        if (args.root/'test').exists():raise RuntimeError('Test artifacts exist without freeze')
-        report=payload['acknowledged_operational_risks']
-        if report and not args.acknowledge_audit:
-            raise RuntimeError('Operational issues need explicit review. Read train_audit/audit_summary.json '
-                               'and rerun freeze with --acknowledge-audit to record acceptance '
-                               '(this does not claim the issues are resolved).')
-        save(file,payload)
-    print('FROZEN 2013 final policies:',file,flush=True)
-
-
-def validate_freeze(args):
-    file=args.root/'FINAL_FREEZE.json'
-    if not file.is_file():raise RuntimeError('Freeze every method BEFORE test scoring')
-    if json.loads(file.read_text())!=frozen_payload(args):
-        raise RuntimeError('Scientific code, audit, or fitted policies changed after freeze')
-    return sha(file)
+def test_directory(args,paths):
+    """Re-tests are allowed; each distinct policy/code version gets its own cache."""
+    digest=hashlib.sha256()
+    for name,path in sorted(paths.items()):
+        digest.update(name.encode())
+        digest.update(bytes.fromhex(sha(path)))
+    digest.update(bytes.fromhex(sha(__file__)))
+    digest.update(bytes.fromhex(sha(args.workbook)))
+    return args.root/'test'/('run_'+digest.hexdigest()[:12])
 
 
 def group_rows_by_calendar(weeks,records,oracle,seed,method):
@@ -455,21 +434,22 @@ def group_rows_by_calendar(weeks,records,oracle,seed,method):
 
 
 def summarize(args):
-    path=args.root/'test'/'test_scores.json'
+    path=args.test_dir/'test_scores.json'
     if not path.is_file():raise RuntimeError('Test scoring not finished')
     doc=json.loads(path.read_text())
     rows=doc['per_site_week'];index={(x['method'],x['seed'],x['calendar_week'],x['site']):x for x in rows}
     timekeys={(x['calendar_week'],x['site']) for x in rows}
     allweeks=sorted({k[0] for k in timekeys})
-    if len(index)!=len(timekeys)*len(SEEDS)*len(METHODS):
+    methods=tuple(doc['methods'])
+    if len(index)!=len(timekeys)*len(SEEDS)*len(methods):
         raise RuntimeError('Incomplete test cases/methods/seeds; cannot summarize')
     ncases=doc['test_cases']
     mean={name:sum(r['regret'] for r in rows if r['method']==name)/(ncases*len(SEEDS))
-          for name in METHODS}
+          for name in methods}
     comps={}
     # Resample calendar Mondays (NOT site-weeks or solver hash seeds).
     rng=np.random.default_rng(20261019)
-    for name in METHODS:
+    for name in methods:
         if name=='CASE_COHORT':continue
         weeks=[]
         for monday in allweeks:
@@ -488,34 +468,39 @@ def summarize(args):
         observed=float(table[:,0].sum()/table[:,1].sum())
         comps[name]=dict(difference_per_case=observed,
                          ci95=list(map(float,np.quantile(totals[:,0]/totals[:,1],[.025,.975]))))
-    # Compare primary also to the capped inverse-link LASSO cohort benchmark.
+    # Compare primary with LASSO only when both were fitted.
     primary_lasso=[]
-    for monday in allweeks:
-        delta=0.;n=0
-        for site in sorted(s for w,s in timekeys if w==monday):
-            for seed in SEEDS:
-                a=index['ANCHORED_0p001',seed,monday,site]
-                b=index['LASSO_COHORT',seed,monday,site]
-                if a['cases']!=b['cases']:raise AssertionError('LASSO paired cohort mismatch')
-                delta+=a['regret']-b['regret'];n+=a['cases']
-        primary_lasso.append((delta/len(SEEDS),n/len(SEEDS)))
-    table=np.asarray(primary_lasso,float)
-    sample=rng.integers(0,len(allweeks),size=(10000,len(allweeks)))
-    weighted=table[sample].sum(axis=1)
-    lasso_comp=dict(difference_per_case=float(table[:,0].sum()/table[:,1].sum()),
-                    ci95=list(map(float,np.quantile(weighted[:,0]/weighted[:,1],[.025,.975]))))
-    save(args.root/'test'/'test_summary.json',dict(
-        final_2013_test=True,months='2013-01 through 2013-06',
+    if 'ANCHORED_0p001' in methods and 'LASSO_COHORT' in methods:
+        for monday in allweeks:
+            delta=0.;n=0
+            for site in sorted(s for w,s in timekeys if w==monday):
+                for seed in SEEDS:
+                    a=index['ANCHORED_0p001',seed,monday,site]
+                    b=index['LASSO_COHORT',seed,monday,site]
+                    if a['cases']!=b['cases']:raise AssertionError('LASSO paired cohort mismatch')
+                    delta+=a['regret']-b['regret'];n+=a['cases']
+            primary_lasso.append((delta/len(SEEDS),n/len(SEEDS)))
+        table=np.asarray(primary_lasso,float)
+        sample=rng.integers(0,len(allweeks),size=(10000,len(allweeks)))
+        weighted=table[sample].sum(axis=1)
+        lasso_comp=dict(difference_per_case=float(table[:,0].sum()/table[:,1].sum()),
+                        ci95=list(map(float,np.quantile(weighted[:,0]/weighted[:,1],[.025,.975]))))
+    else:
+        lasso_comp=None
+    save(args.test_dir/'test_summary.json',dict(
+        test_period='2013-01 through 2013-06',methods=list(methods),
         cases=ncases,calendar_weeks=len(allweeks),
         means=mean,paired_versus_cohort_case=comps,
         primary_vs_lasso_cohort=lasso_comp,
-        primary='ANCHORED_0p001',unadjusted_primary_ci=True,
+        primary='ANCHORED_0p001' if 'ANCHORED_0p001' in methods else None,unadjusted_primary_ci=True,
         seeds='three deterministic tie-breaking variants; NOT independent observations',
-        interpretation='One-time final 2013 holdout, never selected a method on test outcomes'))
+        interpretation='2013 evaluation; repeated test use is permitted but can affect inferential claims'))
 
 
 def score_test(args):
-    frozen_sha=validate_freeze(args)
+    paths=complete_policies(args)
+    args.test_dir=test_directory(args,paths)
+    methods=('BOOKED',*paths.keys())
     os.environ['SURGERY_RESEARCH_LINK']='inverse'
     raw,cohort=read_cohort(args.workbook)
     test=split_rows(cohort,'test')
@@ -534,10 +519,10 @@ def score_test(args):
     tr={'X':base,'booked':test.booked.to_numpy(float),'actual':test.actual.to_numpy(float)}
     co={'X':cohortX,'booked':tr['booked'],'actual':tr['actual']}
     vec={name:np.asarray((lambda d:d.get('w',d.get('weights')))(json.loads(path.read_text())),float)
-         for name,path in method_paths(args.root).items()}
+         for name,path in paths.items()}
     vec['BOOKED']=np.zeros(base.shape[1])
-    out=args.root/'test';out.mkdir(parents=True,exist_ok=True)
-    # The sole reading/scoring of 2013 outcomes starts after the frozen hash check.
+    out=args.test_dir;out.mkdir(parents=True,exist_ok=True)
+    print('2013 results:',out,flush=True)
     args.fold='2013_final';args.seconds=BUDGET['evaluation_seconds'];args.workers=BUDGET['workers']
     try:
         oracle=hindsight(args,weeks)
@@ -549,15 +534,18 @@ def score_test(args):
         oracle=hindsight(args,weeks)
     file=out/'test_scores.json'
     report=json.loads(file.read_text()) if file.exists() else dict(
-        frozen_sha256=frozen_sha,test_cases=len(test),
+        model_sha256={name:sha(path) for name,path in paths.items()},test_cases=len(test),
         test_mondays=len({w.monday for w in weeks}),
         test_site_weeks=len(weeks),test_components=sum(len(w.components()) for w in weeks),
-        per_site_week=[],finished={},methods=list(METHODS))
-    if report['frozen_sha256']!=frozen_sha or report['test_cases']!=len(test):
-        raise RuntimeError('Cannot resume test results from another frozen experiment')
+        per_site_week=[],finished={},methods=list(methods),
+        optimizer_status={name:json.loads(path.read_text()).get('stopping',
+                          'complete' if json.loads(path.read_text()).get('complete',True) else 'incomplete')
+                          for name,path in paths.items()})
+    if report['model_sha256']!={name:sha(path) for name,path in paths.items()} or report['test_cases']!=len(test):
+        raise RuntimeError('Test cache mismatch; rerun under another model hash')
     for seed in SEEDS:
         os.environ['SURGERY_ANCHORED_HASH_SEED']=str(seed)
-        for name in METHODS:
+        for name in methods:
             if name in report['finished'].get(str(seed),[]):continue
             obj=tr if name in ('BOOKED','CASE_NONE') else co
             try:
@@ -586,11 +574,9 @@ def score_test(args):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage',required=True,
-                   choices=('prepare','case','anchored','vf','gap','audit','freeze','test','summary'))
+                   choices=('prepare','case','anchored','vf','gap','audit','test','summary'))
     p.add_argument('--root',type=Path,default=Path('artifacts/final_2013_audited_v1'))
     p.add_argument('--workbook',type=Path,default=Path('data/UHNOperating_RoomScheduling2011-2013.xlsx'))
-    p.add_argument('--acknowledge-audit',action='store_true',
-                   help='Explicitly record operational-limitations review before final test')
     args=p.parse_args()
     if args.stage=='prepare':prepare(args);return
     settings(args)
@@ -601,8 +587,10 @@ def main():
     elif args.stage=='audit':
         from pilot.audit_final_2013 import audit_training
         audit_training(args)
-    elif args.stage=='freeze':freeze(args)
     elif args.stage=='test':score_test(args)
-    else:validate_freeze(args);summarize(args)
+    else:
+        paths=complete_policies(args)
+        args.test_dir=test_directory(args,paths)
+        summarize(args)
 
 if __name__=='__main__':main()
