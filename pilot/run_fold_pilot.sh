@@ -40,7 +40,18 @@ case "$PHASE" in
     ;;
   score)
     # Stage III: out-of-fold exact deployed planner; no selection during scoring.
+    # verify_policy saves resuming checkpoints inside the supplied output
+    # directory but does not create that directory. Bootstrap every cache
+    # before workers start writing. This launcher is intentionally NOT
+    # part of the fitted-policy fingerprint: the fix does not change any
+    # models or settings, so already completed CASE fits stay reusable.
     for fold in 0 1; do
+      for seed in 0 1 2; do
+        mkdir -p "$ROOT/original_none/fold_${fold}/heldout_verification/seed_${seed}"
+        for ctx in none cohort roster; do
+          mkdir -p "$ROOT/inverse_${ctx}/fold_${fold}/heldout_verification/seed_${seed}"
+        done
+      done
       runner --stage score --fold "$fold" --link original --context none
       for ctx in none cohort roster; do
         runner --stage score --fold "$fold" --link inverse --context "$ctx"
