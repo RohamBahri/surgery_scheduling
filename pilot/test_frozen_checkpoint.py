@@ -53,6 +53,26 @@ class FrozenCheckpointTests(unittest.TestCase):
             self.assertEqual(migration['previous_runner_sha256'],
                              frozen.PRE_FIX_RUNNER_SHA256_TRAILING_NEWLINE)
 
+    def test_full_identity_round_trips_through_json(self):
+        with tempfile.TemporaryDirectory() as work:
+            root=Path(work)
+            artifacts=root/'inputs'
+            artifacts.mkdir()
+            (artifacts/'train.npz').write_bytes(b'fake-hashed-matrix')
+            (root/'workbook.xlsx').write_bytes(b'fake-hashed-workbook')
+            meta={'workbook_sha256':'SAME',
+                  'matrix_sha256':{'train':'SAME'},
+                  'train_cases':18705,'validation_cases':5779,
+                  'training_keys':[['SITE',f'train{i}'] for i in range(180)],
+                  'validation_keys':[['SITE',f'valid{i}'] for i in range(54)]}
+            (artifacts/'manifest.json').write_text(json.dumps(meta))
+            args=SimpleNamespace(artifacts=artifacts,workbook=root/'workbook.xlsx',
+                                 workers=12)
+            with patch.object(frozen,'sha',return_value='SAME'):
+                identity=frozen.initial_identity(args)
+            self.assertEqual(identity['context'],['none','cohort'])
+            self.assertEqual(identity,json.loads(json.dumps(identity)))
+
     def test_precise_identity_migration_only_before_frozen_policies(self):
         with tempfile.TemporaryDirectory() as work:
             root=Path(work)
@@ -71,7 +91,7 @@ class FrozenCheckpointTests(unittest.TestCase):
             (root/'full_training_settings.json').write_text(json.dumps(recorded))
             (root/'frozen_policies.json').write_text('{}')
             with patch.object(frozen,'initial_identity',return_value=new):
-                with self.assertRaisesRegex(RuntimeError,'fresh ROOT'):
+                with self.assertRaisesRegex(RuntimeError,'refusing to overwrite'):
                     frozen.assert_identity(args)
 
 
