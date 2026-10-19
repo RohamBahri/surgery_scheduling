@@ -66,7 +66,7 @@ def initial_identity(args):
                 workbook_sha256=sha(args.workbook),manifest_sha256=sha(mpath),
                 train_sha256=sha(tp),runner_sha256=sha(__file__),
                 source_sha256={p:sha(p) for p in SOURCES},
-                response_alpha=.8,response_h=30.,context=('none','cohort'),
+                response_alpha=.8,response_h=30.,context=['none','cohort'],
                 outer=2,inner=35,case_inner=500,ridges=list(RIDGES),
                 lambda_grid=list(LAMBDA_GRID),seeds=list(SEEDS),
                 workers=args.workers,seconds=300,sep_seconds=60,
