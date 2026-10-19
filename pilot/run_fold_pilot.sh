@@ -29,8 +29,13 @@ case "$PHASE" in
     ;;
   decision)
     # Stage II: begin with CONTEXTS=none, then cohort/roster if warranted.
+    # The anchored reference writer checkpoints to train_refs/ but the
+    # shared legacy save_json assumes its parent directory already exists.
+    # Create it before any worker returns, without modifying the Python
+    # trainer's checksum or invalidating existing CASE/VF/GAP artifacts.
     for ctx in $CONTEXTS; do
       for fold in 0 1; do
+        mkdir -p "$ROOT/inverse_${ctx}/fold_${fold}/train_refs"
         for method in $METHODS; do
           runner --stage decision --method "$method" --fold "$fold" \
                  --link inverse --context "$ctx"
