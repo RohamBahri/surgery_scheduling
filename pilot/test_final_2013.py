@@ -1,5 +1,7 @@
 """Fast orchestration tests; no workbook or Gurobi needed."""
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +25,7 @@ class Final2013Tests(unittest.TestCase):
     def test_runner_changes_preserve_prior_training_identity(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);args=SimpleNamespace(root=root)
-            original=dict(workbook_sha256='w',alpha=.8,h=30.,gamma=2.,
+            original=dict(workbook_sha256='w',alpha=.8,h=30.,gamma=2.,link='inverse',
                           lambdas=list(run.LAMBDAS),ridges=list(run.RIDGES),
                           training_cutoff='2013-01-01',
                           feature_rule='train leave-date-out, test transform with all pre-2013 training only',
@@ -36,6 +38,40 @@ class Final2013Tests(unittest.TestCase):
             updated['alpha']=.5
             with patch.object(run,'identity',return_value=updated):
                 with self.assertRaisesRegex(RuntimeError,'alpha'):
+                    run.settings(args)
+
+    def test_inverse_link_active_inside_training_and_audit(self):
+        from surgery.planner import display_and_duration
+        import numpy as np
+        # Test the actual transformation in a mocked stage, not only metadata.
+        def probe(_):
+            self.assertEqual(os.environ['SURGERY_RESEARCH_LINK'], 'inverse')
+            self.assertEqual(os.environ['SURGERY_ANCHORED_HASH_SEED'], '0')
+            raw=np.array([10., 40., 100.])
+            booked=np.full(3, 200.)
+            _,d=display_and_duration(raw,booked,run.ALPHA,run.H)
+            np.testing.assert_allclose(d-booked,[10.,24.,24.])
+
+        with patch.dict(os.environ, {'SURGERY_RESEARCH_LINK':'original',
+                                     'SURGERY_ANCHORED_HASH_SEED':'7'}):
+            with patch.object(run,'settings',return_value={}):
+                with patch.object(run,'train_case',side_effect=probe):
+                    with patch.object(sys,'argv',['run_final_2013.py','--stage','case']):
+                        run.main()
+                with patch('pilot.audit_final_2013.audit_training',side_effect=probe):
+                    with patch.object(sys,'argv',['run_final_2013.py','--stage','audit']):
+                        run.main()
+
+    def test_legacy_linkless_artifacts_cannot_resume(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);args=SimpleNamespace(root=root)
+            original=dict(workbook_sha256='w',alpha=.8,h=30.,gamma=2.,
+                lambdas=list(run.LAMBDAS),ridges=list(run.RIDGES),
+                training_cutoff='2013-01-01',
+                feature_rule='train leave-date-out, test transform with all pre-2013 training only')
+            run.save(root/'experiment_settings.json',original)
+            with patch.object(run,'identity',return_value=dict(original,link='inverse')):
+                with self.assertRaisesRegex(RuntimeError,'link'):
                     run.settings(args)
 
     def test_policy_versions_receive_distinct_test_folders(self):
