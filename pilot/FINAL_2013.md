@@ -4,6 +4,33 @@ This run uses **all 24,506 cleaned pre-2013 cases for fitting** (including the f
 
 The established primary comparison remains **ANCHORED (ridge .001) versus cohort CASE**. BOOKED, case-only CASE, cohort LASSO, ANCHORED ridge .003 and VF are secondary. VF-GAP is **optional and exploratory**. Model settings are not changed based on past 2013 outcomes automatically; you may rerun or analyze 2013 however you wish, but repeated test-guided choices should be disclosed if presenting confirmatory inference.
 
+## Important correction: training response link
+
+A prior version **fitted CASE, ANCHORED and VF with the original surgeon-response link** because it set `SURGERY_RESEARCH_LINK=inverse` only during test scoring. Such policies are not valid inverse-link training outputs. The new runner sets the inverse link before **every** stage and records it in `experiment_settings.json`. It rejects any prior root with missing or mismatching link metadata.
+
+The default output root is now `artifacts/final_2013_inverse_v2`. **Do not transfer CASE policy files, ANCHORED references or checkpoints, VF, or GAP from `artifacts/final_2013_audited_v1` into it.** Those must be retrained under the corrected link. Existing exploratory test folders are preserved. You may rerun 2013 evaluations whenever you wish.
+
+To save feature-building time, the following **link-independent inputs only** can optionally be copied from the interrupted old root to the fresh root *before* training:
+
+```bash
+OLD=artifacts/final_2013_audited_v1
+NEW=artifacts/final_2013_inverse_v2
+mkdir -p "$NEW/none" "$NEW/cohort"
+for f in training_data.npz training_weeks.pkl feature_encoder.pkl training_manifest.json; do
+  if [ -f "$OLD/$f" ] && [ ! -e "$NEW/$f" ]; then cp "$OLD/$f" "$NEW/$f"; fi
+done
+for ctx in none cohort; do
+  if [ -f "$OLD/$ctx/fold_lasso.json" ] && [ ! -e "$NEW/$ctx/fold_lasso.json" ]; then
+    cp "$OLD/$ctx/fold_lasso.json" "$NEW/$ctx/fold_lasso.json"
+  fi
+done
+if [ -f "$OLD/cohort/context_scaler.json" ] && [ ! -e "$NEW/cohort/context_scaler.json" ]; then
+  cp "$OLD/cohort/context_scaler.json" "$NEW/cohort/context_scaler.json"
+fi
+```
+
+The runner checks the training-manifest hashes; copying these files does not copy labels or outcomes from 2013 into fitting. The `train` command also works without any copied files—it will rebuild the full pre-2013 feature set.
+
 ## Local commands
 
 ```bash
@@ -12,7 +39,7 @@ git switch full-2013-audited
 git pull --ff-only
 python3.14 -m unittest discover -s pilot -p 'test_*.py' -v
 
-# Resume existing training; do not delete the artifacts folder.
+# Train under the correctly enforced inverse link, using a fresh default ROOT.
 caffeinate -i bash pilot/run_final_2013.sh train
 
 # Optional lightweight VF-GAP comparison (one outer, 25 inner, 60s/oracle).
