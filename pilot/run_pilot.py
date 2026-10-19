@@ -167,7 +167,9 @@ def initial_weights(args, p):
     if len(w)>p:
         raise RuntimeError('Baseline coefficient dimension mismatch')
     result = np.zeros(p)
-    result[:len(w)] = w * (args.alpha if args.link=='inverse' else 1.)
+    # Under the inverse link X@w is a desired effective correction.
+    # This is a fold-fitted statistical START, not a LASSO comparator.
+    result[:len(w)] = w
     return result
 
 

@@ -35,6 +35,23 @@ def paths(args):
     return args.root / (args.link+'_'+args.context) / ('fold_'+str(args.fold))
 
 
+def split_calendar_weeks(weeks, holdout_fold):
+    """Odd/even 60 chronological Mondays, always grouping all three sites."""
+    mondays=sorted({w.monday for w in weeks})
+    if len(mondays)!=60 or holdout_fold not in (0,1):
+        raise ValueError('Expected 60 Mondays and a holdout fold of 0 or 1')
+    held={day for j,day in enumerate(mondays) if j%2==holdout_fold}
+    fit=[w for w in weeks if w.monday not in held]
+    evaluation=[w for w in weeks if w.monday in held]
+    if len(fit)!=90 or len(evaluation)!=90:
+        raise RuntimeError('Expected 90 site-weeks in each fold')
+    fitcases={int(cid) for w in fit for cid in w.case_ids}
+    evalcases={int(cid) for w in evaluation for cid in w.case_ids}
+    if fitcases & evalcases:
+        raise RuntimeError('Held-out case appears in the fitting roster')
+    return fit,evaluation,fitcases,evalcases,held
+
+
 def train_folds(args):
     """Refit rich encodings on the fitting dates, never use frozen train X."""
     from run_weekly_rich import read_cohort, windows
@@ -53,16 +70,11 @@ def train_folds(args):
     if len(frame)!=len(recorded) or not np.array_equal(frame.case_id.to_numpy(int),recorded):
         raise RuntimeError('Fold case roster does not match frozen training cohort')
     weeks=load_weeks(args.workbook,manifest,'train')
+    if len(weeks)!=180:
+        raise RuntimeError('Unexpected training site-week count')
+    fitweeks,evalweeks,fitkeys,evalkeys,held=split_calendar_weeks(
+        weeks,args.fold)
     monday=sorted({w.monday for w in weeks})
-    if len(weeks)!=180 or len(monday)!=60:
-        raise RuntimeError('Unexpected 180 site-weeks / 60 calendar weeks')
-    held={day for j,day in enumerate(monday) if j%2==args.fold}
-    fitweeks=[w for w in weeks if w.monday not in held]
-    evalweeks=[w for w in weeks if w.monday in held]
-    if len(fitweeks)!=90 or len(evalweeks)!=90:
-        raise RuntimeError('Unbalanced calendar folds')
-    fitkeys={int(cid) for w in fitweeks for cid in w.case_ids}
-    evalkeys={int(cid) for w in evalweeks for cid in w.case_ids}
     if fitkeys & evalkeys or len(fitkeys)+len(evalkeys)!=len(frame):
         raise RuntimeError('Disjoint case split failed')
     fit=frame.loc[frame.case_id.isin(fitkeys)].reset_index(drop=True)
@@ -126,10 +138,18 @@ def fold_lasso(args, data, root):
 
 
 def identity(args, foldinfo):
+    source_files=('pilot/run_pilot.py','surgery/data.py','surgery/rich_features.py',
+                  'run_weekly_rich.py','run_weekly_train.py',
+                  'surgery/weekly_data.py','surgery/planner.py',
+                  'surgery/weekly_training.py','surgery/weekly_planner.py',
+                  'surgery/anchored_core.py','surgery/anchored_master.py',
+                  'surgery/anchored_training.py','surgery/anchored_oracles.py',
+                  'surgery/gap_learning.py','surgery/gap_intervals.py')
     return dict(fold=args.fold,context=args.context,link=args.link,
                 workbook_sha256=sha(args.workbook),
                 manifest_sha256=sha(args.artifacts/'manifest.json'),
-                runner_sha256=sha(__file__),pilot_sha256=sha('pilot/run_pilot.py'),
+                runner_sha256=sha(__file__),
+                source_sha256={p:sha(p) for p in source_files},
                 alpha=args.alpha,h=args.h,gamma=args.gamma,
                 max_outer=args.outer,decision_inner=args.inner,
                 case_inner=args.case_inner,lambda_grid=list(args.lambda_grid),
@@ -267,9 +287,17 @@ def score(args,folder,evaluation,evalweeks,evalindex):
             if obj.get('complete'):
                 policies['ANCHORED_'+label]=obj['w']
     outpath=folder/'heldout_scores.json'
+    policy_sha={name:hashlib.sha256(np.ascontiguousarray(
+        np.asarray(w,float)).tobytes()).hexdigest() for name,w in policies.items()}
     report=json.loads(outpath.read_text()) if outpath.exists() else dict(
         split='held-out training-period calendar weeks',
-        n_cases=len(evaluation['case_id']),seed_results={},per_calendar_week=[])
+        n_cases=len(evaluation['case_id']),seed_results={},per_calendar_week=[],
+        model_sha256={})
+    for name,weight_sha in policy_sha.items():
+        old=report.setdefault('model_sha256',{}).get(name)
+        if old is not None and old!=weight_sha:
+            raise RuntimeError('Held-out policy changed; use a new output root')
+        report['model_sha256'][name]=weight_sha
     for seed in args.seeds:
         os.environ['SURGERY_ANCHORED_HASH_SEED']=str(seed)
         report['seed_results'].setdefault(str(seed),{})
@@ -330,7 +358,7 @@ def main():
     ap.add_argument('--sep-batch',type=int,default=128)
     ap.add_argument('--closure-rounds',type=int,default=1)
     ap.add_argument('--lambda-grid',default='0.0005,0.001,0.002,0.004,0.008,0.016,0.032')
-    ap.add_argument('--ridge-grid',default='0,0.0001,0.001')
+    ap.add_argument('--ridge-grid',default='0.0003,0.001,0.003')
     ap.add_argument('--seeds',default='0,1,2')
     args=ap.parse_args()
     args.lambda_grid=tuple(float(z) for z in args.lambda_grid.split(','))
@@ -339,7 +367,9 @@ def main():
     args.reuse_refs=None
     args.fold_safe=True
     args.ridge=0.
-    if not 1<=args.workers<=15 or args.case_inner<1 or args.outer<1 or args.inner<1:
+    if (not 1<=args.workers<=15 or args.case_inner<1 or args.outer<1
+            or args.inner<1 or any(v<0 for v in args.ridges)
+            or any(v<=0 for v in args.lambda_grid)): 
         ap.error('Invalid pilot budgets')
     folder,data,evaluation,weeks,evalweeks,index,evalindex,stamp=setup(args)
     print('FOLD',args.fold,args.link,args.context,'FIT',len(data['case_id']),
