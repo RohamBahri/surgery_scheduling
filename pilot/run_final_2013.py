@@ -107,7 +107,7 @@ def available_methods(root):
 
 def identity(args):
     if not args.workbook.is_file():raise RuntimeError('Missing workbook: '+str(args.workbook))
-    return dict(experiment='whole_2011_2012_train_single_2013_final_test',
+    return dict(experiment='whole_2011_2012_train_repeatable_2013_evaluation',
                 workbook_sha256=sha(args.workbook),
                 source_sha256={p:sha(p) for p in SOURCE_FILES},
                 budget=BUDGET,alpha=ALPHA,h=H,gamma=GAMMA,
