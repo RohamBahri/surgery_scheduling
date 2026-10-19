@@ -22,6 +22,9 @@ from run_weekly_train import load_weeks, check_week_cases
 RIDGES = (0.001, 0.003)
 LAMBDA_GRID = (0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032)
 SEEDS = (0, 1, 2)
+# Exact SHA256 of the initial runner (commit f17b0d4), before the metadata-only
+# CASE selection-key fix. This migration is permitted ONLY before any freeze.
+PRE_FIX_RUNNER_SHA256 = 'a6eb369839a608552760e23fe044a44e9a5640f5f2aa846f6a9bf5579252d20f'
 SOURCES = ('pilot/run_pilot.py','pilot/run_fold_pilot.py','run_weekly_rich.py',
            'run_weekly_train.py','surgery/data.py','surgery/rich_features.py',
            'surgery/weekly_data.py','surgery/planner.py','surgery/weekly_training.py',
@@ -72,9 +75,32 @@ def assert_identity(args):
     identity = initial_identity(args)
     args.root.mkdir(parents=True,exist_ok=True)
     path = args.root/'full_training_settings.json'
-    if path.exists() and json.loads(path.read_text()) != identity:
-        raise RuntimeError('Full-training settings changed; use a fresh ROOT')
-    if not path.exists():
+    if path.exists():
+        recorded=json.loads(path.read_text())
+        if recorded!=identity:
+            # One strictly scoped checkpoint migration: original runner crashed
+            # after finishing the CASE BIC path but BEFORE saving any policy.
+            # The scientific inputs, other code, and every method setting must
+            # be byte-for-byte unchanged; only this runner's hash may differ.
+            old_comparable={k:v for k,v in recorded.items()
+                            if k!='runner_sha256'}
+            new_comparable={k:v for k,v in identity.items()
+                            if k!='runner_sha256'}
+            empty_policies=all(not (args.root/context/'case_policy.json').exists()
+                               for context in ('none','cohort'))
+            if (recorded.get('runner_sha256')==PRE_FIX_RUNNER_SHA256
+                    and old_comparable==new_comparable and empty_policies
+                    and not (args.root/'frozen_policies.json').exists()
+                    and not (args.root/'validation'/'validation_scores.json').exists()):
+                save(args.root/'metadata_fix_migration.json',dict(
+                    reason='CASE policy serialization duplicate selection key',
+                    previous_runner_sha256=recorded['runner_sha256'],
+                    updated_runner_sha256=identity['runner_sha256'],
+                    scientific_settings_unchanged=True))
+                save(path,identity)
+            else:
+                raise RuntimeError('Full-training settings changed; use a fresh ROOT')
+    else:
         save(path,identity)
     return identity
 
@@ -126,6 +152,49 @@ def fitting(args,context,ident):
     return data,weeks,index,dict(ident,context=context,feature_sha256=sha(path))
 
 
+def case_settings_for_core(settings):
+    # The experiment-level selection rule (primary ANCHORED ridge) is NOT the
+    # CASE penalty-selection method. core.case() already writes a distinct
+    # 'selection' field, so never pass that experiment metadata name through.
+    metadata=dict(settings)
+    metadata['experiment_selection']=metadata.pop('selection')
+    return metadata
+
+
+def recover_complete_case_path(path, settings, feature_count):
+    """Recover exact finished CASE candidates after metadata-only crash.
+
+    Partial or inconsistent paths are discarded by the caller; no partially
+    fitted coefficient vector may be mistaken for a selected policy.
+    """
+    if not path.is_file():
+        return None
+    rows=json.loads(path.read_text())
+    if not isinstance(rows,list) or len(rows)!=len(LAMBDA_GRID):
+        return None
+    if sorted(row.get('lambda_l1') for row in rows)!=sorted(LAMBDA_GRID):
+        return None
+    for row in rows:
+        try:
+            coeff=np.asarray(row['coefficients'],float)
+            numbers=[row['bic_proxy'],row['asymmetric_loss_per_case']]
+            if (coeff.shape!=(feature_count,) or not np.isfinite(coeff).all()
+                    or not all(np.isfinite(v) for v in numbers)
+                    or row.get('bic_formula')!=
+                    '2*n*log(mean asymmetric loss)+df*log(n)'):
+                raise RuntimeError('CASE BIC path contains invalid completed candidate')
+        except (KeyError,TypeError,ValueError) as exc:
+            raise RuntimeError('CASE BIC path malformed; cannot recover') from exc
+    best=min(rows,key=lambda x:(x['bic_proxy'],x['lambda_l1']))
+    result=case_settings_for_core(settings)
+    result.update(method='CASE_BIC_PILOT',w=best['coefficients'],
+                  lambda_l1=best['lambda_l1'],
+                  training_loss=best['asymmetric_loss_per_case'],
+                  bic_proxy=best['bic_proxy'],
+                  selection='training-only asymmetric quasi-BIC; approximate effective df')
+    return result
+
+
 def fit_case(args,ident):
     args.fold_safe=True
     args.case_inner=500
@@ -135,12 +204,19 @@ def fit_case(args,ident):
         args.out=args.root/context
         fold_lasso(args,data,args.out)  # Full-training-only LASSO start.
         p=args.out/'case_policy.json'
+        expected=case_settings_for_core(settings)
         if p.exists():
             doc=json.loads(p.read_text())
-            if any(doc.get(k)!=v for k,v in settings.items()):
+            if any(doc.get(k)!=v for k,v in expected.items()):
                 raise RuntimeError('Existing CASE does not match immutable settings')
         else:
-            core.case(args,data,settings)
+            recovered=recover_complete_case_path(
+                args.out/'case_bic_path.json',settings,data['X'].shape[1])
+            if recovered is not None:
+                save(p,recovered)
+                print('Recovered fully fitted CASE from BIC checkpoint:',context,flush=True)
+            else:
+                core.case(args,data,expected)
         print('Completed CASE on ALL 60 training weeks:',context,flush=True)
 
 
