@@ -167,20 +167,20 @@ def initialize(items, data, wcase, bank, seconds, checkpoint, fingerprint,
             for extreme in (low, high):
                 init["extreme_attempted"] += 1
                 try:
-                    assignments.add(plan(c, extreme, seconds))
+                    assignments.add(plan(c, extreme, min(seconds, 90.)))
                     init["extreme_certified"] += 1
                 except RuntimeError:
                     # Optional aspiration only. No case disappears from the
                     # later full-planner, all-component training objective.
                     pass
         if ck in aspir:
-            zz = saa(c, bank[ck], seconds)
+            zz = saa(c, bank[ck], min(seconds, 180.))
             init["saa_attempted"] += 1
             if zz is not None:
                 assignments.add(zz)
                 init["saa_optimal"] += 1
         if ck in target:
-            free, found = reachable_search(c, d, bank[ck], seconds)
+            free, found = reachable_search(c, d, bank[ck], min(seconds, 120.))
             init["desired"][ck] = (free - d).tolist()
             init["reachable_attempted"] += 1
             assignments.update(found)
