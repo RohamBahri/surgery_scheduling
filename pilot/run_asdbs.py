@@ -97,8 +97,25 @@ def get_case(folder, data):
                               case_inner=650, inner=650,
                               lambda_grid=(.0005,.001,.002,.004,.008,.016,.032))
     fold_lasso(args, data, folder)
-    core.case(args, data, dict(response_link="inverse",
-                               method="ASDBS_risk_CASE", history="leave_date_out"))
+    # A complete CASE BIC path is already fitted if metadata writing failed.
+    # Recover it rather than repeating seven expensive fits.
+    path = folder / "case_bic_path.json"
+    if path.exists():
+        rows = json.loads(path.read_text())
+        grid = sorted(args.lambda_grid, reverse=True)
+        if (len(rows) == len(grid)
+                and all(float(row["lambda_l1"]) == lam for row, lam in zip(rows, grid))
+                and all(len(row["coefficients"]) == data["X"].shape[1] for row in rows)):
+            best = min(rows, key=lambda row: (row["bic_proxy"], row["lambda_l1"]))
+            core.write_json(policy_file, dict(
+                method="CASE_BIC_PILOT", w=best["coefficients"],
+                lambda_l1=best["lambda_l1"],
+                training_loss=best["asymmetric_loss_per_case"],
+                bic_proxy=best["bic_proxy"],
+                selection="training-only asymmetric quasi-BIC; approximate effective df",
+                response_link="inverse", history="leave_date_out"))
+            return np.asarray(best["coefficients"], float)
+    core.case(args, data, dict(response_link="inverse", history="leave_date_out"))
     return np.asarray(json.loads(policy_file.read_text())["w"], float)
 
 
