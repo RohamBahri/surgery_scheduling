@@ -137,7 +137,15 @@ def reachable_search(c, initial, scenarios, seconds, passes=2):
     return d, found
 
 
-def initialize(items, data, wcase, bank, seconds, *, saa_limit=256, reach_limit=120):
+def initialize(items, data, wcase, bank, seconds, checkpoint, fingerprint,
+               *, saa_limit=256, reach_limit=120):
+    """Resumable library construction; no training component is dropped."""
+    checkpoint = Path(checkpoint)
+    init = json.loads(checkpoint.read_text()) if checkpoint.exists() else dict(
+        fingerprint=fingerprint, library={}, desired={},
+        saa_attempted=0, saa_optimal=0, reachable_attempted=0)
+    if init["fingerprint"] != fingerprint:
+        raise ValueError("Library input/code changed; use a new directory")
     _, post = display_and_duration(data["X"] @ wcase, data["booked"], .8, 30.)
     flex = [(ck, c, rows) for ck, c, rows in items
             if any(len(c.allowed[int(s)]) > 1 for s in c.surgeon)]
@@ -146,23 +154,34 @@ def initialize(items, data, wcase, bank, seconds, *, saa_limit=256, reach_limit=
     rng.shuffle(eligible)
     target = {ck for ck, _, _ in eligible[:reach_limit]}
     aspir = {ck for ck, _, _ in eligible[:saa_limit]}
-    library, desired = {}, np.zeros(len(post))
     for j, (ck, c, rows) in enumerate(items):
+        if ck in init["library"]:
+            continue
         d = post[rows]
-        z = plan(c, d, seconds)
-        assignments = {z}
+        assignments = {plan(c, d, seconds)}
         if ck in aspir:
             zz = saa(c, bank[ck], seconds)
+            init["saa_attempted"] += 1
             if zz is not None:
                 assignments.add(zz)
+                init["saa_optimal"] += 1
         if ck in target:
             free, found = reachable_search(c, d, bank[ck], seconds)
-            desired[rows] = free - d
+            init["desired"][ck] = (free - d).tolist()
+            init["reachable_attempted"] += 1
             assignments.update(found)
-        library[ck] = [list(v) for v in sorted(assignments)]
-        if (j + 1) % 200 == 0:
+        init["library"][ck] = [list(v) for v in sorted(assignments)]
+        if (j + 1) % 40 == 0:
+            write(checkpoint, init)
             print(f"ASDBS library {j+1}/{len(items)}", flush=True)
-    return library, desired
+    write(checkpoint, init)
+    desired = np.zeros(len(post))
+    for ck, _, rows in items:
+        if ck in init["desired"]:
+            desired[rows] = init["desired"][ck]
+    return init["library"], desired, {
+        name:init[name] for name in ("saa_attempted","saa_optimal","reachable_attempted")}
+
 
 
 def selected(c, assignments, duration):
@@ -282,18 +301,22 @@ def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12)
     if data["X"].shape[1] != len(wcase) or len(items) == 0:
         raise ValueError("Feature or cohort mismatch")
     fingerprint = hashlib.sha256(
-        data["X"].tobytes() + data["actual"].tobytes() + wcase.tobytes() +
-        Path(__file__).read_bytes()).hexdigest()
+        data["X"].tobytes() + data["actual"].tobytes() +
+        data["booked"].tobytes() + data["case_id"].tobytes() +
+        wcase.tobytes() + Path(__file__).read_bytes()).hexdigest()
     path = folder / "asdbs_progress.json"
     state = json.loads(path.read_text()) if path.exists() else None
     if state is not None and state["fingerprint"] != fingerprint:
         raise ValueError("ASDBS input/code changed; use a new artifact directory")
     bankA = scenario_bank(items, data, wcase, .8, 30., 4101)
     if state is None:
-        library, desired = initialize(items, data, wcase, bankA, seconds)
+        library, desired, initialization = initialize(
+            items, data, wcase, bankA, seconds,
+            folder / "asdbs_library_initialization.json", fingerprint)
         state = dict(fingerprint=fingerprint, policy=wcase.tolist(),
                      case_policy=wcase.tolist(), desired=desired.tolist(),
-                     library=library, rounds=[], complete=False)
+                     library=library, initialization=initialization,
+                     rounds=[], complete=False)
         write(path, state)
     if state["complete"]:
         return state
