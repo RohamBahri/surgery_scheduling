@@ -182,11 +182,8 @@ def library_loss(items, data, bank, library, w, wcase):
     total = 0.
     for ck, c, rows in items:
         choices = library[ck]
-        if len(choices) == 1:
-            z = choices[0]
-        else:
-            z = choices[selected(c, choices, d[rows])]
-        total += mean_cost(c, z, bank[ck])
+        j = 0 if len(choices) == 1 else selected(c, choices, d[rows])
+        total += data["_costs"][ck][j]
     return total / len(d) + LAMBDA * float(np.mean((data["X"] @ (w - wcase))**2)) / 2
 
 
@@ -232,8 +229,9 @@ def boundary_candidates(items, data, library, w, v, *, max_points=16):
             continue
         predicted = []
         for t in knots:
-            d = np.clip(score[rows] + t * move[rows],
-                        *reachable(c.booked, .8, 30.)) + c.booked
+            lower, upper = reachable(c.booked, .8, 30.)
+            d = c.booked + np.clip(score[rows] + t * move[rows],
+                                   lower - c.booked, upper - c.booked)
             predicted.append([evaluate(c, z, d)["cost"] for z in choices])
         predicted = np.asarray(predicted)
         for a in range(len(choices)):
@@ -243,8 +241,8 @@ def boundary_candidates(items, data, library, w, v, *, max_points=16):
                     y = gaps - shift
                     for j in np.flatnonzero(y[:-1] * y[1:] < 0):
                         eta = knots[j] - y[j] * (knots[j+1] - knots[j]) / (y[j+1] - y[j])
-                        advantage = abs(mean_cost(c, choices[a], data["_bank"][ck]) -
-                                        mean_cost(c, choices[b], data["_bank"][ck]))
+                        advantage = abs(data["_costs"][ck][a] -
+                                        data["_costs"][ck][b])
                         proposals.append((advantage, float(eta)))
     proposals.sort(reverse=True)
     for _, eta in proposals[:max_points]:
@@ -299,7 +297,9 @@ def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12)
         write(path, state)
     if state["complete"]:
         return state
-    data = dict(data, _bank=bankA)
+    costs = {ck:[mean_cost(c, z, bankA[ck]) for z in state["library"][ck]]
+             for ck, c, _ in items}
+    data = dict(data, _bank=bankA, _costs=costs)
     for r in range(len(state["rounds"]), ROUNDS):
         w = np.asarray(state["policy"], float)
         before = library_loss(items, data, bankA, state["library"], w, wcase)
@@ -329,11 +329,12 @@ def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12)
         improvement = float(delta.mean())
         se = float(delta.std(ddof=1) / math.sqrt(K))
         accepted = bool(improvement > 1.645 * se and improvement > 0)
-        for ck, _, _ in items:
+        for ck, c, _ in items:
             for row in (old[ck], new[ck]):
                 z = list(map(int, row["assignment"]))
                 if z not in state["library"][ck]:
                     state["library"][ck].append(z)
+                    data["_costs"][ck].append(mean_cost(c, z, bankA[ck]))
         if accepted:
             state["policy"] = proposal.tolist()
         state["rounds"].append(dict(round=r+1, accepted=accepted,
