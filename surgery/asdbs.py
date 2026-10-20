@@ -330,8 +330,8 @@ def full_cost(items, library, costs, deployments, X, w, wcase):
     return total / len(X) + LAMBDA / 2 * float(np.mean((X @ (w - wcase))**2))
 
 
-def propose(items, data, library, names, w, wcase, round_id):
-    """One full-dimensional directional search, using only bank A."""
+def propose(items, data, library, names, w, wcase, round_id, exclude=()):
+    """One full-dimensional directional search; never revisit an examined policy."""
     incumbent = library_loss(items, data, data["_bank"], library, w, wcase)
     best_value, best_w, best_direction = incumbent, None, None
     for name, v in directions(data["X"], names, np.asarray(data["_desired"]), round_id):
@@ -339,6 +339,8 @@ def propose(items, data, library, names, w, wcase, round_id):
             if eta == 0:
                 continue
             candidate = w + eta * v
+            if any(np.array_equal(candidate, old) for old in exclude):
+                continue
             value = library_loss(items, data, data["_bank"], library, candidate, wcase)
             if value < best_value - 1e-9:
                 best_value, best_w, best_direction = value, candidate, name
@@ -396,12 +398,11 @@ def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12)
             raise RuntimeError("ASDBS pending checkpoint is from another round")
 
         while pending["passes"] < 2:
+            excluded = [np.asarray(x["policy"]) for x in pending["candidates"]]
             library_value, candidate_w, direction = propose(
-                items, data, state["library"], names, incumbent_w, wcase, r)
+                items, data, state["library"], names, incumbent_w, wcase, r,
+                exclude=excluded)
             if candidate_w is None:
-                break
-            if any(np.array_equal(candidate_w, np.asarray(x["policy"]))
-                   for x in pending["candidates"]):
                 break
 
             deployed = verify(folder / "training_deploy", "refinement", weeks, index,
