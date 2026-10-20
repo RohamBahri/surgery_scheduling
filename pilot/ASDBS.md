@@ -21,8 +21,12 @@ old VF/ANCHORED pipelines, create branches, or score any 2013 outcomes.
   surgeon/replication. The conditional distribution is fixed through search.
 * Scenario banks: A=50, fresh independent B=50 per iteration.
 * Penalty = 0.001 ||X(w-w_CASE)||^2/(2N).
-* Acceptance: paired bank-B gain > 1.645 standard errors, one proposed
-  policy per iteration, ten iterations. This is a **Monte Carlo heuristic**,
+* Within each of the ten rounds, search up to **two distinct** bank-A proposals.
+  The full deployed planner is solved for each; new assignments enlarge the
+  library before the second search. Choose only proposals that improve the
+  full-planner bank-A objective. Screen the best with **one** fresh bank B.
+* Acceptance: paired bank-B gain > 1.645 standard errors; ten outer rounds.
+  This is a **Monte Carlo heuristic**,
   not a 95% population improvement certificate.
 * Initialization attempts two reachable-box extreme schedules for each flexible
   component, plus at most 256 small SAA aspirations and 120 constructive
@@ -38,43 +42,53 @@ old VF/ANCHORED pipelines, create branches, or score any 2013 outcomes.
 
 ## Exact commands (from repo root)
 
-The following requires Python 3.14, the project's standard packages, and
-a working Gurobi license. Run folds sequentially.
+This is a **repair rerun**. The original `artifacts/asdbs_79week_v1`
+results remain untouched. This experiment requires Python 3.14 and Gurobi.
 
 ```bash
 git switch full-2013-audited
-git pull --ff-only
+git pull --ff-only origin full-2013-audited
 python3.14 -m unittest pilot.test_asdbs -v
-mkdir -p logs
+
+mkdir -p logs artifacts/asdbs_refined_v1/fold_0 artifacts/asdbs_refined_v1/fold_1
+# The feature specification has not changed. Reuse the already-fitted CASE policies.
+cp artifacts/asdbs_79week_v1/fold_0/case_policy.json artifacts/asdbs_refined_v1/fold_0/
+cp artifacts/asdbs_79week_v1/fold_1/case_policy.json artifacts/asdbs_refined_v1/fold_1/
 set -o pipefail
 
-caffeinate -i python3.14 pilot/run_asdbs.py --stage fit --fold 0 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_fold0_fit.log
-caffeinate -i python3.14 pilot/run_asdbs.py --stage score --fold 0 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_fold0_score.log
+caffeinate -i python3.14 pilot/run_asdbs.py --stage fit --fold 0 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_refined_fold0_fit.log
+caffeinate -i python3.14 pilot/run_asdbs.py --stage score --fold 0 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_refined_fold0_score.log
 
-caffeinate -i python3.14 pilot/run_asdbs.py --stage fit --fold 1 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_fold1_fit.log
-caffeinate -i python3.14 pilot/run_asdbs.py --stage score --fold 1 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_fold1_score.log
+caffeinate -i python3.14 pilot/run_asdbs.py --stage fit --fold 1 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_refined_fold1_fit.log
+caffeinate -i python3.14 pilot/run_asdbs.py --stage score --fold 1 --workers 12 --seconds 600 2>&1 | tee logs/asdbs_refined_fold1_score.log
 ```
 
-Outputs are under `artifacts/asdbs_79week_v1/fold_0/` and `fold_1/`.
+The revised artifact root is `artifacts/asdbs_refined_v1`. If you want to
+refit CASE rather than reuse its frozen identical features, omit the two
+`cp` commands; this is not needed for this algorithm-only repair.
 
-Training checkpoints are saved in `asdbs_library_initialization.json`
-and `asdbs_progress.json`; deployment decisions are cached in
-`training_deploy/` and `heldout_deploy/`. Re-run the **same** command to
-resume after an interruption. If a certified deployed solve times out, repeat
-with `--seconds 1200` or `--seconds 1800` (without changing `--root`).
-Do not interpret an unfinished run as a numerical result.
+Full-planner decisions and training progress are cached. An interrupted fit
+can be resumed by repeating the same command; verified inner refinements
+are checkpointed after each pass. An unresolved exact deployed solve
+blocks the run; retry with `--seconds 1200` if necessary.
 
 ## Send back for review
 
-* Both `fold_0/heldout_results.json` and `fold_1/heldout_results.json`.
-* Both `fold_*/asdbs_progress.json` files.
-* Both `fold_*/asdbs_library_initialization.json` files.
-* Four `logs/asdbs_fold*_*.log` files, or the error/timeout log if stopped.
+```bash
+tar -czf asdbs_refined_review.tgz \
+  artifacts/asdbs_refined_v1/fold_*/heldout_results.json \
+  artifacts/asdbs_refined_v1/fold_*/asdbs_progress.json \
+  artifacts/asdbs_refined_v1/fold_*/asdbs_library_initialization.json \
+  logs/asdbs_refined_fold*.log
+```
 
-The decisive comparison is paired **held-out realized cost per case**, ASDBS
-minus risk-aware CASE, in both folds. The fold bootstrap is descriptive and
-does not select any tuning parameter. Do not claim a confirmation on 2013
-until the method is frozen and separately evaluated.
+Upload `asdbs_refined_review.tgz`. If training stops before either
+fold is complete, send the last failed log instead.
+
+The outcome remains paired held-out realized cost of ASDBS versus
+risk-aware CASE in **both folds**, with no tuning on fold results.
+The previous experiments informed this repair, so the rerun is exploratory
+and not an independent confirmation. Do not run on 2013 yet.
 
 ## Scope of current verification
 
