@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from surgery.asdbs import mean_cost, selected, directions, scenario_bank
+from surgery.asdbs import mean_cost, selected, directions, scenario_bank, expand_library, full_cost
 from surgery.weekly_data import Week
 from surgery.weekly_planner import evaluate
 
@@ -77,6 +77,57 @@ class ASDBSTests(unittest.TestCase):
             with patch("pilot.run_asdbs.fold_lasso"), patch(
                     "pilot.run_asdbs.core.case", side_effect=save_policy):
                 self.assertEqual(get_case(root, data).tolist(), [0., 0.])
+
+    def test_refinement_uses_full_planner_before_bank_b(self):
+        from surgery import asdbs
+        from surgery.anchored_core import key
+        c = component("2012-01-02", [1, 2], [200., 200.])
+        ck = key(c)
+        weeks = [c]
+        data = dict(X=np.ones((2, 1)), booked=c.booked.copy(),
+                    actual=c.actual.copy(), case_id=c.case_ids.copy())
+        bank = {ck: np.tile([[200., 200.]], (50, 1))}
+        calls = []
+        def search(items, data, library, names, w, wcase, round_id, exclude=()):
+            calls.append(tuple(tuple(v) for v in library[ck]))
+            if len(calls) == 1:
+                self.assertNotIn((0, 0), calls[-1])
+                return (1., np.array([1.]), "first")
+            self.assertIn((0, 0), calls[-1])
+            self.assertEqual(len(exclude), 1)
+            return (0.5, np.array([2.]), "second")
+        def deployed(folder, name, weeks, index, data, w, seconds, workers):
+            assignment = [0, 0] if w[0] == 1. else [0, 1]
+            return {ck: dict(assignment=assignment, complete=True)}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(asdbs, "ROUNDS", 1), patch.object(
+                    asdbs, "scenario_bank", return_value=bank), patch.object(
+                    asdbs, "initialize",
+                    return_value=({ck: [[0, 1]]}, np.zeros(2), {})
+                    ), patch.object(asdbs, "propose", side_effect=search), patch.object(
+                    asdbs, "verify", side_effect=deployed):
+                result = asdbs.train(
+                    temp, weeks, {1: 0, 2: 1}, data, ["intercept"],
+                    np.array([0.]), seconds=2., workers=1)
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["rounds"][0]["refinements"]), 2)
+        self.assertEqual(result["rounds"][0]["refinements"][0]["missing_schedules"], 1)
+        self.assertTrue(result["rounds"][0]["accepted"])
+        self.assertEqual(result["policy"], [1.])
+
+    def test_full_cost_uses_deployed_assignment(self):
+        c = component("2012-01-02", [1, 2], [200., 200.])
+        bank = np.tile([[200., 200.]], (50, 1))
+        items = [("x", c, np.array([0, 1]))]
+        lib, costs = {"x": [[0, 1]]}, {"x": [mean_cost(c, [0, 1], bank)]}
+        chosen = {"x": {"assignment": [0, 0]}}
+        self.assertEqual(expand_library(items, lib, costs, {"x": bank}, chosen), 1)
+        self.assertEqual(expand_library(items, lib, costs, {"x": bank}, chosen), 0)
+        self.assertEqual(len(lib["x"]), 2)
+        result = full_cost(items, lib, costs, chosen,
+                           np.ones((2, 1)), np.array([0.]),
+                           np.array([0.]))
+        self.assertAlmostEqual(result, 265.)
 
     def test_scenarios_exclude_own_monday(self):
         a = component("2012-01-02", [1, 2], [100., 200.])
