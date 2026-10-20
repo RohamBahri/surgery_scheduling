@@ -24,10 +24,11 @@ old VF/ANCHORED pipelines, create branches, or score any 2013 outcomes.
 * Acceptance: paired bank-B gain > 1.645 standard errors, one proposed
   policy per iteration, ten iterations. This is a **Monte Carlo heuristic**,
   not a 95% population improvement certificate.
-* Initialization uses at most 256 small SAA aspirations and 120 constructive
-  per-case searches; those are **search accelerators**, not sampling the
+* Initialization attempts two reachable-box extreme schedules for each flexible
+  component, plus at most 256 small SAA aspirations and 120 constructive
+  per-case searches. These are **search accelerators**, not sampling the
   training objective. Every training case contributes to the objective and
-  full-planner acceptance. A timed-out *optional* SAA candidate is skipped
+  full-planner acceptance. Timed-out *optional* aspiration solves are skipped
   and counted; a timed-out **deployed** solve blocks progress, never silently
   removes the component.
 * Decision-boundary search is a bounded, partial search over directions and
