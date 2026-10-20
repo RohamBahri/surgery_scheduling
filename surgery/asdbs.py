@@ -308,6 +308,43 @@ def bank_difference(items, bank, incumbent, candidate, reg_difference, N):
     return diff - reg_difference
 
 
+
+def expand_library(items, library, costs, bank, deployments):
+    """Insert certified full-planner choices before the next proposal."""
+    missing = 0
+    for ck, c, _ in items:
+        z = list(map(int, deployments[ck]["assignment"]))
+        if z not in library[ck]:
+            library[ck].append(z)
+            costs[ck].append(mean_cost(c, z, bank[ck]))
+            missing += 1
+    return missing
+
+
+def full_cost(items, library, costs, deployments, X, w, wcase):
+    """Scenario-A objective of the *deployed* assignments, never a library guess."""
+    total = 0.
+    for ck, _, _ in items:
+        z = list(map(int, deployments[ck]["assignment"]))
+        total += costs[ck][library[ck].index(z)]
+    return total / len(X) + LAMBDA / 2 * float(np.mean((X @ (w - wcase))**2))
+
+
+def propose(items, data, library, names, w, wcase, round_id):
+    """One full-dimensional directional search, using only bank A."""
+    incumbent = library_loss(items, data, data["_bank"], library, w, wcase)
+    best_value, best_w, best_direction = incumbent, None, None
+    for name, v in directions(data["X"], names, np.asarray(data["_desired"]), round_id):
+        for eta in boundary_candidates(items, data, library, w, v):
+            if eta == 0:
+                continue
+            candidate = w + eta * v
+            value = library_loss(items, data, data["_bank"], library, candidate, wcase)
+            if value < best_value - 1e-9:
+                best_value, best_w, best_direction = value, candidate, name
+    return best_value, best_w, best_direction
+
+
 def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -338,52 +375,89 @@ def train(folder, weeks, index, data, names, wcase, *, seconds=600., workers=12)
         return state
     costs = {ck:[mean_cost(c, z, bankA[ck]) for z in state["library"][ck]]
              for ck, c, _ in items}
-    data = dict(data, _bank=bankA, _costs=costs)
+    data = dict(data, _bank=bankA, _costs=costs,
+                _desired=np.asarray(state["desired"]))
     for r in range(len(state["rounds"]), ROUNDS):
-        w = np.asarray(state["policy"], float)
-        before = library_loss(items, data, bankA, state["library"], w, wcase)
-        best = (before, w, "none")
-        for name, v in directions(data["X"], names, np.asarray(state["desired"]), r):
-            for eta in boundary_candidates(items, data, state["library"], w, v):
-                if eta == 0:
-                    continue
-                proposal = w + eta * v
-                value = library_loss(items, data, bankA, state["library"], proposal, wcase)
-                if value < best[0] - 1e-9:
-                    best = (value, proposal, name)
-        if best[2] == "none":
-            state["rounds"].append(dict(round=r+1, accepted=False, reason="no_library_improvement"))
+        incumbent_w = np.asarray(state["policy"], float)
+        incumbent = verify(folder / "training_deploy", "incumbent", weeks, index,
+                           data, incumbent_w, seconds, workers)
+        expand_library(items, state["library"], costs, bankA, incumbent)
+        incumbent_A = full_cost(items, state["library"], costs,
+                                incumbent, data["X"], incumbent_w, wcase)
+
+        # Up to two bank-A proposals. After the first full deployment, add
+        # missing schedules and SEARCH AGAIN before seeing any bank-B draw.
+        pending = state.get("pending")
+        if pending is None:
+            pending = dict(round=r + 1, passes=0, candidates=[],
+                           best_full_A=incumbent_A, best_policy=None,
+                           best_direction=None)
+        elif pending["round"] != r + 1:
+            raise RuntimeError("ASDBS pending checkpoint is from another round")
+
+        while pending["passes"] < 2:
+            library_value, candidate_w, direction = propose(
+                items, data, state["library"], names, incumbent_w, wcase, r)
+            if candidate_w is None:
+                break
+            if any(np.array_equal(candidate_w, np.asarray(x["policy"]))
+                   for x in pending["candidates"]):
+                break
+
+            deployed = verify(folder / "training_deploy", "refinement", weeks, index,
+                              data, candidate_w, seconds, workers)
+            missing = expand_library(items, state["library"], costs, bankA, deployed)
+            actual_A = full_cost(items, state["library"], costs,
+                                 deployed, data["X"], candidate_w, wcase)
+
+            pending["passes"] += 1
+            pending["candidates"].append(dict(
+                policy=candidate_w.tolist(), direction=direction,
+                restricted_A=float(library_value),
+                full_A=float(actual_A), missing_schedules=missing))
+            if actual_A < pending["best_full_A"] - 1e-9:
+                pending["best_full_A"] = float(actual_A)
+                pending["best_policy"] = candidate_w.tolist()
+                pending["best_direction"] = direction
+            state["pending"] = pending
             write(path, state)
-            continue
-        proposal = best[1]
-        # Full planner, not library selection, determines acceptance.
-        old = verify(folder / "training_deploy", "incumbent", weeks, index,
-                     data, w, seconds, workers)
-        new = verify(folder / "training_deploy", "candidate", weeks, index,
-                     data, proposal, seconds, workers)
-        reg = LAMBDA / 2 * float(np.mean(
-            (data["X"] @ (proposal-wcase))**2 - (data["X"] @ (w-wcase))**2))
-        bankB = scenario_bank(items, data, wcase, .8, 30., 83000+r)
-        delta = bank_difference(items, bankB, old, new, reg, N)
-        improvement = float(delta.mean())
-        se = float(delta.std(ddof=1) / math.sqrt(K))
-        accepted = bool(improvement > 1.645 * se and improvement > 0)
-        for ck, c, _ in items:
-            for row in (old[ck], new[ck]):
-                z = list(map(int, row["assignment"]))
-                if z not in state["library"][ck]:
-                    state["library"][ck].append(z)
-                    data["_costs"][ck].append(mean_cost(c, z, bankA[ck]))
-        if accepted:
-            state["policy"] = proposal.tolist()
-        state["rounds"].append(dict(round=r+1, accepted=accepted,
-                                    direction=best[2], library_before=before,
-                                    library_candidate=best[0],
-                                    bank_b_gain_per_case=improvement,
-                                    bank_b_se=se))
+            print(f"ASDBS round {r+1} refinement {pending['passes']}/2: "
+                  f"restricted A={library_value:.5f}, full A={actual_A:.5f}, "
+                  f"new schedules={missing}", flush=True)
+            if not missing:
+                break
+
+        best_w = pending["best_policy"]
+        report = dict(round=r+1, refinements=pending["candidates"],
+                      full_A_incumbent=float(incumbent_A),
+                      full_A_best=float(pending["best_full_A"]),
+                      accepted=False)
+        if best_w is not None:
+            candidate_w = np.asarray(best_w, float)
+            deployed = verify(folder / "training_deploy", "selected", weeks, index,
+                              data, candidate_w, seconds, workers)
+            reg = LAMBDA / 2 * float(np.mean(
+                (data["X"] @ (candidate_w-wcase))**2 -
+                (data["X"] @ (incumbent_w-wcase))**2))
+            bankB = scenario_bank(items, data, wcase, .8, 30., 83000+r)
+            delta = bank_difference(items, bankB, incumbent, deployed, reg, N)
+            improvement = float(delta.mean())
+            se = float(delta.std(ddof=1) / math.sqrt(K))
+            report.update(direction=pending["best_direction"],
+                          bank_b_gain_per_case=improvement,
+                          bank_b_se=se)
+            report["accepted"] = bool(improvement > 1.645*se and improvement > 0)
+            if report["accepted"]:
+                state["policy"] = candidate_w.tolist()
+        else:
+            report["reason"] = "no_full_planner_A_improvement"
+
+        state["rounds"].append(report)
+        state.pop("pending", None)
         write(path, state)
-        print(f"ASDBS round {r+1}: gain={improvement:.5f} se={se:.5f} "
-              f"accepted={accepted}", flush=True)
+        print(f"ASDBS round {r+1}: accepted={report['accepted']}; "
+              f"full A gain={incumbent_A-pending['best_full_A']:.5f}", flush=True)
+
     state["complete"] = True
     write(path, state)
     return state
