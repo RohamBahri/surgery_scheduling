@@ -176,7 +176,7 @@ def main():
     parser.add_argument("--stage", choices=("fit","score"), required=True)
     parser.add_argument("--workbook", type=Path,
                         default=Path("data/UHNOperating_RoomScheduling2011-2013.xlsx"))
-    parser.add_argument("--root", type=Path, default=Path("artifacts/asdbs_79week_v1"))
+    parser.add_argument("--root", type=Path, default=Path("artifacts/asdbs_refined_v1"))
     parser.add_argument("--seconds", type=float, default=600.)
     parser.add_argument("--workers", type=int, default=12)
     args = parser.parse_args()
