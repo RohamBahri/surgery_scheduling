@@ -143,7 +143,8 @@ def initialize(items, data, wcase, bank, seconds, checkpoint, fingerprint,
     checkpoint = Path(checkpoint)
     init = json.loads(checkpoint.read_text()) if checkpoint.exists() else dict(
         fingerprint=fingerprint, library={}, desired={},
-        saa_attempted=0, saa_optimal=0, reachable_attempted=0)
+        saa_attempted=0, saa_optimal=0, reachable_attempted=0,
+        extreme_attempted=0, extreme_certified=0)
     if init["fingerprint"] != fingerprint:
         raise ValueError("Library input/code changed; use a new directory")
     _, post = display_and_duration(data["X"] @ wcase, data["booked"], .8, 30.)
@@ -159,6 +160,19 @@ def initialize(items, data, wcase, bank, seconds, checkpoint, fingerprint,
             continue
         d = post[rows]
         assignments = {plan(c, d, seconds)}
+        # Give every flexible component at least two additional attempts to
+        # generate a genuine alternative, not only sampled SAA components.
+        if any(len(c.allowed[int(s)]) > 1 for s in c.surgeon):
+            low, high = reachable(c.booked, .8, 30.)
+            for extreme in (low, high):
+                init["extreme_attempted"] += 1
+                try:
+                    assignments.add(plan(c, extreme, seconds))
+                    init["extreme_certified"] += 1
+                except RuntimeError:
+                    # Optional aspiration only. No case disappears from the
+                    # later full-planner, all-component training objective.
+                    pass
         if ck in aspir:
             zz = saa(c, bank[ck], seconds)
             init["saa_attempted"] += 1
@@ -180,7 +194,9 @@ def initialize(items, data, wcase, bank, seconds, checkpoint, fingerprint,
         if ck in init["desired"]:
             desired[rows] = init["desired"][ck]
     return init["library"], desired, {
-        name:init[name] for name in ("saa_attempted","saa_optimal","reachable_attempted")}
+        name:init[name] for name in ("saa_attempted","saa_optimal",
+                                  "reachable_attempted","extreme_attempted",
+                                  "extreme_certified")}
 
 
 
