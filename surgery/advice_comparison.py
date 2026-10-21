@@ -262,6 +262,10 @@ def component_job(job):
             outputs[name] = (d0, base)
             statuses[name] = "CASE_ABOVE_20"
             continue
+        if name == "PER_WEEK" and c.n <= 20:
+            outputs[name] = outputs["PER_WEEK_REF"]
+            statuses[name] = statuses["PER_WEEK_REF"]
+            continue
         try:
             d, z, accepted, status, _ = prescription(
                 c, d0, banks, seeds=fitted_seeds, seconds=seconds,
