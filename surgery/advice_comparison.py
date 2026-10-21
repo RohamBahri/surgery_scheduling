@@ -376,11 +376,12 @@ def sensitivity_job(item):
     outputs = {}
     proposed = {name: np.asarray(rec["displayed"], float)
                 for name, rec in original["arms"].items()}
-    known = np.asarray([
-        state["decision_dates"].get(int(cid)) is not None
-        and state["decision_dates"][int(cid)] < c.monday
-        for cid in c.case_ids], bool)
-    unknown = sum(state["decision_dates"].get(int(cid)) is None for cid in c.case_ids)
+    # Date strings are normalized by the runner; retain this guard for old
+    # checkpoints and pandas/numpy missing values that are floats (NaN).
+    dates = [state["decision_dates"].get(int(cid)) for cid in c.case_ids]
+    known = np.asarray([isinstance(date, str) and date < c.monday
+                        for date in dates], bool)
+    unknown = sum(not isinstance(date, str) for date in dates)
     configurations = {
         f"alpha_{a:g}_h_{h:g}": (a, h, None)
         for a, h in state["response_sweep"]
