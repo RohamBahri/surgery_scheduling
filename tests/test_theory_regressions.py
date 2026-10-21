@@ -96,6 +96,9 @@ def test_global_search_restart_restores_queue_and_bounds(tmp_path,monkeypatch):
                       targets=None,H=np.ones((1,1)))
     kw=dict(out=tmp_path,seconds=5.,solve_seconds=.1,max_nodes=1,radius=2.)
     a=theory_regions.global_shared_search([p],np.zeros(1),**kw)
+    frozen=theory_regions.global_shared_search([p],np.zeros(1),**kw)
+    assert frozen["nodes"]==a["nodes"]  # Finished models are immutable.
+    (tmp_path/"result.json").unlink()  # Simulate an interrupted run before final save.
     b=theory_regions.global_shared_search([p],np.zeros(1),**kw)
     assert a["nodes"]==1 and b["nodes"]==2
     assert b["lower"]<=b["upper"]
