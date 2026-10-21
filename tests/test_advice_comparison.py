@@ -91,3 +91,20 @@ def test_exact_hash_planner_on_toy():
     for seed in (0, 1, 2):
         z = certified(c, c.booked, seed, 30.)
         assert evaluate(c, z, c.booked)["cost"] == pytest.approx(730.)
+
+
+def test_full_runner_loads_and_reports_paired_cohort(tmp_path):
+    from pilot.run_advice_comparison import report
+    rows = [
+        dict(monday="2012-01-02", site="TGH", cases=2, arms={
+            "CASE": dict(realized={"0": 100.}),
+            "SHARED": dict(realized={"0": 80.})}),
+        dict(monday="2012-01-09", site="TWH", cases=3, arms={
+            "CASE": dict(realized={"0": 100.}),
+            "SHARED": dict(realized={"0": 95.})}),
+    ]
+    outcome = report(rows, (0,), tmp_path/"summary.json")
+    assert outcome["n_cases"] == 5
+    assert outcome["arms"]["SHARED"]["per_seed"][0]["difference"] == -5.
+    assert outcome["by_site"]["TGH"]["cases"] == 2
+    assert outcome["by_size"]["2-5"]["cases"] == 5
