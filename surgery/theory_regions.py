@@ -200,6 +200,8 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
     global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
                             lam,seeds,screen_stability=False,deadline=deadline)
+    if global_lb>baseline+1e-5:
+        raise AssertionError('SAA global lower bound exceeds certified CASE objective')
     queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
     progress=[];processed=0
     retired_lb=float('inf')  # Bounds of tolerance-fathomed regions remain valid.
