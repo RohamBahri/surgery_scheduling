@@ -56,6 +56,18 @@ def summarize(rows, draws=20000, seed=20261021):
             result["scenario_A_solver_gap_per_case"]=(
                 result["model_A_upper_per_case"]-result["model_A_lower_per_case"])
         out["saa_reference"]=result
+        # BOOKED/CASE versus the unrestricted SAA optimum is an opportunity
+        # interval, not the stochastic-vs-perfect-information gap.
+        if ("model_A_lower_per_case" in result
+                and "model_A_upper_per_case" in result
+                and not out["arms"].get("CASE",{}).get("unresolved",1)):
+            case_model=sum(r["methods"]["CASE"]["model"]["A"] for r in rows)/n
+            result["case_vs_saa_opportunity"]=dict(
+                model_A_CASE_per_case=case_model,
+                lower=case_model-result["model_A_upper_per_case"],
+                upper=case_model-result["model_A_lower_per_case"],
+                interpretation="Estimated-booking improvement opportunity, "
+                  "NOT the value of perfect information.")
         out["inducibility_bounds"]={}
         if "model_A_lower_per_case" in result:
             lower=result["model_A_lower_per_case"]
