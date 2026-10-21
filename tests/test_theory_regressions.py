@@ -11,7 +11,8 @@ def test_tolerance_pruned_regions_retain_their_dual_bounds(tmp_path, monkeypatch
     monkeypatch.setattr(theory_regions, "_evaluate", lambda *a, **kw: 10.0)
     monkeypatch.setattr(theory_regions, "_node_lower",
                         lambda *a, **kw: (9.9995, 0))
-    fake=[SimpleNamespace(targets=None)]
+    fake=[SimpleNamespace(key='fixture',week=SimpleNamespace(n=1),
+                          targets=None,H=np.ones((1,1)))]
     answer=theory_regions.global_shared_search(
         fake,np.zeros(1),out=tmp_path,seconds=5.,solve_seconds=.1,
         max_nodes=5,radius=1.,gap_tolerance=.001)
@@ -62,3 +63,57 @@ def test_pooled_reporting_is_case_weighted_and_all_or_nothing():
     unresolved=summarize(rows,draws=100)
     assert unresolved["arms"]["SHARED"]["mean_realized_cost_per_case"] is None
     assert "SHARED" not in unresolved["paired_vs_CASE"]
+
+
+def test_exact_planner_cache_never_caches_incomplete_solve(tmp_path):
+    from surgery.theory_cache import connect,cached_deploy
+    c=SimpleNamespace(n=2,case_ids=np.array([10,11]),booked=np.array([100.,120.]))
+    d=np.array([101.,123.]);seeds=(0,1,2)
+    conn=connect(tmp_path/"cache.sqlite3")
+    called=[]
+    def certify(component,durations,seed):
+        called.append(seed)
+        return (0,1) if seed!=2 else (1,0)
+    x=cached_deploy(c,d,seeds,certify,conn)
+    y=cached_deploy(c,d,seeds,certify,conn)
+    assert x==y and called==[0,1,2]
+    cached_deploy(c,d+1,seeds,certify,conn)
+    assert len(called)==6
+    def fail(component,durations,seed):
+        if seed==1:raise RuntimeError("uncertified")
+        return (0,1)
+    with pytest.raises(RuntimeError):
+        cached_deploy(c,d+2,seeds,fail,conn)
+    # No partial schedule was inserted on failure.
+    assert conn.execute("SELECT COUNT(*) FROM deployments").fetchone()[0]==2
+    conn.close()
+
+
+def test_global_search_restart_restores_queue_and_bounds(tmp_path,monkeypatch):
+    monkeypatch.setattr(theory_regions,"_evaluate",lambda *a,**kw: 10.)
+    monkeypatch.setattr(theory_regions,"_node_lower",lambda *a,**kw: (0.,0))
+    p=SimpleNamespace(key="restart",week=SimpleNamespace(n=1),
+                      targets=None,H=np.ones((1,1)))
+    kw=dict(out=tmp_path,seconds=5.,solve_seconds=.1,max_nodes=1,radius=2.)
+    a=theory_regions.global_shared_search([p],np.zeros(1),**kw)
+    b=theory_regions.global_shared_search([p],np.zeros(1),**kw)
+    assert a["nodes"]==1 and b["nodes"]==2
+    assert b["lower"]<=b["upper"]
+    assert b["gap"]>=0.
+
+
+def test_saa_reference_bounds_remain_separate_from_advice_policies():
+    from surgery.theory_reporting import summarize
+    def mk(day,sa,pa):
+        return dict(monday=day,cases=2,site="TGH",
+            methods={"CASE":dict(status="COMPLETE",realized={"0":10.}),
+                     "PER_WEEK_ROBUST":dict(status="COMPLETE",realized={"0":9.},
+                                            model={"A":pa})},
+            saa_reference=dict(certified=True,lower=sa,upper=sa,
+                    assignment=[0,1],realized=8.,seconds=1.,
+                    model={"A":sa,"C":sa+.5}))
+    result=summarize([mk("2012-01-02",4.,6.),mk("2012-01-09",5.,7.)],draws=100)
+    assert result["saa_reference"]["model_A_lower_per_case"]==pytest.approx(2.25)
+    assert result["saa_reference"]["model_C_feasible_per_case"]==pytest.approx(2.5)
+    assert result["inducibility_bounds"]["PER_WEEK_ROBUST"]["gap_lower"]==0
+    assert result["inducibility_bounds"]["PER_WEEK_ROBUST"]["gap_upper"]==pytest.approx(1.)
