@@ -340,7 +340,8 @@ def train_vf(args,ctx):
     if p.exists():return json.loads(p.read_text())
     cert=vf_shared_miqp(ctx['train'],ctx['fit'],ctx['H'],ctx['beta'],ctx['pools'],
            seconds=args.shared_seconds,threads=args.cores,
-           coefficient_radius=args.radius)
+           coefficient_radius=args.radius,
+           restart_dir=ctx['root']/'vf_restart')
     payload=cert.to_json()
     payload['meaning']='global bound on penalized scenario VF within coefficient box'
     atomic_json(p,payload)
