@@ -541,6 +541,8 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
             return candidates
         obj=float(np.mean([expected_reduced(c,z,bank) for z in candidates])
                   +lam/2*np.square(d-base).sum())
+        if obj<global_lb-1e-5:
+            raise AssertionError('SAA lower bound exceeds a certified deployed feasible policy')
         if obj<best:
             best,bestd,bestz=obj,d.copy(),candidates
         return candidates
