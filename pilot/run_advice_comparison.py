@@ -514,6 +514,14 @@ def run_final(args, cohort):
     write(args.out/"final_2013"/"latest.json", dict(run_id=run_id, manifest=frozen))
     print(f"2013 evaluation {run_id}: {len(held['booked'])} cases", flush=True)
 
+def decision_date_lookup(cohort):
+    """Map case IDs to ISO dates or None; never leak pandas NaN to workers."""
+    date_strings = cohort.dtt.dt.strftime("%Y-%m-%d").tolist()
+    return dict(zip(
+        cohort.case_id.astype(int),
+        (day if isinstance(day, str) else None for day in date_strings)))
+
+
 def run_sensitivity(args, cohort, raw):
     """Independent replay of frozen advice; neither models nor displays are refit."""
     from surgery.weekly_data import build_weeks, performed_events
@@ -535,12 +543,8 @@ def run_sensitivity(args, cohort, raw):
     root = args.out/"sensitivity"/"runs"/run_id
     root.mkdir(parents=True, exist_ok=True)
     write(root/"manifest.json", fingerprint)
-    # pandas may silently convert None back to float NaN in an object Series.
-    # A Python-level conversion guarantees JSON-like str | None dates.
-    date_strings = cohort.dtt.dt.strftime("%Y-%m-%d").tolist()
-    decision_dates = dict(zip(
-        cohort.case_id.astype(int),
-        (day if isinstance(day, str) else None for day in date_strings)))
+    # pandas can turn missing object dates back into float NaN.
+    decision_dates = decision_date_lookup(cohort)
     by_condition = {}
     for fold in (0, 1):
         fold_dir = args.out / f"fold_{fold}"
