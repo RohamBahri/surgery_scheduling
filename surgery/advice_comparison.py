@@ -297,7 +297,7 @@ def shared_job(item):
     state = _STATE
     data, H, pools = state["data"], state["H"], state["pools"]
     d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
-    draws = {name: scenarios(c, d0, pools, 20261020+j)
+    draws = {name: scenarios(c, d0, pools, 20261020+97*state["round_id"]+j)
              for j, name in enumerate(("A", "B"))}
     out, cache = [], {}
     for coeff in state["candidates"]:
