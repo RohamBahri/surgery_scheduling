@@ -410,6 +410,10 @@ def main():
         all_rows.extend(run_fold(args, fold, cohort))
     if args.fold == "both":
         report(all_rows, (0, 1, 2), args.out/"pooled.json")
+    if args.final_2013:
+        if args.fold != "both":
+            parser.error("--final-2013 requires both completed development folds")
+        run_final(args, cohort)
 
 
 if __name__ == "__main__":
