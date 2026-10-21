@@ -558,7 +558,7 @@ def main():
             try:
                 allproblems=build_problems(ctx['train'],ctx['fit'],ctx['H'],
                        ctx['beta'],ctx['pools'],bounds_root,
-                       seconds=args.seconds,target_restricted=False)
+                       seconds=args.seconds,target_restricted=False,cores=args.cores)
             except RuntimeError as exc:
                 allproblems=None
                 failures['GLOBAL_SAA_BUILD']=str(exc)
@@ -578,7 +578,7 @@ def main():
                 try:
                     targets=build_problems(ctx['train'],ctx['fit'],ctx['H'],
                          ctx['beta'],ctx['pools'],bounds_root,
-                         seconds=args.seconds,target_restricted=True)
+                         seconds=args.seconds,target_restricted=True,cores=args.cores)
                     cert=global_shared_search(targets,ctx['beta'],
                          out=bounds_root/'target',seconds=args.global_seconds,
                          solve_seconds=args.seconds,max_nodes=args.global_nodes,
