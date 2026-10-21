@@ -47,15 +47,6 @@ def case_features(c, baseline_z, baseline_d, row_X, names):
     return np.column_stack((s, q, p, s*p, q*p))
 
 
-def standardize(H, mean=None, scale=None):
-    if mean is None:
-        mean = H.mean(axis=0)
-    if scale is None:
-        scale = H.std(axis=0)
-        scale = np.where(scale < 1e-8, 1., scale)
-    return (H - mean) / scale, mean, scale
-
-
 def residual_history(items, data, frame, residuals=None):
     """Residual donors from fitting weeks only; target week excluded during fitting."""
     _, d0 = display_and_duration(data["X"] @ data["case_w"],
