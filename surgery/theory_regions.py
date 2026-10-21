@@ -144,16 +144,21 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
                             lam,seeds,screen_stability=False)
     queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
     progress=[];processed=0
+    retired_lb=float('inf')  # Bounds of tolerance-fathomed regions remain valid.
     while queue and processed<max_nodes and time.monotonic()-start<seconds:
         lb,_,a,b=heappop(queue)
-        if lb>=best-gap_tolerance:continue
+        if lb>=best-gap_tolerance:
+            retired_lb=min(retired_lb,lb)
+            continue
         processed+=1
         # The expensive stability oracle is only used on promising tight boxes.
         width=float(np.max(b-a))
         use_stability=width<max(1.,radius/2)
         tighter,stable=_node_lower(problems,a,b,np.asarray(beta),solve_seconds,
                             lam,seeds,screen_stability=use_stability)
-        if tighter>=best-gap_tolerance:continue
+        if tighter>=best-gap_tolerance:
+            retired_lb=min(retired_lb,tighter)
+            continue
         center=(a+b)/2
         val=_evaluate(problems,center,np.asarray(beta),solve_seconds,lam,seeds)
         if val is not None and val<best:
@@ -171,17 +176,22 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
                               lam,seeds,screen_stability=False)
             if sub<best-gap_tolerance:
                 serial+=1;heappush(queue,(sub,serial,aa,bb))
-        current_lb=min((q[0] for q in queue),default=best)
+            else:
+                retired_lb=min(retired_lb,sub)
+        current_lb=min([q[0] for q in queue]+[retired_lb,best])
         progress.append(dict(node=processed,lower=current_lb,upper=best,
                              stable_on_node=stable,remaining=len(queue),
                              elapsed=time.monotonic()-start))
         _save(output/'progress.json',dict(history=progress,theta=best_theta.tolist()))
-    final_lb=min((q[0] for q in queue),default=best)
-    # If the last node was skipped on an unresolved solve, it remains in queue.
+    final_lb=min([q[0] for q in queue]+[retired_lb,best])
+    # Tolerance-fathomed regions are NOT exact: keep their dual bounds.
     result=dict(theta=best_theta.tolist(),lower=float(final_lb),upper=float(best),
                 gap=float(max(0.,best-final_lb)),nodes=processed,
                 seconds=time.monotonic()-start,
-                status='GAP_CERTIFIED' if best-final_lb<=gap_tolerance else 'BOUNDED_UNRESOLVED',
+                status=('OPTIMAL_CERTIFIED' if best-final_lb<=1e-8
+                         else 'GAP_CERTIFIED' if best-final_lb<=gap_tolerance+1e-10
+                         else 'BOUNDED_UNRESOLVED'),
+                 tolerance_fathomed_lower=None if not np.isfinite(retired_lb) else float(retired_lb),
                 allowed_schedules='incumbent + SAA target per seed' if problems[0].targets is not None else 'all feasible',
                 guarantee='finite-sample scenario objective only; all components included')
     _save(output/'result.json',result)
