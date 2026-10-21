@@ -243,7 +243,8 @@ def component_job(job):
     for name, fitted_seeds in (("PER_WEEK", (0,)), ("PER_WEEK_ROBUST", seeds)):
         try:
             d, z, accepted, status, _ = prescription(
-                c, d0, banks, seeds=fitted_seeds, seconds=seconds, budget=budget)
+                c, d0, banks, seeds=fitted_seeds, seconds=seconds,
+                budget=budget if c.n <= 20 else 2*budget)
             outputs[name] = (d, {r: (z[r] if r in z else certified(c, d, r, seconds))
                                  for r in seeds})
             statuses[name] = status
