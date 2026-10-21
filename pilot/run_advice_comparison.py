@@ -26,6 +26,21 @@ from surgery.advice_comparison import (baseline_job, evaluated_job, init_worker,
                                        residual_history, reviewed, shared_job, LAM)
 from surgery.anchored_core import key
 
+SOURCE_DEPENDENCIES = (
+    "pilot/run_advice_comparison.py", "surgery/advice_comparison.py",
+    "surgery/anchored_weekly_solver.py", "surgery/anchored_core.py",
+    "surgery/rich_features.py", "surgery/weekly_planner.py",
+    "surgery/asdbs.py", "surgery/weekly_data.py",
+    "surgery/data.py", "surgery/planner.py", "surgery/weekly_training.py",
+    "pilot/run_asdbs.py", "pilot/run_pilot.py", "run_weekly_rich.py",
+)
+
+
+def source_hashes():
+    root = Path(__file__).resolve().parents[1]
+    return {p: hashlib.sha256((root/p).read_bytes()).hexdigest()
+            for p in SOURCE_DEPENDENCIES}
+
 
 def parallel(fn, items, state, cores):
     if not items:
@@ -358,9 +373,7 @@ def run_fold(args, fold, cohort):
     if len(fit["booked"]) + len(held["booked"]) != 24506:
         raise AssertionError("Expected the entire 24,506-case development cohort")
     fingerprint = dict(workbook=hashlib.sha256(args.workbook.read_bytes()).hexdigest(),
-                       model_source={p: hashlib.sha256((Path(__file__).resolve().parents[1]/p).read_bytes()).hexdigest()
-                                     for p in ("pilot/run_advice_comparison.py", "surgery/advice_comparison.py",
-                                               "surgery/anchored_weekly_solver.py", "surgery/rich_features.py")},
+                       model_source=source_hashes(),
                        fold=fold, spec=spec, cores=args.cores, seconds=args.seconds,
                        budget=args.budget, shared_rounds=args.shared_rounds)
     manifest = folder / "settings.json"
@@ -430,21 +443,18 @@ def final_data(workbook):
     return fitted, held, fitweeks, evalweeks, fitindex, evalindex, names
 
 
+
 def run_final(args, cohort):
-    """2013 is never used for fitting, tuning, scenario construction or method choice."""
-    if not (args.out/"pooled.json").exists():
-        raise RuntimeError("Complete both development folds before the frozen 2013 replay")
-    folder = args.out/"final_2013"
+    """Repeatable 2013 evaluation: no one-time seal, separate audited runs."""
+    frozen = dict(workbook=hashlib.sha256(args.workbook.read_bytes()).hexdigest(),
+                  cases=8774, cores=args.cores,
+                  seconds=args.seconds, budget=args.budget,
+                  shared_rounds=args.shared_rounds, source=source_hashes())
+    run_id = hashlib.sha256(json.dumps(frozen, sort_keys=True).encode()).hexdigest()[:16]
+    folder = args.out/"final_2013"/"runs"/run_id
     folder.mkdir(parents=True, exist_ok=True)
+    write(folder/"manifest.json", frozen)
     fit, held, trainweeks, evalweeks, fitindex, evalindex, names = final_data(args.workbook)
-    development_hash = hashlib.sha256((args.out/"pooled.json").read_bytes()).hexdigest()
-    manifest = folder/"freeze.json"
-    frozen = dict(development_sha256=development_hash, cases=8774,
-                  seconds=args.seconds, budget=args.budget, shared_rounds=args.shared_rounds,
-                  code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
-    if manifest.exists() and json.loads(manifest.read_text()) != frozen:
-        raise RuntimeError("Final 2013 was already opened with other settings")
-    write(manifest, frozen)
     case_baseline(folder, fit, args.cores)
     held["case_w"] = fit["case_w"]
     fit_items, eval_items = components(trainweeks, fitindex), components(evalweeks, evalindex)
@@ -459,9 +469,10 @@ def run_final(args, cohort):
     state = dict(data=held, H=T, pools=pools, beta=beta, theta=theta,
                  seeds=(0, 1, 2), seconds=args.seconds, budget=args.budget)
     rows = save_components(folder/"components", eval_items, state, args.cores)
-    report(rows, (0, 1, 2), folder/"summary.json")
-    print("Frozen 2013 replay:", len(held["booked"]), "cases", flush=True)
-
+    results = report(rows, (0, 1, 2), folder/"summary.json")
+    write(args.out/"final_2013"/"summary.json", results)
+    write(args.out/"final_2013"/"latest.json", dict(run_id=run_id, manifest=frozen))
+    print(f"2013 evaluation {run_id}: {len(held['booked'])} cases", flush=True)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -472,14 +483,12 @@ def main():
     parser.add_argument("--budget", type=float, default=900.)
     parser.add_argument("--shared-rounds", type=int, default=10)
     parser.add_argument("--fold", choices=("0", "1", "both"), default="both")
-    parser.add_argument("--final-2013", action="store_true", help="One frozen 2013 replay after both development folds")
+    parser.add_argument("--final-2013", action="store_true", help="Repeatable 2013 evaluation with run-specific provenance")
     args = parser.parse_args()
     os.environ["SURGERY_RESEARCH_LINK"] = "inverse"
     if not 1 <= args.cores <= 15 or args.seconds <= 0 or args.budget <= 0:
         parser.error("cores must be 1..15 and time limits positive")
     args.out.mkdir(parents=True, exist_ok=True)
-    if args.final_2013 and args.fold != "both":
-        parser.error("--final-2013 requires both completed development folds")
     _, cohort = read_cohort(args.workbook)
     if args.final_2013:
         run_final(args, cohort)
