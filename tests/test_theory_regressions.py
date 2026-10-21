@@ -106,7 +106,8 @@ def test_saa_reference_bounds_remain_separate_from_advice_policies():
     from surgery.theory_reporting import summarize
     def mk(day,sa,pa):
         return dict(monday=day,cases=2,site="TGH",
-            methods={"CASE":dict(status="COMPLETE",realized={"0":10.}),
+            methods={"CASE":dict(status="COMPLETE",realized={"0":10.},
+                                  model={"A":8.}),
                      "PER_WEEK_ROBUST":dict(status="COMPLETE",realized={"0":9.},
                                             model={"A":pa})},
             saa_reference=dict(certified=True,lower=sa,upper=sa,
