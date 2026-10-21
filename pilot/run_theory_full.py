@@ -61,7 +61,8 @@ def secure_manifest(root,args):
     p=Path(__file__).resolve().parents[1]
     from pilot.run_advice_comparison import SOURCE_DEPENDENCIES
     files=sorted(set(SOURCE_DEPENDENCIES) | {'pilot/run_theory_full.py',
-          'surgery/theory_exact.py','surgery/theory_regions.py','surgery/theory_bilevel.py'})
+          'surgery/theory_exact.py','surgery/theory_regions.py','surgery/theory_bilevel.py',
+          'surgery/theory_reporting.py'})
     config=dict(workbook=digest(args.workbook),source={f:digest(p/f) for f in files},
                 folds=args.fold,final_acknowledged=args.acknowledge_final,seconds=args.seconds,pw_seconds=args.pw_seconds,
                 shared_seconds=args.shared_seconds,rounds=args.rounds,global_nodes=args.global_nodes,global_seconds=args.global_seconds,
