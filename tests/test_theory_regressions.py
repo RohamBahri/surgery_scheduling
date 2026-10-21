@@ -32,7 +32,7 @@ def test_training_bank_b_is_independent_and_changes_each_round(monkeypatch):
         return np.ones((count,1))
     monkeypatch.setattr(runner,"scenarios",fake_scenarios)
     monkeypatch.setattr(runner,"scores",lambda *a,**kw: 1.)
-    c=SimpleNamespace(booked=np.array([100.]))
+    c=SimpleNamespace(booked=np.array([100.]),n=1)
     task=("id",c,np.array([0]),np.array([0.]),np.ones((1,5)),None,
           [[0.,0.,0.,0.,0.]],"SHARED",{},1.,0)
     runner._train_component(task)
