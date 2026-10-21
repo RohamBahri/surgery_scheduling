@@ -99,3 +99,24 @@ PW_VFCG optimizes **seed 0** but evaluates its obtained advice under all three s
 Some methods may require substantial additional strengthening before their global gaps close at realistic instance sizes. Reporting this is an intended outcome of the scalability experiment, not a reason to report partial results as exact. In particular, the coefficient-space lower bounds intentionally do **not** infer stability merely from multiple schedules having equal predicted cost; the second-best primary-gap certificate is sufficient but conservative. Also, the PW-VFCG strict hash-selection inequalities are represented by necessary non-strict cuts. Near-boundary cases can consequently remain unresolved even after extensive separation.
 
 The code does not claim to reproduce Version 4's **incorrect** sufficient-but-not-necessary target-induction MILP constraints. `ANCHORED_TARGET` uses a mathematically valid but potentially slow restricted coefficient-region search instead. Its reported global gap is for the *restricted target set*, not for unrestricted direct SHARED or the old 74-coefficient ANCHORED method.
+
+## 2026-10-21 audited restart (v2)
+
+Use `bash run_theory_full.sh` with a NEW `artifacts/theory_full_v2` output root.
+Old v1 checkpoints and certificates are not compatible: source hashes prevent
+mixed-version recovery. The shared directional learner screens with Bank A and
+confirms its proposed updates on a fresh Bank B each round; this screening
+is not a claim of finite-sample improvement under the true duration law.
+Global coefficient and per-instance searches retain dual bounds of every
+region pruned under a nonzero tolerance. `GAP_CERTIFIED` means the stated
+absolute gap is met; only `OPTIMAL_CERTIFIED` denotes near-zero closure.
+Nested MILP time limits consume the method's remaining wall-clock budget.
+Completed multiprocessing jobs are persisted as they finish, rather than in
+submission order. `pooled_theory_summary.json` combines both development
+folds, covers exactly 24,506 cases, and resamples calendar Mondays; unresolved
+arms have no headline mean. Solver statuses and remaining gaps remain visible.
+
+The GitHub CI suite includes solver integration tests, but no completed
+24,506-case Gurobi experiment is claimed by CI. Large-model timeouts and
+uncertified methods are scientific scalability results, not proofs of their
+optima. The retrospective roster and assumed response law remain limitations.
