@@ -97,11 +97,11 @@ def test_full_runner_loads_and_reports_paired_cohort(tmp_path):
     from pilot.run_advice_comparison import report
     rows = [
         dict(monday="2012-01-02", site="TGH", cases=2, arms={
-            "CASE": dict(realized={"0": 100.}),
-            "SHARED": dict(realized={"0": 80.})}),
+            "CASE": dict(realized={"0": 100.}, changed=0),
+            "SHARED": dict(realized={"0": 80.}, changed=0)}),
         dict(monday="2012-01-09", site="TWH", cases=3, arms={
-            "CASE": dict(realized={"0": 100.}),
-            "SHARED": dict(realized={"0": 95.})}),
+            "CASE": dict(realized={"0": 100.}, changed=0),
+            "SHARED": dict(realized={"0": 95.}, changed=0)}),
     ]
     outcome = report(rows, (0,), tmp_path/"summary.json")
     assert outcome["n_cases"] == 5
