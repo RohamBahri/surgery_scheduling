@@ -62,10 +62,11 @@ def secure_manifest(root,args):
     from pilot.run_advice_comparison import SOURCE_DEPENDENCIES
     files=sorted(set(SOURCE_DEPENDENCIES) | {'pilot/run_theory_full.py',
           'surgery/theory_exact.py','surgery/theory_regions.py','surgery/theory_bilevel.py',
-          'surgery/theory_reporting.py'})
+          'surgery/theory_reporting.py','surgery/theory_cache.py'})
     config=dict(workbook=digest(args.workbook),source={f:digest(p/f) for f in files},
                 folds=args.fold,final_acknowledged=args.acknowledge_final,seconds=args.seconds,pw_seconds=args.pw_seconds,
-                shared_seconds=args.shared_seconds,rounds=args.rounds,global_nodes=args.global_nodes,global_seconds=args.global_seconds,
+                shared_seconds=args.shared_seconds,rounds=args.rounds,search_seconds=args.search_seconds,
+                global_nodes=args.global_nodes,global_seconds=args.global_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
                 scenario_seed=20261020,scenarios=dict(A=50,B=50,C=200),
                 response_grid=SWEEP,hash_seeds=SEEDS,
@@ -121,10 +122,11 @@ def reviewed_policy(c,rows,H,base,coeff):
 
 
 def deploy(c,d,seconds,bank=None):
-    z={}
-    for seed in SEEDS:
-        z[seed]=certified(c,d,seed,seconds)
-    return z
+    from surgery.theory_cache import cached_deploy
+    state=_SCORE_STATE if _SCORE_STATE is not None else {}
+    return cached_deploy(c,d,SEEDS,
+           lambda component,durations,seed:certified(component,durations,seed,seconds),
+           conn=state.get("planner_conn"),stats=state.get("planner_stats"))
 
 
 def scores(c,d,d0,bank,method,seconds,seed=0):
@@ -165,7 +167,10 @@ def _score_initializer(state):
     global _SCORE_STATE
     _SCORE_STATE=state
     from threadpoolctl import threadpool_limits
+    from surgery.theory_cache import connect
     _SCORE_STATE["_thread_limit"]=threadpool_limits(limits=1)
+    _SCORE_STATE["planner_conn"]=connect(state["cache_path"])
+    _SCORE_STATE["planner_stats"]=dict(hits=0,solves=0)
 
 
 def _train_component(task):
@@ -182,9 +187,14 @@ def _train_component(task):
                         else 20261021+1009*(-round_id-1)),count=50)
     result=[]
     for coeff in coefficients:
+        stats=(_SCORE_STATE or {}).get('planner_stats',{})
+        before=(stats.get('hits',0),stats.get('solves',0))
         d=reviewed_policy(c,rows,H,d0,np.asarray(coeff))
         try:
-            result.append(dict(value=scores(c,d,d0,bank,method,seconds),complete=True))
+            value=scores(c,d,d0,bank,method,seconds)
+            result.append(dict(value=value,complete=True,
+                   planner_cache_hits=stats.get('hits',0)-before[0],
+                   planner_solver_calls=stats.get('solves',0)-before[1]))
         except RuntimeError as exc:
             result.append(dict(value=None,complete=False,status=str(exc)))
     return ck,c.n,result
@@ -251,18 +261,30 @@ def train_search(args,ctx,method):
     for j,k in itertools.combinations(range(H.shape[1]),2):
         x=np.eye(H.shape[1]);directions.extend(((x[j]+x[k])/np.sqrt(2),
                                                (x[j]-x[k])/np.sqrt(2)))
-    theta=np.zeros(5);history=[]
+    progress=root/'progress.json'
+    if progress.exists():
+        saved=json.loads(progress.read_text())
+        theta=np.asarray(saved['theta'],float)
+        history=saved['history']
+        if len(theta)!=H.shape[1] or len(history)>args.rounds:
+            raise RuntimeError('Invalid saved shared search state')
+    else:
+        theta=np.zeros(H.shape[1]);history=[]
     flexible=[x for x in items if any(len(x[1].allowed[int(s)])>1 for s in x[1].surgeon)]
     candidates=flexible or items
     rg=np.random.default_rng(20261020)
     sampled=rg.choice(len(candidates),size=min(150,len(candidates)),replace=False)
     shortlist_items=[candidates[int(j)] for j in sampled]
+    search_start=time.monotonic()
     score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
-                     pools=ctx['pools'],seconds=args.seconds)
+                     pools=ctx['pools'],seconds=args.seconds,
+                     cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
     with ProcessPoolExecutor(max_workers=args.cores,
             mp_context=get_context('spawn'),initializer=_score_initializer,
             initargs=(score_state,)) as score_pool:
-        for round_id in range(args.rounds):
+        for round_id in range(len(history),args.rounds):
+            if time.monotonic()-search_start>=args.search_seconds:
+                break
             step=8./2**round_id
             proposed=[beta+theta]
             for v in directions:
@@ -306,6 +328,9 @@ def train_search(args,ctx,method):
             atomic_json(root/'progress.json',dict(history=history,theta=theta.tolist()))
     coeff=beta+theta
     atomic_json(result,dict(coeff=coeff.tolist(),theta=theta.tolist(),history=history,
+                 completed_rounds=len(history),requested_rounds=args.rounds,
+                 status='COMPLETE_ROUNDS' if len(history)==args.rounds else 'BUDGET_EXHAUSTED',
+                 wall_seconds_this_session=time.monotonic()-search_start,
                  guarantee='full-Bank-A candidate search with independent per-round Bank-B confirmation; outer search not globally optimal or population-certified'))
     return coeff
 
@@ -617,6 +642,8 @@ def main():
     ap.add_argument('--shared-seconds',type=float,default=21600)
     ap.add_argument('--radius',type=float,default=32.)
     ap.add_argument('--rounds',type=int,default=10)
+    ap.add_argument('--search-seconds',type=float,default=86400.,
+                    help='Soft per-method directional training budget; stops between rounds')
     ap.add_argument('--fold',choices=['0','1','both','2013'],default='both')
     ap.add_argument('--acknowledge-final',action='store_true',
                     help='Use once only after freezing methods; no result-based retuning')
@@ -627,7 +654,7 @@ def main():
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
     if not set(args.methods)<=set(['VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
-    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius)<=0:
+    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if args.fold=='2013' and not args.acknowledge_final:
         ap.error('2013 holdout requires explicit --acknowledge-final after all choices are frozen')
