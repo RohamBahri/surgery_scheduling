@@ -43,6 +43,64 @@ def case_baseline(folder, data, cores):
     return w
 
 
+
+def out_of_fold_residuals(folder, cohort, weeks, data, cores):
+    """Four calendar-week inner folds: fit features and response-aware CASE anew."""
+    from surgery.rich_features import RichCorrectionEncoder
+    from surgery.weekly_training import fit_fixed
+    from pilot.run_pilot import add_context
+    from threadpoolctl import threadpool_limits
+
+    path = folder/"residual_oof.npy"
+    if path.exists():
+        residuals = np.load(path)
+        if residuals.shape == data["booked"].shape:
+            return residuals
+        raise RuntimeError("Stale OOF residual dimensions")
+    fitted = cohort[cohort.case_id.isin(data["case_id"])].copy()
+    pos = {int(cid): i for i, cid in enumerate(data["case_id"])}
+    dates = sorted({w.monday for w in weeks})
+    selected_lam = json.loads((folder/"case_policy.json").read_text())["lambda_l1"]
+    residuals = np.full(len(pos), np.nan)
+    for f in range(4):
+        held_days = {d for j, d in enumerate(dates) if j % 4 == f}
+        fit_weeks = [w for w in weeks if w.monday not in held_days]
+        eval_weeks = [w for w in weeks if w.monday in held_days]
+        train_ids = {int(cid) for w in fit_weeks for cid in w.case_ids}
+        eval_ids = {int(cid) for w in eval_weeks for cid in w.case_ids}
+        inner_train = fitted[fitted.case_id.isin(train_ids)].reset_index(drop=True)
+        inner_eval = fitted[fitted.case_id.isin(eval_ids)].reset_index(drop=True)
+        enc = RichCorrectionEncoder(history_mode="leave_date_out")
+        X, T = enc.fit_transform(inner_train), enc.transform(inner_eval)
+        names = list(enc.names)
+        train_idx = {int(cid): i for i, cid in enumerate(inner_train.case_id)}
+        eval_idx = {int(cid): i for i, cid in enumerate(inner_eval.case_id)}
+        X, extra, mu, sd = add_context(X, fit_weeks, train_idx, variant="cohort")
+        T, _, _, _ = add_context(T, eval_weeks, eval_idx,
+                                variant="cohort", scaler=(mu, sd))
+        names += list(extra)
+        j = names.index("surgeon_week_booked_minutes")
+        for name in ("hist_surgeon_mean_abs_error", "hist_procedure_mean_abs_error"):
+            if name in names:
+                k = names.index(name)
+                X = np.column_stack([X, X[:, k]*X[:, j]])
+                T = np.column_stack([T, T[:, k]*T[:, j]])
+                names.append(name+"_x_surgeon_week_load")
+        with threadpool_limits(limits=cores):
+            fit = fit_fixed(X, inner_train.booked.to_numpy(float),
+                            inner_train.actual.to_numpy(float), .8, 30.,
+                            selected_lam, np.zeros(X.shape[1]), iterations=250)
+        forecast = reviewed(inner_eval.booked.to_numpy(float),
+                            T @ np.asarray(fit["w"], float))
+        residuals[[pos[int(cid)] for cid in inner_eval.case_id]] = (
+            np.log(inner_eval.actual.to_numpy(float)/forecast))
+        print(f"Cross-fit duration residuals: {f+1}/4 folds", flush=True)
+    if not np.isfinite(residuals).all():
+        raise AssertionError("Incomplete out-of-fold residual cohort")
+    np.save(path, residuals)
+    return residuals
+
+
 def shared_control(data, H):
     """Matched response-aware statistical control, using exactly the five features."""
     base = data["X"] @ data["case_w"]
@@ -210,7 +268,8 @@ def run_fold(args, fold, cohort):
     H, mean, scale = fit_features(folder, fit_items, fit, names, args.seconds, args.cores)
     H_eval = test_features(eval_items, held, names, mean, scale, args.seconds, args.cores)
     fit_frame = cohort[cohort.case_id.isin(fit["case_id"])]
-    pools = residual_history(fit_items, fit, fit_frame)
+    errors = out_of_fold_residuals(folder, cohort, trainweeks, fit, args.cores)
+    pools = residual_history(fit_items, fit, fit_frame, errors)
     beta = shared_control(fit, H)
     seeds = (0, 1, 2)
     theta = fit_shared(folder, fit_items, fit, H, pools, beta,
@@ -284,7 +343,8 @@ def run_final(args, cohort):
     H, mu, sd = fit_features(folder, fit_items, fit, names, args.seconds, args.cores)
     T = test_features(eval_items, held, names, mu, sd, args.seconds, args.cores)
     fit_frame = cohort[cohort.case_id.isin(fit["case_id"])]
-    pools = residual_history(fit_items, fit, fit_frame)
+    errors = out_of_fold_residuals(folder, cohort, trainweeks, fit, args.cores)
+    pools = residual_history(fit_items, fit, fit_frame, errors)
     beta = shared_control(fit, H)
     theta = fit_shared(folder, fit_items, fit, H, pools, beta,
                        args.seconds, args.cores, args.shared_rounds, (0, 1, 2))
