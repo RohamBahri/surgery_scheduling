@@ -241,6 +241,23 @@ def report(rows, seeds, filename):
                               ci95=np.quantile(samples, [.025, .975]).tolist()))
         result["arms"][name] = dict(per_seed=diffs,
               changed_cases=sum(row["arms"][name]["changed"] for row in rows))
+    # Every stratum uses the same case denominator and identical planner tie rules.
+    result["by_site"] = {}
+    result["by_size"] = {}
+    size_label = lambda n: ("fixed/1" if n == 1 else "2-5" if n <= 5
+                            else "6-10" if n <= 10 else "11-20" if n <= 20
+                            else "21-34" if n <= 34 else "35+")
+    for category, label_fn in (("by_site", lambda row: row["site"]),
+                               ("by_size", lambda row: size_label(row["cases"]))):
+        for label in sorted({label_fn(row) for row in rows}):
+            subset = [row for row in rows if label_fn(row) == label]
+            den = sum(row["cases"] for row in subset)
+            result[category][label] = dict(cases=den, components=len(subset),
+                differences={name: {str(seed): sum(
+                    row["arms"][name]["realized"][str(seed)] -
+                    row["arms"]["CASE"]["realized"][str(seed)]
+                    for row in subset)/den for seed in seeds}
+                    for name in arms})
     write(filename, result)
     return result
 
