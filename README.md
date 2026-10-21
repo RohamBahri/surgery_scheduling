@@ -65,3 +65,12 @@ The supported weekly planner, fixed-booking-anchor correction features, and
 training-only pilot are documented in [docs/weekly.md](docs/weekly.md).
 Use `run_weekly_rich.py` for the new case-level feature workflow. The older
 `run_experiment.py` remains a separately maintained **daily** experiment.
+
+
+## October 2026: behavioral advice comparison
+
+See [the two-method experiment](docs/advice_comparison.md). The runner compares a five-coefficient shared adjustment with per-week prescriptions on all 24,506 development cases, using 15 one-thread planner workers and a frozen 2013 option:
+
+```bash
+python pilot/run_advice_comparison.py --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx --out artifacts/advice_comparison --cores 15
+```
