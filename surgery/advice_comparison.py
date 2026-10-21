@@ -55,11 +55,14 @@ def standardize(H, mean=None, scale=None):
     return (H - mean) / scale, mean, scale
 
 
-def residual_history(items, data, frame):
+def residual_history(items, data, frame, residuals=None):
     """Residual donors from fitting weeks only; target week excluded during fitting."""
     _, d0 = display_and_duration(data["X"] @ data["case_w"],
                                  data["booked"], ALPHA, H)
-    e = np.log(np.maximum(1., data["actual"]) / d0)
+    e = (np.log(np.maximum(1., data["actual"]) / d0) if residuals is None
+         else np.asarray(residuals, float))
+    if e.shape != d0.shape or not np.isfinite(e).all():
+        raise ValueError("Invalid residual vector")
     by_id = dict(zip(frame.case_id.astype(int), frame.surgeon.astype(str)))
     pools = {}
     for _, c, rows in items:
