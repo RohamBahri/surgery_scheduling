@@ -115,6 +115,7 @@ def test_flat_margin_crosses_strict_overtime_threshold():
     from surgery.weekly_planner import loads
     c = toy()
     d = np.array([200., 250.])  # packed load: 200 + 250 + 30 = 480.
+    c.booked[:] = d  # The starting point must be inside the response box.
     assert loads(c, (0, 0), d)[0] == 480.
     proposal = transition(c, d, (0, 0), (0, 1))
     assert loads(c, (0, 0), proposal)[0] > 480.
