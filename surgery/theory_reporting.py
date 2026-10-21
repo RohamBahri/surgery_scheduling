@@ -35,7 +35,7 @@ def summarize(rows, draws=20000, seed=20261021):
         for name in sorted({partition(r) for r in rows}):
             group=[r for r in rows if partition(r)==name]
             denom=sum(r["cases"] for r in group)
-            detail=dict(n_cases=den,n_components=len(group),arms={})
+            detail=dict(n_cases=denom,n_components=len(group),arms={})
             for arm in arms:
                 subset=[r for r in group if r["methods"].get(arm,{}).get("status")=="COMPLETE"]
                 avg=(sum(np.mean(list(r["methods"][arm]["realized"].values()))
