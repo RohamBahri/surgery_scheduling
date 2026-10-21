@@ -99,7 +99,8 @@ def _hash_rank(c,z,seed):
 
 
 def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
-                         cuts=100,seed=0,lam=.001,gap_abs=1e-3):
+                         cuts=100,seed=0,lam=.001,gap_abs=1e-3,
+                         saa_reference=None):
     """Global outer-bounded optimistic/deployed value-function cut method.
 
     Returns a certified deployed upper bound and a valid global master lower
@@ -146,7 +147,8 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
         best=expected_reduced(c,bestz,bank)
     else:
         best=np.inf;bestd=None;bestz=None
-    saa=saa_mip(c,bank,seconds=max(.001,limit()))
+    saa=(saa_reference if saa_reference is not None else
+         saa_mip(c,bank,seconds=max(.001,limit())))
     last_lb=max(0.,float(saa.lower or 0.))
     history=[];fixed_cache={};hash_cache=set()
     try:
