@@ -382,6 +382,27 @@ def _eval_component(task):
             continue
         d=reviewed_policy(c,rows,H,d0,coeff)
         add(name,d)
+    # Unrestricted conditional stochastic benchmark. This assignment is
+    # feasible but NOT deployable advice; never run it through the hash planner.
+    # Bank A chooses it; B/C and realized durations evaluate it independently.
+    saa=saa_mip(c,banks['A'],seconds=pw_seconds)
+    reference=dict(status=saa.status,certified=bool(saa.complete),
+                   lower=saa.lower,upper=saa.upper,seconds=saa.seconds,
+                   assignment=None if saa.assignment is None else list(saa.assignment))
+    if saa.assignment is not None:
+        z=tuple(map(int,saa.assignment))
+        reference.update(
+            model={name:expected_reduced(c,z,draws) for name,draws in banks.items()},
+            realized=float(evaluate(c,z,c.actual)['cost']))
+        if saa.lower is not None and saa.lower>reference['model']['A']+1e-4:
+            raise AssertionError('Unrestricted SAA lower bound exceeds its primal')
+    # Independently trained case-advice methods may be weaker than the
+    # unrestricted SAA, but they can never beat its certified global lower.
+    for name,record in cases.items():
+        if record.get('status')=='COMPLETE' and saa.lower is not None:
+            if record['model']['A']<saa.lower-1e-4:
+                raise AssertionError(f'{name} beats the unrestricted SAA dual bound')
+
     # One separate exact-QP (fixed CASE assignment), one global VF per instance,
     # one unrestricted SAA bound, one all-dimensional direct advice B&B.
     if cases['CASE']['status']=='COMPLETE':
@@ -395,17 +416,18 @@ def _eval_component(task):
         add('VF_PW',vf.reviewed,dict(vf_cert=vf.to_json()))
     else:cases['VF_PW']=dict(status='UNRESOLVED',vf_cert=vf.to_json())
     pw=exact_box_policy(c,banks['A'],d0,seconds=pw_seconds,
-                        solve_seconds=seconds,nodes=pw_nodes)
+                        solve_seconds=seconds,nodes=pw_nodes,saa_reference=saa)
     if pw['reviewed'] is not None:
         add('PW_BOUNDED',pw['reviewed'],dict(global_certificate=pw))
     else:cases['PW_BOUNDED']=dict(status='UNRESOLVED',global_certificate=pw)
     anchor=exact_box_policy(c,banks['A'],d0,seconds=pw_seconds,
-                        solve_seconds=seconds,nodes=pw_nodes,restricted='case+saa')
+                        solve_seconds=seconds,nodes=pw_nodes,restricted='case+saa',
+                        saa_reference=saa)
     if anchor['reviewed'] is not None:
         add('PW_ANCHORED',anchor['reviewed'],dict(global_certificate=anchor))
     else:cases['PW_ANCHORED']=dict(status='UNRESOLVED',global_certificate=anchor)
     vfcg=value_function_exact(c,banks['A'],d0,seconds=pw_seconds,
-                              separation_seconds=seconds,seed=0)
+                              separation_seconds=seconds,seed=0,saa_reference=saa)
     if vfcg['reviewed'] is not None:
         add('PW_VFCG',vfcg['reviewed'],dict(global_certificate=vfcg,
              optimization_hash_seed=0))
@@ -421,7 +443,8 @@ def _eval_component(task):
     # The exact PW algorithm never substitutes an unrestricted SAA assignment
     # as an inducible schedule. This gap is unconditional for the given bank.
     return ck,dict(site=c.group,monday=c.monday,cases=c.n,
-                    methods=cases,hindsight=hindsight_record,elapsed=time.monotonic()-start)
+                    methods=cases,hindsight=hindsight_record,saa_reference=reference,
+                    elapsed=time.monotonic()-start)
 
 
 def evaluate_all(args,ctx,models):
@@ -470,6 +493,52 @@ def evaluate_all(args,ctx,models):
                 arm['realized_regret_per_case']=arm['mean_realized_cost_per_case']-output['hindsight_cost_per_case']
     else:
         output['hindsight_unresolved']=sum(not r.get('hindsight',{}).get('complete') for r in rows)
+    # SAA is a NONDEPLOYABLE oracle, not another advice method. Distinguish
+    # primal and dual bounds; incomplete SAA solves remain explicit.
+    references=[r.get('saa_reference',{}) for r in rows]
+    saa=dict(certified_components=sum(bool(x.get('certified')) for x in references),
+             primal_components=sum(x.get('upper') is not None for x in references),
+             dual_components=sum(x.get('lower') is not None for x in references),
+             total_components=len(rows),
+             hours=sum(float(x.get('seconds',0)) for x in references)/3600.,
+             interpretation='Unrestricted stochastic schedule; NOT implementable through advice')
+    n_cases=sum(r['cases'] for r in rows)
+    if all(x.get('lower') is not None for x in references):
+        saa['model_A_lower_per_case']=sum(float(x['lower']) for x in references)/n_cases
+    if all(x.get('upper') is not None for x in references):
+        saa['model_A_upper_per_case']=sum(float(x['upper']) for x in references)/n_cases
+    if all(x.get('assignment') is not None for x in references):
+        saa['realized_cost_per_case']=sum(float(x['realized']) for x in references)/n_cases
+        saa['model_A_feasible_per_case']=sum(float(x['model']['A']) for x in references)/n_cases
+        saa['model_C_feasible_per_case']=sum(float(x['model']['C']) for x in references)/n_cases
+    output['saa_reference']=saa
+    # All comparisons below use the same Bank-A reduced scheduling score.
+    # A feasible per-week policy is an upper bound on the best inducible
+    # objective, not its global optimum. The universal SAA dual bound gives
+    # a conservative upper bound on the unregularized inducibility gap.
+    output['inducibility_bounds']={}
+    if 'model_A_lower_per_case' in saa:
+        L=saa['model_A_lower_per_case']
+        for name in ('PER_WEEK_ROBUST','PW_BOUNDED','PW_ANCHORED','PW_VFCG'):
+            records=[r['methods'].get(name,{}) for r in rows]
+            if len(records)!=len(rows) or any(
+                    rec.get('status')!='COMPLETE' for rec in records):
+                continue
+            U=sum(float(rec['model']['A']) for rec in records)/n_cases
+            if U<L-1e-4:
+                raise AssertionError(f'{name} below unconditional SAA lower bound')
+            output['inducibility_bounds'][name]=dict(
+                scenario_A_deployed_cost_per_case=U,
+                inducibility_gap_lower=0.,
+                inducibility_gap_upper=max(0.,U-L),
+                statement='Valid conservative interval [0, U_policy - LB_SAA]; '
+                          'NOT a point estimate of the optimal inducibility gap. '
+                          'Seed-specific optimization certificate not interchangeable '
+                          'with the three-seed deployment objective.')
+    if 'model_A_upper_per_case' in saa and 'model_A_lower_per_case' in saa:
+        output['saa_reference']['scenario_A_optimality_gap_per_case']=(
+            saa['model_A_upper_per_case']-saa['model_A_lower_per_case'])
+
     # Full-cohort scalability/structural diagnostics, without selective case
     # deletion. Any incomplete arm has no headline cost estimate.
     def size_bucket(n):
