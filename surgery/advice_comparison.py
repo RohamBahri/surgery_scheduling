@@ -352,9 +352,12 @@ def shared_job(item):
 def evaluated_job(item):
     ck, c, rows = item
     s = _STATE
-    return component_job((ck, c, rows, s["data"], s["H"], s["pools"],
-                          s["theta"], s["beta"], s["seeds"],
-                          s["seconds"], s["budget"]))
+    try:
+        return component_job((ck, c, rows, s["data"], s["H"], s["pools"],
+                              s["theta"], s["beta"], s["seeds"],
+                              s["seconds"], s["budget"]))
+    except RuntimeError as exc:
+        raise RuntimeError(f"Evaluation component {ck}: {exc}") from exc
 
 
 def sensitivity_job(item):
