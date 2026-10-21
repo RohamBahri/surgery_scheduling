@@ -507,6 +507,7 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
         target_set=tuple(common for _ in seeds)
     best=np.inf;bestd=None;bestz=None
     num=0;uid=0;queue=[(global_lb,uid,lo,hi)]
+    retired_lb=float('inf')
     def penalty_min(a,b):
         return lam/2*float(np.square(np.clip(base,a,b)-base).sum())
     def examine(d):
@@ -527,7 +528,9 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
     examine(base)
     while queue and num<nodes and time.monotonic()-clock<seconds:
         lb,_,a,b=heapq.heappop(queue)
-        if lb>=best-1e-7:continue
+        if lb>=best-1e-7:
+            retired_lb=min(retired_lb,lb)
+            continue
         num+=1
         mid=(a+b)/2
         outcome=examine(mid)
@@ -537,12 +540,14 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
             break
         stable=sharp_margin_bound(c,bank,mid,a,b,seconds=solve_seconds,seeds=seeds)
         if stable is not None:
-            if target_set is not None and any(stable not in group for group in target_set):continue
+            if target_set is not None and any(stable not in group for group in target_set):
+                continue  # Certified infeasible for the restricted policy class.
             # Every point in this box deploys exactly the stable assignment.
             d_star=np.clip(base,a,b)
             exact=expected_reduced(c,stable,bank)+lam/2*np.square(d_star-base).sum()
             if exact<best:
                 best,bestd,bestz=exact,d_star,[stable]*len(seeds)
+            retired_lb=min(retired_lb,exact)
             continue
         widths=b-a
         if widths.max()<1e-6:
@@ -557,11 +562,16 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
             clb=global_lb+penalty_min(na,nb)
             if clb<best-1e-7:
                 uid+=1;heapq.heappush(queue,(clb,uid,na,nb))
-    final_lb=min([x[0] for x in queue]+([best] if isfinite(best) else [global_lb]))
-    status=('OPTIMAL_CERTIFIED' if isfinite(best) and not queue
+            else:
+                retired_lb=min(retired_lb,clb)
+    final_lb=min([x[0] for x in queue]+[retired_lb,best])
+    gap=best-final_lb if isfinite(best) else float('inf')
+    status=('OPTIMAL_CERTIFIED' if isfinite(best) and gap<=1e-9
+            else 'GAP_CERTIFIED' if isfinite(best) and gap<=1e-7
             else 'TIME_OR_NODE_LIMIT')
     return dict(lower=float(final_lb),upper=None if not isfinite(best) else float(best),
-                complete=status=='OPTIMAL_CERTIFIED',status=status,nodes=num,
+                complete=status in ('OPTIMAL_CERTIFIED','GAP_CERTIFIED'),status=status,nodes=num,
+                tolerance_fathomed_lower=None if not isfinite(retired_lb) else float(retired_lb),
                 seconds=time.monotonic()-clock,
                 reviewed=None if bestd is None else bestd.tolist(),
                 assignments=None if bestz is None else [list(z) for z in bestz],
