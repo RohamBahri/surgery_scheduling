@@ -147,6 +147,7 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
     plans = baseline
     best = objective(c, d, d0, plans, banks["A"], seeds)
     library = set(baseline.values())
+    cache = {tuple(np.round(d0, 6)): baseline}
     lo, hi = reachable(c.booked, ALPHA, H)
 
     def consider(candidate):
@@ -156,10 +157,13 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
         available = min(seconds, deadline-time.monotonic())
         if available < .1:
             return False
-        try:
-            found = {r: certified(c, candidate, r, available) for r in seeds}
-        except RuntimeError:
-            return False
+        fingerprint = tuple(np.round(candidate, 6))
+        if fingerprint not in cache:
+            try:
+                cache[fingerprint] = {r: certified(c, candidate, r, available) for r in seeds}
+            except RuntimeError:
+                return False
+        found = cache[fingerprint]
         library.update(found.values())
         value = objective(c, candidate, d0, found, banks["A"], seeds)
         if value < best - 1e-8:
@@ -295,11 +299,15 @@ def shared_job(item):
     d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
     draws = {name: scenarios(c, d0, pools, 20261020+j)
              for j, name in enumerate(("A", "B"))}
-    out = []
+    out, cache = [], {}
     for coeff in state["candidates"]:
         d = reviewed(c.booked, d0-c.booked + H[rows] @ coeff)
+        fingerprint = tuple(np.round(d, 6))
         try:
-            z = [certified(c, d, r, state["seconds"]) for r in state["seeds"]]
+            if fingerprint not in cache:
+                cache[fingerprint] = [certified(c, d, r, state["seconds"])
+                                       for r in state["seeds"]]
+            z = cache[fingerprint]
         except RuntimeError:
             # An uncertified proposed policy cannot be ranked as an improvement.
             out.append(None)
