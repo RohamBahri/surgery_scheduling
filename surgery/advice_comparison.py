@@ -35,7 +35,7 @@ def certified(c, d, seed, seconds):
     answer = solve_week(c, d, seconds=max(.01, seconds), threads=threads,
                         tie=True, hash_seed=int(seed))
     if not answer.complete or answer.assignment is None:
-        raise RuntimeError("Uncertified " + str(answer.status))
+        raise RuntimeError(f"Uncertified {c.group}/{c.monday} seed={seed}: {answer.status}")
     return tuple(map(int, answer.assignment))
 
 
@@ -115,25 +115,31 @@ def transition(c, d, current, target):
     if np.dot(g, g) > 0:
         step = max(0., jt - jc + 2*_objective_tolerance(jc)) * g / np.dot(g, g)
         return np.clip(d + step, lo, hi)
-    # Locally flat: move to a 480-minute regime boundary, then reconsider.
+    # Cross the strict overtime threshold rather than land exactly on it.
+    # Non-improving proposals may act as intermediate probes.
     for z, load in ((current, load_current), (target, load_target)):
-        for room in np.argsort(abs(load-480.)):
+        for room in np.argsort(abs(load - 480.)):
             ids = np.flatnonzero(np.asarray(z) == room)
             if not len(ids):
                 continue
-            step = (480. - load[room]) / len(ids)
-            shifted = np.clip(d[ids] + step, lo[ids], hi[ids])
-            if np.linalg.norm(shifted - d[ids]) > 1e-8:
-                proposal = d.copy()
-                proposal[ids] = shifted
+            destination = 481. if load[room] <= 480. else 479.
+            shifted = np.clip(d[ids] + (destination - load[room]) / len(ids),
+                              lo[ids], hi[ids])
+            proposal = d.copy()
+            proposal[ids] = shifted
+            if np.linalg.norm(proposal - d) > 1e-8:
                 return proposal
     return d
 
 
-def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=3):
-    """Nine-point coordinate and schedule-transition search, bank-B confirmation."""
+def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=3,
+                 reference=False):
+    """Coordinate search up to 20 cases; transition probes above 20 cases.
+
+    reference=True reproduces the original coordinate-only restricted arm.
+    """
     deadline = time.monotonic() + budget
-    baseline, bc = score(c, d0, banks, seeds, seconds)
+    baseline, bc = score(c, d0, banks, seeds, max(seconds, 600.))
     if all(len(c.allowed[int(s)]) == 1 for s in c.surgeon):
         return d0, baseline, False, "FIXED", bc
     d = d0.copy()
@@ -195,17 +201,25 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
         if aspiration is not None:
             library.add(aspiration)
 
-    # Aim at good schedules, not only single-coordinate duration changes.
-    for target in sorted(library, key=lambda z: cost(c, z, banks["A"]))[:8]:
-        for _ in range(3):
-            if time.monotonic() >= deadline:
-                break
-            current = plans[seeds[0]]
-            trial = transition(c, d, current, target)
-            if np.allclose(trial, d):
-                break
-            if not consider(trial):
-                break
+    # Up to three certified boundary probes in a chain. Only a bank-A
+    # improvement commits a proposal; non-improving probes remain temporary.
+    if c.n > 20 and not reference:
+        for target in sorted(library, key=lambda z: cost(c, z, banks["A"]))[:8]:
+            probe, probe_plans = d.copy(), plans
+            for _ in range(3):
+                if time.monotonic() >= deadline:
+                    break
+                trial = transition(c, probe, probe_plans[seeds[0]], target)
+                if np.allclose(trial, probe):
+                    break
+                accepted = consider(trial)
+                if accepted:
+                    probe, probe_plans = d.copy(), plans
+                else:
+                    found = cache.get(tuple(np.round(trial, 6)))
+                    if found is None:
+                        break
+                    probe, probe_plans = trial, found
 
     candidate_b = objective(c, d, d0, plans, banks["B"], seeds)
     baseline_b = objective(c, d0, d0, baseline, banks["B"], seeds)
@@ -219,12 +233,12 @@ def component_job(job):
     ck, c, rows, data, H, pools, theta, beta, seeds, seconds, budget = job
     booked = c.booked
     d0 = reviewed(booked, data["X"][rows] @ data["case_w"])
-    banks = {a: scenarios(c, d0, pools, 20261020 + j, 50)
+    banks = {a: scenarios(c, d0, pools, 20261020 + j, 200 if a == "C" else 50)
              for j, a in enumerate(("A", "B", "C"))}
-    base = {r: certified(c, d0, r, seconds) for r in seeds}
+    base = {r: certified(c, d0, r, max(seconds, 600.)) for r in seeds}
     outputs = {"CASE": (d0, base)}
     statuses = {"CASE": "REFERENCE"}
-    booked_z = {r: certified(c, booked, r, seconds) for r in seeds}
+    booked_z = {r: certified(c, booked, r, max(seconds, 600.)) for r in seeds}
     outputs["BOOKED"] = (booked, booked_z)
     statuses["BOOKED"] = "REFERENCE"
     risk = reviewed(booked, np.quantile(banks["A"], 1.75/2.75, axis=0)-booked)
@@ -242,18 +256,23 @@ def component_job(job):
         except RuntimeError:
             outputs[name] = (d0, base)
             statuses[name] = "UNCERTIFIED_FALLBACK"
-    for name, fitted_seeds in (("PER_WEEK", (0,)), ("PER_WEEK_ROBUST", seeds)):
+    for name, fitted_seeds in (("PER_WEEK_REF", (0,)),
+                               ("PER_WEEK", (0,)), ("PER_WEEK_ROBUST", seeds)):
+        if name == "PER_WEEK_REF" and c.n > 20:
+            outputs[name] = (d0, base)
+            statuses[name] = "CASE_ABOVE_20"
+            continue
         try:
             d, z, accepted, status, _ = prescription(
                 c, d0, banks, seeds=fitted_seeds, seconds=seconds,
-                budget=budget if c.n <= 20 else 2*budget)
-            outputs[name] = (d, {r: (z[r] if r in z else certified(c, d, r, seconds))
+                budget=budget if c.n <= 20 else 2*budget,
+                reference=(name == "PER_WEEK_REF"))
+            outputs[name] = (d, {r: (z[r] if r in z else certified(c, d, r, max(seconds, 600.)))
                                  for r in seeds})
             statuses[name] = status
-        except RuntimeError:
+        except RuntimeError as exc:
             outputs[name] = (d0, base)
-            accepted, status = False, "UNCERTIFIED_FALLBACK"
-            statuses[name] = status
+            statuses[name] = "UNCERTIFIED_FALLBACK: " + str(exc)
     report = {}
     for name, (d, z) in outputs.items():
         metrics = {str(r): evaluate(c, z[r], c.actual) for r in seeds}
@@ -290,7 +309,10 @@ def baseline_job(item):
     state = _STATE
     data, names = state["data"], state["names"]
     d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
-    z = {r: certified(c, d0, r, state["seconds"]) for r in (0, 1, 2)}
+    try:
+        z = {r: certified(c, d0, r, max(state["seconds"], 600.)) for r in (0, 1, 2)}
+    except RuntimeError as exc:
+        raise RuntimeError(f"CASE feature solve failed for {ck}: {exc}") from exc
     return ck, rows, case_features(c, z, d0, data["X"][rows], names)
 
 
@@ -308,7 +330,8 @@ def shared_job(item):
         fingerprint = tuple(np.round(d, 6))
         try:
             if fingerprint not in cache:
-                cache[fingerprint] = [certified(c, d, r, state["seconds"])
+                cap = max(state["seconds"], 600.) if len(out) == 0 else state["seconds"]
+                cache[fingerprint] = [certified(c, d, r, cap)
                                        for r in state["seeds"]]
             z = cache[fingerprint]
         except RuntimeError:
