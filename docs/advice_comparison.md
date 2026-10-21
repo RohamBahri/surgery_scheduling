@@ -42,7 +42,7 @@ The scenario model draws **50** out-of-fold log-duration residuals per bank from
 
 **Performance**: All policies are evaluated on the identical held-out cases and on each of hash seeds 0–2. `summary.json` contains paired cost-per-case differences vs CASE and calendar-Monday bootstrap intervals. `components/*.json` records assignments, displays, acceptance/fallback status, model-bank costs and retrospective cost. `pooled.json` combines both development folds. An uncertified CASE baseline aborts the experiment; an uncertified optional recommendation falls back to CASE and records its status. No uncertified plan is treated as an optimal schedule.
 
-**CPU**: exactly `--cores` spawned worker processes (maximum 15), one Gurobi thread per process; numerical/BLAS pools in workers are capped to one thread. Sequential CASE/OOF fitting permits up to the supplied 15 BLAS threads. Do not run another multi-core Gurobi job concurrently; multiple active solves also require a suitable Gurobi license. Output files and frozen-settings checks support restarting after an interruption.
+**CPU**: up to `--cores` spawned worker processes (maximum 15); concurrent Gurobi solves receive one thread each for large batches, while small batches distribute spare threads to their sequential solves. BLAS pools in workers are capped to one thread. Sequential CASE/OOF fitting permits up to the supplied 15 BLAS threads. Do not run another multi-core Gurobi job concurrently; multiple active solves also require a suitable Gurobi license. Output files and frozen-settings checks support restarting after an interruption.
 
 ## Interpretation
 
