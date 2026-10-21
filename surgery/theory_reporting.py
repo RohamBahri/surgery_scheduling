@@ -30,6 +30,46 @@ def summarize(rows, draws=20000, seed=20261021):
         for value in out["arms"].values():
             if value["mean_realized_cost_per_case"] is not None:
                 value["regret_per_case"]=value["mean_realized_cost_per_case"]-oracle
+    # The stochastic reference is a nondeployable comparison, NOT an advice
+    # policy. Keep solver primal/dual bounds separately and withhold point
+    # claims when even one reference schedule lacks certification.
+    reference=[r.get("saa_reference") for r in rows]
+    if any(x is not None for x in reference):
+        if not all(x is not None for x in reference):
+            raise AssertionError("Inconsistent SAA-reference coverage")
+        result=dict(total_components=len(rows),
+             certified_components=sum(bool(x.get("certified")) for x in reference),
+             feasible_components=sum(x.get("upper") is not None for x in reference),
+             bounded_components=sum(x.get("lower") is not None for x in reference),
+             solver_hours=sum(float(x.get("seconds",0)) for x in reference)/3600.,
+             nondeployable=True)
+        if all(x.get("lower") is not None for x in reference):
+            result["model_A_lower_per_case"]=sum(x["lower"] for x in reference)/n
+        if all(x.get("upper") is not None for x in reference):
+            result["model_A_upper_per_case"]=sum(x["upper"] for x in reference)/n
+        if all(x.get("assignment") is not None for x in reference):
+            result["realized_per_case"]=sum(x["realized"] for x in reference)/n
+            for label in ("A","C"):
+                result["model_"+label+"_feasible_per_case"]=(
+                    sum(x["model"][label] for x in reference)/n)
+        if "model_A_lower_per_case" in result and "model_A_upper_per_case" in result:
+            result["scenario_A_solver_gap_per_case"]=(
+                result["model_A_upper_per_case"]-result["model_A_lower_per_case"])
+        out["saa_reference"]=result
+        out["inducibility_bounds"]={}
+        if "model_A_lower_per_case" in result:
+            lower=result["model_A_lower_per_case"]
+            for arm in ("PER_WEEK_ROBUST","PW_BOUNDED","PW_ANCHORED","PW_VFCG"):
+                if out["arms"].get(arm,{}).get("unresolved",1):continue
+                feasible=sum(r["methods"][arm]["model"]["A"] for r in rows)/n
+                if feasible < lower-1e-4:
+                    raise AssertionError("Deployed scenario cost below SAA bound")
+                out["inducibility_bounds"][arm]=dict(
+                    deployed_scenario_A_cost_per_case=feasible,
+                    gap_lower=0.,gap_upper=max(0.,feasible-lower),
+                    statement="Conservative bound on unrestricted advice inducibility "
+                       "under three hash rules, not a point estimate or a "
+                       "certificate of this method's outer global optimum.")
     size=lambda k: "1" if k==1 else "2-5" if k<=5 else "6-10" if k<=10 else "11-20" if k<=20 else "21-34" if k<=34 else "35+"
     for label,partition in (("by_site",lambda r:r["site"]),("by_size",lambda r:size(r["cases"]))):
         for name in sorted({partition(r) for r in rows}):
