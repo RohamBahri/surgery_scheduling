@@ -156,44 +156,62 @@ def test_features(items, data, names, mean, scale, seconds, cores):
 
 
 def fit_shared(folder, items, data, H, pools, beta, seconds, cores, rounds, seeds):
-    path = folder / "shared.json"
+    """Small shared-policy search: cheap component prescreen, then exact full cohort."""
+    path = folder/"shared.json"
     if path.exists():
         return np.asarray(json.loads(path.read_text())["theta"], float)
-    theta = np.zeros(H.shape[1])
-    history = []
+
+    rng = np.random.default_rng(20261020)
+    sample = rng.choice(len(items), size=min(150, len(items)), replace=False)
+    screen = [items[int(i)] for i in sample]
+    theta, history = np.zeros(H.shape[1]), []
     for round_id in range(rounds):
-        step = 8. / (2**round_id)
-        candidates = [beta+theta]
-        for j in range(H.shape[1]):
-            for sign in (-1., 1.):
-                v = theta.copy()
-                v[j] += sign*step
-                candidates.append(beta+v)
-        state = dict(data=data, H=H, pools=pools, candidates=candidates,
-                     seeds=seeds, seconds=seconds)
-        scores = np.zeros((len(candidates), 2))
-        missing = np.zeros(len(candidates), int)
-        weekly = {j: {} for j in range(len(candidates))}
-        for ck, monday, n, values in parallel(shared_job, items, state, cores):
-            for j, v in enumerate(values):
-                if v is None:
-                    missing[j] += 1
-                    continue
-                scores[j] += v
-                weekly[j][monday] = weekly[j].get(monday, 0.) + (v[1]-values[0][1] if values[0] is not None else 0.)
-        valid = [j for j in range(len(candidates)) if missing[j] == 0]
-        if 0 not in valid:
-            raise RuntimeError("Cannot certify shared-policy reference on every fitting component")
-        best = min(valid, key=lambda j: scores[j, 0])
+        step = 8./2**round_id
+        basis = np.eye(H.shape[1])
+        dirs = list(basis)
+        for j in range(len(basis)):
+            for k in range(j+1, len(basis)):
+                dirs.extend(((basis[j]+basis[k])/np.sqrt(2),
+                             (basis[j]-basis[k])/np.sqrt(2)))
+        proposals = [beta+theta] + [beta+theta+sign*step*v
+                                    for v in dirs for sign in (-1., 1.)]
+
+        def assess(candidates, subset):
+            state = dict(data=data, H=H, pools=pools, candidates=candidates,
+                         seeds=seeds, seconds=seconds)
+            scores = np.zeros((len(candidates), 2))
+            failed = np.zeros(len(candidates), int)
+            week_B = {j: {} for j in range(len(candidates))}
+            for _, monday, _, values in parallel(shared_job, subset, state, cores):
+                if values[0] is None:
+                    raise RuntimeError("Uncertified shared-policy reference")
+                for j, value in enumerate(values):
+                    if value is None:
+                        failed[j] += 1
+                        continue
+                    scores[j] += value
+                    week_B[j][monday] = (week_B[j].get(monday, 0.)
+                                          + value[1] - values[0][1])
+            return scores, failed, week_B
+
+        preview, failed, _ = assess(proposals, screen)
+        possible = [j for j in range(1, len(proposals)) if not failed[j]]
+        shortlist = [0] + sorted(possible, key=lambda j: preview[j, 0])[:5]
+        candidates = [proposals[j] for j in shortlist]
+        scores, incomplete, weekly = assess(candidates, items)
+        eligible = [j for j in range(len(candidates)) if incomplete[j] == 0]
+        best = min(eligible, key=lambda j: scores[j, 0])
         gain = scores[0, 1]-scores[best, 1]
-        sums = np.array(list(weekly[best].values()), float)
-        se = (sums.std(ddof=1)*np.sqrt(len(sums)) if len(sums)>1 else np.inf)
-        accepted = best != 0 and gain > 1.645*se
-        history.append(dict(round=round_id, best_index=best,
+        differences = np.asarray(list(weekly[best].values()))
+        se = (differences.std(ddof=1)*np.sqrt(len(differences))
+              if len(differences) > 1 else np.inf)
+        accepted = bool(best and gain > 1.645*se)
+        history.append(dict(round=round_id, proposals=len(proposals),
+                            shortlisted=len(shortlist), chosen=shortlist[best],
                             bank_A_gain=float(scores[0, 0]-scores[best, 0]),
                             bank_B_gain=float(gain), bank_B_se=float(se),
-                            accepted=bool(accepted), failed_components=missing.tolist()))
-        print(f"Shared round {round_id+1}/{rounds}: {history[-1]}", flush=True)
+                            accepted=accepted, failed_components=incomplete.tolist()))
+        print("Shared search:", history[-1], flush=True)
         if not accepted:
             break
         theta = candidates[best]-beta
