@@ -4,6 +4,7 @@ No realized evaluation durations are consulted during recommendation. All schedu
 used in scoring are certified by the unchanged hash-tie planner.
 """
 import hashlib
+import os
 import time
 import numpy as np
 
@@ -30,7 +31,8 @@ def display(booked, d):
 
 
 def certified(c, d, seed, seconds):
-    answer = solve_week(c, d, seconds=max(.01, seconds), threads=1,
+    threads = int(os.environ.get("SURGERY_SOLVER_THREADS", "1"))
+    answer = solve_week(c, d, seconds=max(.01, seconds), threads=threads,
                         tie=True, hash_seed=int(seed))
     if not answer.complete or answer.assignment is None:
         raise RuntimeError("Uncertified " + str(answer.status))
@@ -278,6 +280,7 @@ _STATE = {}
 def init_worker(state):
     global _STATE
     _STATE = state
+    os.environ["SURGERY_SOLVER_THREADS"] = str(state.get("threads", 1))
     from threadpoolctl import threadpool_limits
     _STATE["_thread_limit"] = threadpool_limits(1)
 
