@@ -4,6 +4,10 @@ This is an **additive package for `RohamBahri/surgery_scheduling`, branch `behav
 
 It implements the complete underlying **mathematical objectives**, rather than replacing difficult components with an easier toy model. Every fit and evaluation case is assigned to exactly one verified eligibility component; the runner asserts complete coverage. A time limit does **not** imply a globally solved method. All solver statuses and valid primal/dual bounds are retained, including incomplete solves.
 
+## Quick start (no manual copying)
+
+On this branch, run `bash run_theory_full.sh` from the repository root. It runs the licensed solver tests and then the complete pre-2013 two-fold development experiment. Override defaults with environment variables, for example `CORES=8 WORKBOOK=/path/to/UHNOperating_RoomScheduling2011-2013.xlsx bash run_theory_full.sh`. The 2013 holdout is not included.
+
 ## Methods
 
 | Output arm | Training/decision problem | Optimization status |
