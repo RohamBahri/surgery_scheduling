@@ -236,3 +236,34 @@ def test_sensitivity_rescores_only_displayed_recommendations(monkeypatch, tmp_pa
     assert outcomes["cutoff_week_start"]["eligible_at_cutoff"] == 1
     assert outcomes["cutoff_week_start"]["arms"]["PER_WEEK"]["realized"]
     assert outcomes["alpha_0.5_h_15"]["arms"]["PER_WEEK"]["realized"]
+
+
+
+def test_exact_feature_checkpoint_resumes_after_interruption(tmp_path, monkeypatch):
+    import pilot.run_advice_comparison as runner
+    items = [("a", None, np.array([0])), ("b", None, np.array([1]))]
+    data = dict(booked=np.array([100., 100.]))
+    checkpoint = tmp_path/"features_progress.npz"
+    attempts = []
+
+    def fake_parallel(fn, pending, state, cores):
+        attempts.append([x[0] for x in pending])
+        for item in pending:
+            if item[0] == "b" and len(attempts) == 1:
+                raise RuntimeError("simulated interruption")
+            yield item[0], item[2], np.full((len(item[2]), 5), 1. if item[0] == "a" else 2.)
+
+    monkeypatch.setattr(runner, "parallel", fake_parallel)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        runner.collect_features(items, data, [], 1., 2, checkpoint)
+    assert checkpoint.exists()
+    result = runner.collect_features(items, data, [], 1., 2, checkpoint)
+    assert attempts == [["a", "b"], ["b"]]
+    assert np.array_equal(result[:, 0], [1., 2.])
+    assert not checkpoint.exists()
+
+
+def test_h60_has_no_effect_on_existing_30_minute_displays():
+    from surgery.planner import response
+    u = np.linspace(-30., 30., 101)
+    assert np.allclose(response(u, .8, 30.), response(u, .8, 60.))
