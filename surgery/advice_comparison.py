@@ -188,6 +188,12 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
                 trial[i] = v
                 consider(trial)
 
+    if c.n > 20 and deadline-time.monotonic() > 1:
+        from surgery.asdbs import saa
+        aspiration = saa(c, banks["A"], min(seconds, deadline-time.monotonic()))
+        if aspiration is not None:
+            library.add(aspiration)
+
     # Aim at good schedules, not only single-coordinate duration changes.
     for target in sorted(library, key=lambda z: cost(c, z, banks["A"]))[:8]:
         for _ in range(3):
@@ -216,6 +222,17 @@ def component_job(job):
              for j, a in enumerate(("A", "B", "C"))}
     base = {r: certified(c, d0, r, seconds) for r in seeds}
     outputs = {"CASE": (d0, base)}
+    statuses = {"CASE": "REFERENCE"}
+    booked_z = {r: certified(c, booked, r, seconds) for r in seeds}
+    outputs["BOOKED"] = (booked, booked_z)
+    statuses["BOOKED"] = "REFERENCE"
+    risk = reviewed(booked, np.quantile(banks["A"], 1.75/2.75, axis=0)-booked)
+    try:
+        outputs["RISK"] = (risk, {r: certified(c, risk, r, seconds) for r in seeds})
+        statuses["RISK"] = "CERTIFIED"
+    except RuntimeError:
+        outputs["RISK"] = (d0, base)
+        statuses["RISK"] = "UNCERTIFIED_FALLBACK"
     for name, coeff in (("STAT", beta), ("SHARED", beta+theta)):
         d = reviewed(booked, d0 - booked + H[rows] @ coeff)
         try:
@@ -231,6 +248,7 @@ def component_job(job):
         except RuntimeError:
             outputs[name] = (d0, base)
             accepted, status = False, "UNCERTIFIED_FALLBACK"
+            statuses[name] = status
     report = {}
     for name, (d, z) in outputs.items():
         report[name] = dict(
