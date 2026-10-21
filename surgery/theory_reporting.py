@@ -39,7 +39,7 @@ def summarize(rows, draws=20000, seed=20261021):
             for arm in arms:
                 subset=[r for r in group if r["methods"].get(arm,{}).get("status")=="COMPLETE"]
                 avg=(sum(np.mean(list(r["methods"][arm]["realized"].values()))
-                    for r in subset)/den if len(subset)==len(group) else None)
+                    for r in subset)/denom if len(subset)==len(group) else None)
                 detail["arms"][arm]=dict(complete=len(subset),unresolved=len(group)-len(subset),
                         cost_per_case=None if avg is None else float(avg))
             out[label][name]=detail
