@@ -6,6 +6,7 @@ Example: python pilot/run_advice_comparison.py --workbook data/UHNOperating_Room
 import os
 for k in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ[k] = "1"
+os.environ["SURGERY_RESEARCH_LINK"] = "inverse"
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -193,7 +194,9 @@ def run_fold(args, fold, cohort):
     if len(fit["booked"]) + len(held["booked"]) != 24506:
         raise AssertionError("Expected the entire 24,506-case development cohort")
     fingerprint = dict(workbook=hashlib.sha256(args.workbook.read_bytes()).hexdigest(),
-                       model_source=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                       model_source={p: hashlib.sha256((Path(__file__).resolve().parents[1]/p).read_bytes()).hexdigest()
+                                     for p in ("pilot/run_advice_comparison.py", "surgery/advice_comparison.py",
+                                               "surgery/anchored_weekly_solver.py", "surgery/rich_features.py")},
                        fold=fold, spec=spec, cores=args.cores, seconds=args.seconds,
                        budget=args.budget, shared_rounds=args.shared_rounds)
     manifest = folder / "settings.json"
