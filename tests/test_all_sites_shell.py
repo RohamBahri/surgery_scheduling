@@ -42,6 +42,8 @@ def repo(tmp_path):
     make_executable(mocks / "caffeinate", '[[ "$1" == -i ]] || exit 3\nshift\nexec "$@"\n')
     env = dict(os.environ, PATH=str(mocks) + os.pathsep + os.environ["PATH"],
                ARGS_CAPTURE=str(tmp_path / "captured_args.txt"))
+    for name in ("OUT", "WORKERS", "PYTHON", "MOCK_BRANCH", "MOCK_IMPORT_EXIT"):
+        env.pop(name, None)  # Fixture must not inherit local runner overrides.
     return base, env
 
 
