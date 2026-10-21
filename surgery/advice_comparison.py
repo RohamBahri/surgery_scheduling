@@ -245,22 +245,30 @@ def component_job(job):
         d = reviewed(booked, d0 - booked + H[rows] @ coeff)
         try:
             outputs[name] = (d, {r: certified(c, d, r, seconds) for r in seeds})
+            statuses[name] = "CERTIFIED"
         except RuntimeError:
             outputs[name] = (d0, base)
+            statuses[name] = "UNCERTIFIED_FALLBACK"
     for name, fitted_seeds in (("PER_WEEK", (0,)), ("PER_WEEK_ROBUST", seeds)):
         try:
             d, z, accepted, status, _ = prescription(
                 c, d0, banks, seeds=fitted_seeds, seconds=seconds, budget=budget)
             outputs[name] = (d, {r: (z[r] if r in z else certified(c, d, r, seconds))
                                  for r in seeds})
+            statuses[name] = status
         except RuntimeError:
             outputs[name] = (d0, base)
             accepted, status = False, "UNCERTIFIED_FALLBACK"
             statuses[name] = status
     report = {}
     for name, (d, z) in outputs.items():
+        metrics = {str(r): evaluate(c, z[r], c.actual) for r in seeds}
         report[name] = dict(
-            realized={str(r): evaluate(c, z[r], c.actual)["cost"] for r in seeds},
+            status=statuses[name],
+            realized={r: v["cost"] for r, v in metrics.items()},
+            overtime={r: v["overtime"] for r, v in metrics.items()},
+            idle={r: v["idle"] for r, v in metrics.items()},
+            over720={r: v["room_days_over_720"] for r, v in metrics.items()},
             model={bank: np.mean([cost(c, z[r], draws) for r in seeds])
                    for bank, draws in banks.items()},
             changed=int(np.sum(abs(d-d0) > 1e-7)),
