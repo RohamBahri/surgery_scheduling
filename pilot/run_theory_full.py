@@ -158,48 +158,74 @@ def scores(c,d,d0,bank,method,seconds,seed=0):
     raise ValueError(method)
 
 
+_SCORE_STATE = None
+
+
+def _score_initializer(state):
+    global _SCORE_STATE
+    _SCORE_STATE=state
+    from threadpoolctl import threadpool_limits
+    _SCORE_STATE["_thread_limit"]=threadpool_limits(limits=1)
+
+
 def _train_component(task):
-    ck,c,rows,base,H,beta,coefficients,method,pools,seconds,round_id=task
-    d0=reviewed(c.booked,base[rows]); bank=scenarios(c,d0,pools,
-                     (20261020 if round_id>=0 else 20261021+1009*(-round_id-1)),count=50)
+    if len(task)==5:
+        ck,c,rows,coefficients,round_id=task
+        state=_SCORE_STATE
+        base,H,method,pools,seconds=(state["base"],state["H"],
+                                      state["method"],state["pools"],state["seconds"])
+    else:
+        # Allows direct unit testing without starting subprocess workers.
+        ck,c,rows,base,H,_,coefficients,method,pools,seconds,round_id=task
+    d0=reviewed(c.booked,base[rows])
+    bank=scenarios(c,d0,pools,(20261020 if round_id>=0
+                        else 20261021+1009*(-round_id-1)),count=50)
     result=[]
     for coeff in coefficients:
         d=reviewed_policy(c,rows,H,d0,np.asarray(coeff))
-        try:result.append(dict(value=scores(c,d,d0,bank,method,seconds),complete=True))
-        except RuntimeError as exc:result.append(dict(value=None,complete=False,status=str(exc)))
+        try:
+            result.append(dict(value=scores(c,d,d0,bank,method,seconds),complete=True))
+        except RuntimeError as exc:
+            result.append(dict(value=None,complete=False,status=str(exc)))
     return ck,c.n,result
 
 
-def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id,folder):
-    """Resume all certified component/candidate evaluations individually."""
+def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id,folder,*,pool=None):
+    """Persist certified component scores upon completion; verify cache identity."""
     folder.mkdir(parents=True,exist_ok=True)
     ids=[key(c) for _,c,_ in items]
     tasks=[];gathered={}
     base=data['X']@data['case_w']
     identity=hashlib.sha256(json.dumps(dict(method=method,coefficients=coefficients,
-                        bank_round=round_id),sort_keys=True).encode()).hexdigest()
+                     bank_round=round_id),sort_keys=True).encode()).hexdigest()
     for ck,c,rows in items:
         filename=folder/(ck+'.json')
         if filename.exists():
             record=json.loads(filename.read_text())
             if record.get('identity') != identity:
-                raise RuntimeError(f'Stale candidate-score checkpoint for {ck}; use a fresh artifact directory')
+                raise RuntimeError(f'Stale score cache for {ck}; use a new artifact directory')
             if len(record['results'])==len(coefficients):
                 gathered[ck]=record
                 continue
-        tasks.append((ck,c,rows,base,H,None,coefficients,method,pools,seconds,round_id))
-    # Per-worker thread counts are fixed; a Gurobi solve never uses all cores.
-    import multiprocessing
+        tasks.append((ck,c,rows,coefficients,round_id))
     if tasks:
-        with ProcessPoolExecutor(max_workers=min(cores,len(tasks)),
-                                 mp_context=get_context('spawn')) as exe:
-            futures=[exe.submit(_train_component,t) for t in tasks]
+        def collect(executor):
+            futures=[executor.submit(_train_component,task) for task in tasks]
             for future in as_completed(futures):
                 ck,n,res=future.result()
                 record=dict(cases=n,results=res,identity=identity)
                 atomic_json(folder/(ck+'.json'),record)
                 gathered[ck]=record
-    assert len(gathered)==len(items)
+        if pool is not None:
+            collect(pool)
+        else:
+            state=dict(base=base,H=H,method=method,pools=pools,seconds=seconds)
+            with ProcessPoolExecutor(max_workers=min(cores,len(tasks)),
+                   mp_context=get_context('spawn'),initializer=_score_initializer,
+                   initargs=(state,)) as executor:
+                collect(executor)
+    if len(gathered)!=len(items):
+        raise RuntimeError("Incomplete component-level training scores")
     valid=np.ones(len(coefficients),bool)
     score=np.zeros(len(coefficients))
     for ck in ids:
@@ -231,48 +257,53 @@ def train_search(args,ctx,method):
     rg=np.random.default_rng(20261020)
     sampled=rg.choice(len(candidates),size=min(150,len(candidates)),replace=False)
     shortlist_items=[candidates[int(j)] for j in sampled]
-    for round_id in range(args.rounds):
-        step=8./2**round_id
-        proposed=[beta+theta]
-        for v in directions:
-            for sign in (-1.,1.):
-                proposed.append(beta+theta+sign*step*np.asarray(v))
-        fititems=[(ck,c,rows) for ck,c,rows in shortlist_items]
-        preview,valid=parallel_score(fititems,fit,H,[p.tolist() for p in proposed],
-                             method,ctx['pools'],args.seconds,args.cores,round_id,
-                             root/f'round_{round_id:02d}'/'screen')
-        order=sorted((i for i in range(1,len(proposed)) if valid[i]),key=lambda i:preview[i])[:5]
-        indices=[0]+order
-        allscore,valid=parallel_score(items,fit,H,[proposed[i].tolist() for i in indices],
-                           method,ctx['pools'],args.seconds,args.cores,round_id,
-                           root/f'round_{round_id:02d}'/'all')
-        if not valid[0]:
-            raise RuntimeError('Incumbent score uncertified on full Bank A; increase --seconds')
-        alternatives=[j for j in range(1,len(indices)) if valid[j]
-                      and allscore[j]<allscore[0]-1e-8]
-        winner=min(alternatives,key=lambda j:allscore[j],default=None)
-        accepted=False; confirmation=None
-        if winner is not None:
-            # Fresh independent Bank B for each round, never used in proposing
-            # this candidate. This is a safeguard, not a sequential p-value.
-            c0=proposed[0].tolist();c1=proposed[indices[winner]].tolist()
-            bscore,bvalid=parallel_score(items,fit,H,[c0,c1],method,ctx['pools'],
-                         args.seconds,args.cores,-round_id-1,
-                         root/f'round_{round_id:02d}'/'confirm_B')
-            confirmation=dict(incumbent=float(bscore[0]) if bvalid[0] else None,
-                              candidate=float(bscore[1]) if bvalid[1] else None,
-                              completed=bool(bvalid.all()))
-            if not bvalid[0]:
-                raise RuntimeError('Incumbent score uncertified on Bank B')
-            accepted=bool(bvalid[1] and bscore[1]<bscore[0]-1e-8)
-            if accepted:theta=proposed[indices[winner]]-beta
-        history.append(dict(round=round_id,accepted=accepted,
-                            winner=None if not accepted else int(indices[winner]),
-                            baseline=float(allscore[0]),
-                            chosen=float(allscore[winner]) if winner is not None else None,
-                            bank_B=confirmation,
-                            complete_candidates=int(valid.sum())))
-        atomic_json(root/'progress.json',dict(history=history,theta=theta.tolist()))
+    score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
+                     pools=ctx['pools'],seconds=args.seconds)
+    with ProcessPoolExecutor(max_workers=args.cores,
+            mp_context=get_context('spawn'),initializer=_score_initializer,
+            initargs=(score_state,)) as score_pool:
+        for round_id in range(args.rounds):
+            step=8./2**round_id
+            proposed=[beta+theta]
+            for v in directions:
+                for sign in (-1.,1.):
+                    proposed.append(beta+theta+sign*step*np.asarray(v))
+            fititems=[(ck,c,rows) for ck,c,rows in shortlist_items]
+            preview,valid=parallel_score(fititems,fit,H,[p.tolist() for p in proposed],
+                                 method,ctx['pools'],args.seconds,args.cores,round_id,
+                                 root/f'round_{round_id:02d}'/'screen',pool=score_pool)
+            order=sorted((i for i in range(1,len(proposed)) if valid[i]),key=lambda i:preview[i])[:5]
+            indices=[0]+order
+            allscore,valid=parallel_score(items,fit,H,[proposed[i].tolist() for i in indices],
+                               method,ctx['pools'],args.seconds,args.cores,round_id,
+                               root/f'round_{round_id:02d}'/'all',pool=score_pool)
+            if not valid[0]:
+                raise RuntimeError('Incumbent score uncertified on full Bank A; increase --seconds')
+            alternatives=[j for j in range(1,len(indices)) if valid[j]
+                          and allscore[j]<allscore[0]-1e-8]
+            winner=min(alternatives,key=lambda j:allscore[j],default=None)
+            accepted=False; confirmation=None
+            if winner is not None:
+                # Fresh independent Bank B for each round, never used in proposing
+                # this candidate. This is a safeguard, not a sequential p-value.
+                c0=proposed[0].tolist();c1=proposed[indices[winner]].tolist()
+                bscore,bvalid=parallel_score(items,fit,H,[c0,c1],method,ctx['pools'],
+                             args.seconds,args.cores,-round_id-1,
+                             root/f'round_{round_id:02d}'/'confirm_B',pool=score_pool)
+                confirmation=dict(incumbent=float(bscore[0]) if bvalid[0] else None,
+                                  candidate=float(bscore[1]) if bvalid[1] else None,
+                                  completed=bool(bvalid.all()))
+                if not bvalid[0]:
+                    raise RuntimeError('Incumbent score uncertified on Bank B')
+                accepted=bool(bvalid[1] and bscore[1]<bscore[0]-1e-8)
+                if accepted:theta=proposed[indices[winner]]-beta
+            history.append(dict(round=round_id,accepted=accepted,
+                                winner=None if not accepted else int(indices[winner]),
+                                baseline=float(allscore[0]),
+                                chosen=float(allscore[winner]) if winner is not None else None,
+                                bank_B=confirmation,
+                                complete_candidates=int(valid.sum())))
+            atomic_json(root/'progress.json',dict(history=history,theta=theta.tolist()))
     coeff=beta+theta
     atomic_json(result,dict(coeff=coeff.tolist(),theta=theta.tolist(),history=history,
                  guarantee='full-Bank-A candidate search with independent per-round Bank-B confirmation; outer search not globally optimal or population-certified'))
