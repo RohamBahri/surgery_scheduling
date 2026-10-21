@@ -120,3 +120,53 @@ The GitHub CI suite includes solver integration tests, but no completed
 24,506-case Gurobi experiment is claimed by CI. Large-model timeouts and
 uncertified methods are scientific scalability results, not proofs of their
 optima. The retrospective roster and assumed response law remain limitations.
+
+
+## Version 3: full-scale comparative experiment (October 21)
+
+**Branch:** `theory-full-experiment-v3`. Invoke `bash run_theory_full.sh`.
+The default output is `artifacts/theory_full_v3`; version 2 outputs must not be
+used as version 3 checkpoints. Manifest hashes include the exact-cache code.
+
+**Stochastic oracle.** Each evaluation component computes one unrestricted
+Bank-A SAA MILP and saves its assignment, objective value, dual bound, and
+solver status. The reference is NOT an inducible recommendation and is never
+passed through the deployment planner. Its fixed assignment is evaluated
+using independent B/C banks and historical realized durations. The same
+verified SAA solve is reused in PW_BOUNDED, PW_ANCHORED and PW_VFCG.
+The pooled and fold reports show SAA model-A bounds, model-C and realized
+costs, CASE-to-SAA opportunity intervals, and conservative inducibility
+intervals. These intervals do **not** identify the shared-class gap, and
+CASE-to-SAA is **not** the stochastic vs perfect-information gap. The
+PW_VFCG global certificate remains seed-0-specific; three-seed deployed
+averages are reported separately.
+
+**Training reuse.** Certified deterministic planner assignments are memoized
+in a WAL-enabled SQLite store keyed by the complete scheduling component,
+exact float64 reviewed durations and tie seeds. No incomplete or inaccurate
+planner solves are cached. Bank-A and independent Bank-B score evaluations
+share only the *exact deployment*, never the scenario outcomes. Each score
+record includes cache-hit and solver-call counts for cached hash deployments.
+Global training still examines all specified candidates; caching changes
+only redundant numerical solves, not the scientific objective.
+
+**Interruption.** Completed directional rounds restart from `progress.json`;
+uncompleted component tasks restart from their identity-checked cache.
+The direct five-coefficient global branch-and-bound saves its entire active
+queue, retired-region bounds, incumbent and processed node count in
+`search_state.json`; a resumed run reprocesses at most the interrupted
+node. Monolithic VF uses a disk-backed Gurobi node file and stores a MIP
+start from any returned feasible solve. This is **not** full MIP-tree
+checkpoint/restart and an operating-system-killed VF solve can lose its
+unflushed search progress.
+
+**Training budget.** `--search-seconds` limits directional training on a
+per-method basis, checked between rounds. A budget-limited policy is labeled
+`BUDGET_EXHAUSTED` in its `trained.json`, not globally optimal.
+Individual candidate and lower-bound solvers also have explicit budgets.
+
+**Interpretation.** No benchmark is substituted silently on failed solver
+calls. All case-level records are retained, unresolved cases are counted,
+and headline means are withheld for incomplete arms. No completed full-cohort
+licensed Gurobi run is claimed by automated CI; the workstation campaign
+remains necessary for empirical validation and scalability findings.
