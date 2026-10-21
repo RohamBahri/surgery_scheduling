@@ -163,8 +163,11 @@ def fit_shared(folder, items, data, H, pools, beta, seconds, cores, rounds, seed
         return np.asarray(json.loads(path.read_text())["theta"], float)
 
     rng = np.random.default_rng(20261020)
-    sample = rng.choice(len(items), size=min(150, len(items)), replace=False)
-    screen = [items[int(i)] for i in sample]
+    flexible = [item for item in items if any(
+        len(item[1].allowed[int(s)]) > 1 for s in item[1].surgeon)]
+    candidates = flexible or items
+    sample = rng.choice(len(candidates), size=min(150, len(candidates)), replace=False)
+    screen = [candidates[int(i)] for i in sample]
     theta, history = np.zeros(H.shape[1]), []
     for round_id in range(rounds):
         step = 8./2**round_id
@@ -213,9 +216,8 @@ def fit_shared(folder, items, data, H, pools, beta, seconds, cores, rounds, seed
                             bank_B_gain=float(gain), bank_B_se=float(se),
                             accepted=accepted, failed_components=incomplete.tolist()))
         print("Shared search:", history[-1], flush=True)
-        if not accepted:
-            break
-        theta = candidates[best]-beta
+        if accepted:
+            theta = candidates[best]-beta
     write(path, dict(beta=beta.tolist(), theta=theta.tolist(), history=history))
     return theta
 
@@ -398,7 +400,7 @@ def main():
     parser.add_argument("--cores", type=int, default=15)
     parser.add_argument("--seconds", type=float, default=120.)
     parser.add_argument("--budget", type=float, default=900.)
-    parser.add_argument("--shared-rounds", type=int, default=2)
+    parser.add_argument("--shared-rounds", type=int, default=10)
     parser.add_argument("--fold", choices=("0", "1", "both"), default="both")
     parser.add_argument("--final-2013", action="store_true", help="One frozen 2013 replay after both development folds")
     args = parser.parse_args()
