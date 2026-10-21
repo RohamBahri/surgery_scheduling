@@ -6,7 +6,6 @@ Example: python pilot/run_advice_comparison.py --workbook data/UHNOperating_Room
 import os
 for k in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ[k] = "1"
-os.environ["SURGERY_RESEARCH_LINK"] = "inverse"
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -401,6 +400,7 @@ def main():
     parser.add_argument("--fold", choices=("0", "1", "both"), default="both")
     parser.add_argument("--final-2013", action="store_true", help="One frozen 2013 replay after both development folds")
     args = parser.parse_args()
+    os.environ["SURGERY_RESEARCH_LINK"] = "inverse"
     if not 1 <= args.cores <= 15 or args.seconds <= 0 or args.budget <= 0:
         parser.error("cores must be 1..15 and time limits positive")
     args.out.mkdir(parents=True, exist_ok=True)
