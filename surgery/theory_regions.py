@@ -70,7 +70,7 @@ def build_problems(items,data,H,beta,pools,output,*,seconds=120.,
     return problems
 
 
-def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2)):
+def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2),deadline=None):
     total=0.; n=0
     for p in problems:
         c=p.week
@@ -78,7 +78,9 @@ def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2)):
         d=np.clip(p.d0+p.H@(beta+theta),lo,hi)
         zs=[]
         for seed in seeds:
-            sol=solve_week(c,d,seconds=seconds,tie=True,hash_seed=seed)
+            budget=seconds if deadline is None else min(seconds,max(0.,deadline-time.monotonic()))
+            if budget<=0:return None
+            sol=solve_week(c,d,seconds=budget,tie=True,hash_seed=seed)
             if not sol.complete:return None
             zs.append(tuple(map(int,sol.assignment)))
         if p.targets is not None and any(z not in p.targets[i]
@@ -91,7 +93,7 @@ def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2)):
 
 
 def _node_lower(problems,boxlo,boxhi,beta,seconds,lam,seeds,
-                *,screen_stability=False):
+                *,screen_stability=False,deadline=None):
     total=0.; n=0;stable_count=0
     center=(boxlo+boxhi)/2
     for p in problems:
@@ -106,7 +108,8 @@ def _node_lower(problems,boxlo,boxhi,beta,seconds,lam,seeds,
                 z=tuple(map(int,c.original))
             else:
                 d=np.clip(p.d0+p.H@(beta+center),lo,hi)
-                z=sharp_margin_bound(c,p.bank,d,dmin,dmax,seconds=seconds,seeds=seeds)
+                z=sharp_margin_bound(c,p.bank,d,dmin,dmax,seconds=seconds,
+                                     seeds=seeds,deadline=deadline)
             if z is not None:
                 if p.targets is not None and any(z not in T for T in p.targets):
                     return float('inf'),stable_count
@@ -129,10 +132,10 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     global-optimality claim is made unless the reported absolute gap closes.
     """
     output=Path(out);output.mkdir(parents=True,exist_ok=True)
-    start=time.monotonic();theta=np.zeros(len(beta))
+    start=time.monotonic();deadline=start+seconds;theta=np.zeros(len(beta))
     if start_theta is not None:theta=np.clip(np.asarray(start_theta,float),-radius,radius)
-    midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds)
-    baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds)
+    midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
+    baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
     if baseline is None:
         raise RuntimeError('Cannot certify baseline for global search')
     if midpoint is None or midpoint>=baseline:
@@ -141,7 +144,7 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     best_theta=theta.copy()
     lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
     global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
-                            lam,seeds,screen_stability=False)
+                            lam,seeds,screen_stability=False,deadline=deadline)
     queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
     progress=[];processed=0
     retired_lb=float('inf')  # Bounds of tolerance-fathomed regions remain valid.
@@ -155,12 +158,12 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
         width=float(np.max(b-a))
         use_stability=width<max(1.,radius/2)
         tighter,stable=_node_lower(problems,a,b,np.asarray(beta),solve_seconds,
-                            lam,seeds,screen_stability=use_stability)
+                            lam,seeds,screen_stability=use_stability,deadline=deadline)
         if tighter>=best-gap_tolerance:
             retired_lb=min(retired_lb,tighter)
             continue
         center=(a+b)/2
-        val=_evaluate(problems,center,np.asarray(beta),solve_seconds,lam,seeds)
+        val=_evaluate(problems,center,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
         if val is not None and val<best:
             best=val;best_theta=center.copy()
         impact=np.zeros(len(beta))
