@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
-from heapq import heappush, heappop
+from heapq import heappush, heappop, heapify
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -187,30 +188,64 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     global-optimality claim is made unless the reported absolute gap closes.
     """
     output=Path(out);output.mkdir(parents=True,exist_ok=True)
-    start=time.monotonic();deadline=start+seconds;theta=np.zeros(len(beta))
-    if start_theta is not None:theta=np.clip(np.asarray(start_theta,float),-radius,radius)
-    midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
-    baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
-    if baseline is None:
-        raise RuntimeError('Cannot certify baseline for global search')
-    if midpoint is None or midpoint>=baseline:
-        theta=np.zeros_like(theta);best=baseline
-    else:best=midpoint
-    best_theta=theta.copy()
-    lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
-    global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
-                            lam,seeds,screen_stability=False,deadline=deadline)
-    if global_lb>baseline+1e-5:
-        raise AssertionError('SAA global lower bound exceeds certified CASE objective')
-    queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
-    progress=[];processed=0
-    retired_lb=float('inf')  # Bounds of tolerance-fathomed regions remain valid.
-    while queue and processed<max_nodes and time.monotonic()-start<seconds:
+    start=time.monotonic();deadline=start+seconds
+    checkpoint=output/'search_state.json'
+    signature=hashlib.sha256(json.dumps(dict(
+        components=[(p.key,p.week.n,p.targets is not None) for p in problems],
+        beta=np.asarray(beta).tolist(),radius=radius,lam=lam,
+        seeds=list(seeds),gap_tolerance=gap_tolerance),
+        sort_keys=True).encode()).hexdigest()
+
+    def save_state():
+        # The popped node is written out only after being fully processed.
+        # A forced interruption during work replays the previous checkpoint.
+        _save(checkpoint,dict(signature=signature,incumbent=best,
+              best_theta=best_theta.tolist(),processed=processed,
+              serial=serial,retired_lb=None if np.isinf(retired_lb) else retired_lb,
+              queue=[dict(lower=q[0],serial=q[1],
+                          a=q[2].tolist(),b=q[3].tolist()) for q in queue],
+              history=progress))
+
+    if checkpoint.exists():
+        saved=json.loads(checkpoint.read_text())
+        if saved.get('signature')!=signature:
+            raise RuntimeError('Global-search checkpoint incompatible with model')
+        best=float(saved['incumbent'])
+        best_theta=np.asarray(saved['best_theta'],float)
+        processed=int(saved['processed']);serial=int(saved['serial'])
+        retired_lb=float('inf') if saved['retired_lb'] is None else float(saved['retired_lb'])
+        progress=saved['history']
+        queue=[(float(q['lower']),int(q['serial']),
+                np.asarray(q['a'],float),np.asarray(q['b'],float))
+               for q in saved['queue']]
+        heapify(queue)
+    else:
+        theta=np.zeros(len(beta))
+        if start_theta is not None:
+            theta=np.clip(np.asarray(start_theta,float),-radius,radius)
+        midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
+        baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
+        if baseline is None:
+            raise RuntimeError('Cannot certify baseline for global search')
+        if midpoint is None or midpoint>=baseline:
+            theta=np.zeros_like(theta);best=baseline
+        else:best=midpoint
+        best_theta=theta.copy()
+        lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
+        global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
+                                lam,seeds,screen_stability=False,deadline=deadline)
+        if global_lb>baseline+1e-5:
+            raise AssertionError('SAA global lower bound exceeds certified CASE objective')
+        queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
+        progress=[];processed=0;retired_lb=float('inf')
+        save_state()
+    session_processed=0
+    while queue and session_processed<max_nodes and time.monotonic()-start<seconds:
         lb,_,a,b=heappop(queue)
         if lb>=best-gap_tolerance:
             retired_lb=min(retired_lb,lb)
             continue
-        processed+=1
+        processed+=1;session_processed+=1
         # The expensive stability oracle is only used on promising tight boxes.
         width=float(np.max(b-a))
         use_stability=width<max(1.,radius/2)
@@ -242,11 +277,14 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
         progress.append(dict(node=processed,lower=current_lb,upper=best,
                              stable_on_node=stable,remaining=len(queue),
                              elapsed=time.monotonic()-start))
+        save_state()
         _save(output/'progress.json',dict(history=progress,theta=best_theta.tolist()))
+    save_state()
     final_lb=min([q[0] for q in queue]+[retired_lb,best])
     # Tolerance-fathomed regions are NOT exact: keep their dual bounds.
     result=dict(theta=best_theta.tolist(),lower=float(final_lb),upper=float(best),
                 gap=float(max(0.,best-final_lb)),nodes=processed,
+                session_nodes=session_processed,resumable_checkpoint=str(checkpoint),
                 seconds=time.monotonic()-start,
                 status=('OPTIMAL_CERTIFIED' if best-final_lb<=1e-8
                          else 'GAP_CERTIFIED' if best-final_lb<=gap_tolerance+1e-10
