@@ -108,3 +108,130 @@ def test_full_runner_loads_and_reports_paired_cohort(tmp_path):
     assert outcome["arms"]["SHARED"]["per_seed"][0]["difference"] == -5.
     assert outcome["by_site"]["TGH"]["cases"] == 2
     assert outcome["by_size"]["2-5"]["cases"] == 5
+
+
+
+def test_flat_margin_crosses_strict_overtime_threshold():
+    from surgery.weekly_planner import loads
+    c = toy()
+    d = np.array([200., 250.])  # packed load: 200 + 250 + 30 = 480.
+    assert loads(c, (0, 0), d)[0] == 480.
+    proposal = transition(c, d, (0, 0), (0, 1))
+    assert loads(c, (0, 0), proposal)[0] > 480.
+    assert np.all(proposal <= d + 24. + 1e-8)
+
+
+def test_intermediate_transition_chain_can_be_non_improving(monkeypatch):
+    import surgery.advice_comparison as ac
+    from surgery.asdbs import saa
+    c = Week("TGH", "2012-01-02", ((0, "OR1"), (0, "OR2")),
+             np.arange(2, 23), ("S1",), np.zeros(21, dtype=int),
+             np.zeros(21, dtype=int), ((0, 1),), ((0,),),
+             np.full(21, 100.), np.full(21, 100.), ())
+    packed = (0,) * 21
+    split = (0,) * 10 + (1,) * 11
+
+    def fake_certified(c, d, seed, seconds):
+        return split if 102.5 < d[0] < 103.5 else packed
+
+    def one_minute(c, d, current, target):
+        proposal = d.copy()
+        proposal[0] += 1.
+        return proposal
+
+    monkeypatch.setattr(ac, "certified", fake_certified)
+    monkeypatch.setattr(ac, "transition", one_minute)
+    monkeypatch.setattr("surgery.asdbs.saa", lambda *a, **kw: split)
+    banks = {name: np.full((4, 21), 100.) for name in ("A", "B", "C")}
+    d, z, accepted, status, _ = ac.prescription(
+        c, c.booked.copy(), banks, seeds=(0,), seconds=1., budget=15.)
+    assert accepted and status == "ACCEPTED_B"
+    assert d[0] == pytest.approx(103.)
+    assert z[0] == split
+
+
+def test_matched_stat_control_uses_deployed_clipping(monkeypatch):
+    import pilot.run_advice_comparison as runner
+    from types import SimpleNamespace
+    booked = np.array([200., 200.])
+    raw = np.array([100., -100.])
+    x = raw[:, None]
+    H = np.zeros((2, 5))
+    H[:, 0] = 1.
+    beta = np.array([5., 0., 0., 0., 0.])
+    data = dict(X=x, case_w=np.array([1.]), booked=booked,
+                actual=np.array([230., 190.]))
+    observed = {}
+
+    def fake_minimize(fn, x0, **kwargs):
+        observed["value"] = fn(beta)
+        return SimpleNamespace(x=beta, fun=observed["value"])
+
+    monkeypatch.setattr(runner, "minimize", fake_minimize)
+    assert np.array_equal(runner.shared_control(data, H), beta)
+    d0 = reviewed(booked, raw)
+    deployed = reviewed(booked, d0-booked+H@beta)
+    error = data["actual"]-deployed
+    expected = (1.75*np.maximum(error, 0).sum()
+                + np.maximum(-error, 0).sum()
+                + runner.LAM/2*np.sum((deployed-d0)**2))/2
+    assert observed["value"] == pytest.approx(expected)
+    assert deployed[1] > d0[1]
+
+
+def test_average_hash_report_and_holm(tmp_path):
+    from pilot.run_advice_comparison import report
+    rows = []
+    for week, case, shared, perweek in [
+        ("2012-01-02", 2, (90., 95., 95.), (80., 100., 90.)),
+        ("2012-01-09", 3, (97., 94., 91.), (92., 92., 92.)),
+    ]:
+        case_cost = {str(j): 100. for j in range(3)}
+        rows.append(dict(monday=week, site="TGH", cases=case, fold=0,
+                         arms=dict(
+                             CASE=dict(realized=case_cost, changed=0),
+                             SHARED=dict(realized={str(j): v for j, v in enumerate(shared)}, changed=1),
+                             PER_WEEK=dict(realized={str(j): v for j, v in enumerate(perweek)}, changed=1))))
+    output = report(rows, (0, 1, 2), tmp_path/"summary.json")
+    assert output["bootstrap_resamples"] == 20000
+    # Two Mondays each with mean differences -6.666.. and -8.
+    assert output["contrasts"]["PER_WEEK_minus_CASE"]["difference"] == pytest.approx(
+        (-10. - 8.) / 5.)
+    assert output["contrasts"]["SHARED_minus_CASE"]["difference"] == pytest.approx(
+        (-20./3. - 6.) / 5.)
+    assert output["arms"]["PER_WEEK"]["averaged_seeds"]["difference"] == pytest.approx(-3.6)
+    assert output["by_fold"]["0"]["cases"] == 5
+    for name in ("PER_WEEK_minus_CASE", "SHARED_minus_CASE"):
+        assert output["contrasts"][name]["holm_p"] >= output["contrasts"][name]["p_two_sided"]
+
+
+def test_cache_fingerprint_covers_planner_and_scenario_costs():
+    from pilot.run_advice_comparison import source_hashes
+    keys = source_hashes()
+    assert "surgery/weekly_planner.py" in keys
+    assert "surgery/asdbs.py" in keys
+    assert "surgery/planner.py" in keys
+    assert all(len(value) == 64 for value in keys.values())
+
+
+def test_sensitivity_rescores_only_displayed_recommendations(monkeypatch, tmp_path):
+    import json
+    import surgery.advice_comparison as ac
+    c = toy()
+    root = tmp_path
+    original = {"arms": {
+        "CASE": {"displayed": [0., 0.], "assignments": {str(r): [0, 0] for r in range(3)}},
+        "PER_WEEK": {"displayed": [30., 0.], "assignments": {str(r): [0, 1] for r in range(3)}},
+    }}
+    (root/"toy.json").write_text(json.dumps(original))
+    monkeypatch.setattr(ac, "certified",
+                        lambda c, d, seed, seconds: (0, 1) if d[0] > 115. else (0, 0))
+    state = dict(components_dir=root, decision_dates={2: "2011-12-30", 3: "2012-01-02"},
+                 response_sweep=((.5, 15.), (.8, 15.)), seconds=1.,
+                 seeds=(0, 1, 2))
+    monkeypatch.setattr(ac, "_STATE", state)
+    ck, outcomes = ac.sensitivity_job(("toy", c, np.array([0, 1])))
+    assert ck == "toy"
+    assert outcomes["cutoff_week_start"]["eligible_at_cutoff"] == 1
+    assert outcomes["cutoff_week_start"]["arms"]["PER_WEEK"]["realized"]
+    assert outcomes["alpha_0.5_h_15"]["arms"]["PER_WEEK"]["realized"]
