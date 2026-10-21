@@ -267,3 +267,39 @@ def test_h60_has_no_effect_on_existing_30_minute_displays():
     from surgery.planner import response
     u = np.linspace(-30., 30., 101)
     assert np.allclose(response(u, .8, 30.), response(u, .8, 60.))
+
+
+
+def test_missing_decision_dates_are_normalized_to_none():
+    import pandas as pd
+    from pilot.run_advice_comparison import decision_date_lookup
+    cohort = pd.DataFrame({
+        "case_id": [2, 3, 4],
+        "dtt": pd.to_datetime(["2011-12-30", None, "2012-01-02"]),
+    })
+    assert decision_date_lookup(cohort) == {
+        2: "2011-12-30", 3: None, 4: "2012-01-02",
+    }
+
+
+@pytest.mark.parametrize("missing", [None, np.nan])
+def test_cutoff_sensitivity_handles_missing_or_nan_dates(monkeypatch, tmp_path, missing):
+    import json
+    import surgery.advice_comparison as ac
+    c = toy()
+    original = {"arms": {
+        "CASE": {"displayed": [0., 0.], "assignments": {str(r): [0, 0] for r in range(3)}},
+        "PER_WEEK": {"displayed": [30., 0.], "assignments": {str(r): [0, 1] for r in range(3)}},
+    }}
+    (tmp_path/"toy.json").write_text(json.dumps(original))
+    monkeypatch.setattr(ac, "certified",
+                        lambda c, d, seed, seconds: (0, 1) if d[0] > 115. else (0, 0))
+    monkeypatch.setattr(ac, "_STATE", dict(
+        components_dir=tmp_path, decision_dates={2: "2011-12-30", 3: missing},
+        response_sweep=((.8, 30.),), seconds=1., seeds=(0, 1, 2)))
+    _, output = ac.sensitivity_job(("toy", c, np.array([0, 1])))
+    cutoff = output["cutoff_week_start"]
+    assert cutoff["eligible_at_cutoff"] == 1
+    assert cutoff["unknown_decision_date"] == 1
+    assert cutoff["arms"]["PER_WEEK"]["status"] == "CERTIFIED"
+    assert len(cutoff["arms"]["PER_WEEK"]["realized"]) == 3
