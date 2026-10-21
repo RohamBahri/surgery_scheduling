@@ -41,8 +41,9 @@ def case_features(c, baseline_z, baseline_d, row_X, names):
     """Five planning fields, fixed from CASE before decision-aware optimization."""
     s = row_X[:, names.index("hist_surgeon_mean_abs_error")]
     q = row_X[:, names.index("hist_procedure_mean_abs_error")]
-    p = np.clip((loads(c, baseline_z, baseline_d)[np.asarray(baseline_z, int)]
-                 - 480.) / 120., -2., 2.)
+    zs = baseline_z.values() if isinstance(baseline_z, dict) else [baseline_z]
+    p = np.mean([np.clip((loads(c, z, baseline_d)[np.asarray(z, int)]
+                          - 480.) / 120., -2., 2.) for z in zs], axis=0)
     return np.column_stack((s, q, p, s*p, q*p))
 
 
@@ -282,7 +283,7 @@ def baseline_job(item):
     state = _STATE
     data, names = state["data"], state["names"]
     d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
-    z = certified(c, d0, 0, state["seconds"])
+    z = {r: certified(c, d0, r, state["seconds"]) for r in (0, 1, 2)}
     return ck, rows, case_features(c, z, d0, data["X"][rows], names)
 
 
