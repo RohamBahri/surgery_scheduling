@@ -179,7 +179,7 @@ def fit_shared(folder, items, data, H, pools, beta, seconds, cores, rounds, seed
 
         def assess(candidates, subset):
             state = dict(data=data, H=H, pools=pools, candidates=candidates,
-                         seeds=seeds, seconds=seconds)
+                         seeds=seeds, seconds=seconds, round_id=round_id)
             scores = np.zeros((len(candidates), 2))
             failed = np.zeros(len(candidates), int)
             week_B = {j: {} for j in range(len(candidates))}
