@@ -28,7 +28,11 @@ from surgery.anchored_core import key
 
 
 def parallel(fn, items, state, cores):
-    with ProcessPoolExecutor(max_workers=cores, mp_context=get_context("spawn"),
+    if not items:
+        return
+    workers = min(cores, len(items))
+    state = dict(state, threads=max(1, cores//workers))
+    with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"),
                              initializer=init_worker, initargs=(state,)) as pool:
         yield from pool.map(fn, items, chunksize=1)
 
