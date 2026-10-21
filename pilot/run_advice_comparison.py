@@ -142,22 +142,52 @@ def shared_control(data, H):
     return np.asarray(answer.x, float)
 
 
+
+def collect_features(items, data, names, seconds, cores, checkpoint):
+    """Resume costly exact CASE feature schedules at component granularity."""
+    n = len(data["booked"])
+    H, seen = np.zeros((n, 5), float), np.zeros(n, bool)
+    if checkpoint is not None and checkpoint.exists():
+        with np.load(checkpoint) as saved:
+            H, seen = saved["H"].copy(), saved["seen"].copy()
+        if H.shape != (n, 5) or seen.shape != (n,):
+            raise RuntimeError("Stale feature-solve checkpoint")
+    pending = []
+    for item in items:
+        rows = item[2]
+        if seen[rows].all():
+            continue
+        if seen[rows].any():
+            raise RuntimeError("Partial CASE component in feature checkpoint")
+        pending.append(item)
+    state = dict(data=data, names=names, seconds=seconds)
+    try:
+        for j, (_, rows, features) in enumerate(
+                parallel(baseline_job, pending, state, cores)):
+            if seen[rows].any():
+                raise AssertionError("Repeated case in the decomposition")
+            H[rows], seen[rows] = features, True
+            if (j+1) % 50 == 0 and checkpoint is not None:
+                np.savez_compressed(checkpoint, H=H, seen=seen)
+                print(f"CASE features: {j+1}/{len(pending)} pending components", flush=True)
+    except BaseException:
+        if checkpoint is not None:
+            np.savez_compressed(checkpoint, H=H, seen=seen)
+        raise
+    if not seen.all():
+        raise AssertionError("Incomplete feature cohort")
+    if checkpoint is not None:
+        checkpoint.unlink(missing_ok=True)
+    return H
+
+
 def fit_features(folder, items, data, names, seconds, cores):
-    path = folder / "five_features.npz"
+    path = folder/"five_features.npz"
     if path.exists():
         with np.load(path) as old:
             return old["H"], old["mean"], old["scale"]
-    H = np.zeros((len(data["booked"]), 5), float)
-    seen = np.zeros(len(H), bool)
-    state = dict(data=data, names=names, seconds=seconds)
-    for i, (_, rows, features) in enumerate(parallel(baseline_job, items, state, cores)):
-        if seen[rows].any():
-            raise AssertionError("Repeated case in the decomposition")
-        H[rows], seen[rows] = features, True
-        if (i+1) % 200 == 0:
-            print(f"CASE baseline for 5-feature training: {i+1}/{len(items)}", flush=True)
-    if not seen.all():
-        raise AssertionError("Incomplete feature cohort")
+    H = collect_features(items, data, names, seconds, cores,
+                         folder/"five_features_progress.npz")
     mu, sd = H.mean(axis=0), H.std(axis=0)
     sd = np.where(sd < 1e-8, 1., sd)
     H = (H-mu)/sd
@@ -165,14 +195,17 @@ def fit_features(folder, items, data, names, seconds, cores):
     return H, mu, sd
 
 
-def test_features(items, data, names, mean, scale, seconds, cores):
-    H = np.zeros((len(data["booked"]), 5), float)
-    seen = np.zeros(len(H), bool)
-    state = dict(data=data, names=names, seconds=seconds)
-    for _, rows, features in parallel(baseline_job, items, state, cores):
-        H[rows], seen[rows] = (features-mean)/scale, True
-    if not seen.all():
-        raise AssertionError("Incomplete held-out feature cohort")
+def test_features(items, data, names, mean, scale, seconds, cores, folder=None):
+    path = folder/"held_features.npz" if folder is not None else None
+    if path is not None and path.exists():
+        with np.load(path) as saved:
+            return saved["H"].copy()
+    checkpoint = (folder/"held_features_progress.npz"
+                  if folder is not None else None)
+    raw = collect_features(items, data, names, seconds, cores, checkpoint)
+    H = (raw-mean)/scale
+    if path is not None:
+        np.savez_compressed(path, H=H)
     return H
 
 
@@ -390,7 +423,8 @@ def run_fold(args, fold, cohort):
     fit_items = components(trainweeks, fitindex)
     eval_items = components(evalweeks, evalindex)
     H, mean, scale = fit_features(folder, fit_items, fit, names, args.seconds, args.cores)
-    H_eval = test_features(eval_items, held, names, mean, scale, args.seconds, args.cores)
+    H_eval = test_features(eval_items, held, names, mean, scale, args.seconds, args.cores,
+                           folder=folder)
     fit_frame = cohort[cohort.case_id.isin(fit["case_id"])]
     errors = out_of_fold_residuals(folder, cohort, trainweeks, fit, args.cores)
     pools = residual_history(fit_items, fit, fit_frame, errors)
@@ -464,7 +498,8 @@ def run_final(args, cohort):
     held["case_w"] = fit["case_w"]
     fit_items, eval_items = components(trainweeks, fitindex), components(evalweeks, evalindex)
     H, mu, sd = fit_features(folder, fit_items, fit, names, args.seconds, args.cores)
-    T = test_features(eval_items, held, names, mu, sd, args.seconds, args.cores)
+    T = test_features(eval_items, held, names, mu, sd, args.seconds, args.cores,
+                      folder=folder)
     fit_frame = cohort[cohort.case_id.isin(fit["case_id"])]
     errors = out_of_fold_residuals(folder, cohort, trainweeks, fit, args.cores)
     pools = residual_history(fit_items, fit, fit_frame, errors)
