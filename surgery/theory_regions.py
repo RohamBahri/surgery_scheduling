@@ -7,6 +7,8 @@ A cutoff returns a numerical gap (which can be large), never a false optimum.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from heapq import heappush, heappop
 import json
 import time
@@ -37,36 +39,89 @@ def _save(path,obj):
     p=path.with_suffix(path.suffix+'.tmp');p.write_text(json.dumps(obj,allow_nan=False));p.replace(path)
 
 
+def _saa_task(job):
+    key,week,bank,seconds=job
+    return key,saa_mip(week,bank,seconds=seconds).to_json()
+
+
+def _target_task(job):
+    key,week,starting,seeds,seconds=job
+    selected=[]
+    for seed in seeds:
+        sol=solve_week(week,starting,seconds=seconds,threads=1,tie=True,hash_seed=seed)
+        if not sol.complete or sol.assignment is None:
+            raise RuntimeError(f'Uncertified target baseline {key} seed={seed}: {sol.status}')
+        selected.append(list(map(int,sol.assignment)))
+    return key,selected
+
+
 def build_problems(items,data,H,beta,pools,output,*,seconds=120.,
-                   seeds=(0,1,2),target_restricted=False):
-    """Compute full-component SAA dual lower bounds; cache every certified result."""
-    folder=Path(output)/'saa_bounds';folder.mkdir(parents=True,exist_ok=True)
-    problems=[]
-    for j,(key,c,rows) in enumerate(items):
+                   seeds=(0,1,2),target_restricted=False,cores=1):
+    """Full-component SAA bounds and restricted target plans, saved on completion.
+
+    The optimization is NOT restricted to a schedule library. Every SAA dual
+    bound is a valid relaxation; timeouts preserve their bound and status.
+    """
+    from surgery.planner import reachable
+    from time import monotonic
+    clock=monotonic()
+    root=Path(output);folder=root/'saa_bounds'
+    folder.mkdir(parents=True,exist_ok=True)
+    prepared=[];missing=[]
+    for ck,c,rows in items:
         d0=reviewed(c.booked,data['X'][rows]@data['case_w'])
         bank=scenarios(c,d0,pools,20261020,count=50)
-        p=folder/(key+'.json')
-        if p.exists(): rec=json.loads(p.read_text())
-        else:
-            cert=saa_mip(c,bank,seconds=seconds)
-            rec=cert.to_json()
-            _save(p,rec)
+        path=folder/(ck+'.json')
+        prepared.append((ck,c,rows,d0,bank,path))
+        if not path.exists():
+            missing.append((ck,c,bank,seconds))
+    if missing:
+        with ProcessPoolExecutor(max_workers=min(cores,len(missing)),
+                                 mp_context=get_context('spawn')) as executor:
+            futures=[executor.submit(_saa_task,job) for job in missing]
+            for idx,future in enumerate(as_completed(futures)):
+                ck,record=future.result()
+                _save(folder/(ck+'.json'),record)
+                if (idx+1)%100==0:
+                    print(f'SAA bounds: saved {idx+1}/{len(missing)}',flush=True)
+    missing_targets=[]
+    targets_folder=root/'target_plans'
+    if target_restricted:
+        targets_folder.mkdir(parents=True,exist_ok=True)
+        for ck,c,rows,d0,bank,path in prepared:
+            dest=targets_folder/(ck+'.json')
+            if dest.exists():continue
+            starting=np.clip(d0+H[rows]@beta,*reachable(c.booked,.8,30.))
+            missing_targets.append((ck,c,starting,seeds,seconds))
+        if missing_targets:
+            with ProcessPoolExecutor(max_workers=min(cores,len(missing_targets)),
+                                     mp_context=get_context('spawn')) as executor:
+                futures=[executor.submit(_target_task,job) for job in missing_targets]
+                for idx,future in enumerate(as_completed(futures)):
+                    ck,record=future.result()
+                    _save(targets_folder/(ck+'.json'),record)
+                    if (idx+1)%100==0:
+                        print(f'Target plans: saved {idx+1}/{len(missing_targets)}',flush=True)
+    problems=[]
+    for ck,c,rows,d0,bank,path in prepared:
+        rec=json.loads(path.read_text())
         lb=max(0.,float(rec['lower'] if rec['lower'] is not None else 0.))
         targets=None
         if target_restricted:
-            starting=np.clip(d0+H[rows]@beta,*reachable(c.booked,.8,30.))
-            own=[]
-            for seed in seeds:
-                sol=solve_week(c,starting,seconds=seconds,tie=True,hash_seed=seed)
-                if not sol.complete:raise RuntimeError('Uncertified target baseline '+key)
-                own.append(tuple(map(int,sol.assignment)))
-            candidate=tuple(map(int,rec['assignment'])) if rec.get('assignment') else None
-            targets=tuple(set([z]+([candidate] if candidate is not None else []))
+            own=json.loads((targets_folder/(ck+'.json')).read_text())
+            if len(own)!=len(seeds):
+                raise RuntimeError('Incomplete saved target schedule record')
+            candidate=(tuple(map(int,rec['assignment'])) if rec.get('assignment') else None)
+            targets=tuple(set([tuple(map(int,z))]+([candidate] if candidate else []))
                           for z in own)
-            # Restricted schedule minimum is a valid stronger lower bound.
             lb=float(np.mean([min(expected_reduced(c,z,bank) for z in group)
                               for group in targets]))
-        problems.append(Problem(key,c,d0,H[rows],bank,lb,targets))
+        problems.append(Problem(ck,c,d0,H[rows],bank,lb,targets))
+    _save(root/('target_preprocessing.json' if target_restricted else 'saa_preprocessing.json'),
+          dict(components=len(problems),new_saa=len(missing),
+               new_target_plans=len(missing_targets),
+               elapsed_seconds=monotonic()-clock,
+               threads_per_solve=1,parallel_workers=min(cores,len(items))))
     return problems
 
 
