@@ -243,6 +243,8 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
             history.append(dict(iteration=it,status='NECESSARY_HASH_CUT'))
     finally:
         m.dispose()
+    if np.isfinite(best) and last_lb>best+1e-4:
+        raise AssertionError('Bilevel dual bound exceeds verified deployable incumbent')
     return dict(lower=float(last_lb),upper=None if not np.isfinite(best) else best,
                 reviewed=None if bestd is None else bestd.tolist(),
                 assignment=None if bestz is None else list(bestz),
