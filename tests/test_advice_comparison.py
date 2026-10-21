@@ -83,3 +83,11 @@ def test_advice_does_not_read_evaluation_realizations(monkeypatch):
     for name in first["arms"]:
         assert first["arms"][name]["displayed"] == second["arms"][name]["displayed"]
         assert first["arms"][name]["assignments"] == second["arms"][name]["assignments"]
+
+
+def test_exact_hash_planner_on_toy():
+    from surgery.advice_comparison import certified
+    c = toy()
+    for seed in (0, 1, 2):
+        z = certified(c, c.booked, seed, 30.)
+        assert evaluate(c, z, c.booked)["cost"] == pytest.approx(730.)
