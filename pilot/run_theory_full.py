@@ -169,7 +169,8 @@ def _score_initializer(state):
     from threadpoolctl import threadpool_limits
     from surgery.theory_cache import connect
     _SCORE_STATE["_thread_limit"]=threadpool_limits(limits=1)
-    _SCORE_STATE["planner_conn"]=connect(state["cache_path"])
+    _SCORE_STATE["planner_conn"]=(
+        connect(state["cache_path"]) if state.get("cache_path") else None)
     _SCORE_STATE["planner_stats"]=dict(hits=0,solves=0)
 
 
@@ -279,6 +280,11 @@ def train_search(args,ctx,method):
     score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
                      pools=ctx['pools'],seconds=args.seconds,
                      cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
+    # Initialize SQLite once before worker startup; all workers then share
+    # the same WAL-enabled table safely under its database locks.
+    from surgery.theory_cache import connect
+    init_cache=connect(score_state['cache_path'])
+    init_cache.close()
     with ProcessPoolExecutor(max_workers=args.cores,
             mp_context=get_context('spawn'),initializer=_score_initializer,
             initargs=(score_state,)) as score_pool:
