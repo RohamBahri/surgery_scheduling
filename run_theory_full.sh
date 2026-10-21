@@ -4,11 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 : "${PYTHON_BIN:=python}"
 : "${WORKBOOK:=data/UHNOperating_RoomScheduling2011-2013.xlsx}"
-: "${OUT:=artifacts/theory_full_v1}"
+: "${OUT:=artifacts/theory_full_v2}"
 : "${CORES:=15}"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-"$PYTHON_BIN" -m pytest -q tests/test_theory_exact.py tests/test_theory_solver.py
+"$PYTHON_BIN" -m pytest -q tests/test_theory_exact.py tests/test_theory_solver.py tests/test_theory_regressions.py
 
 cmd=("$PYTHON_BIN" pilot/run_theory_full.py
   --workbook "$WORKBOOK" --out "$OUT" --fold both
