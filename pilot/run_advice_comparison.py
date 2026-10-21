@@ -206,9 +206,9 @@ def fit_shared(folder, items, data, H, pools, beta, seconds, cores, rounds, seed
             scores = np.zeros((len(candidates), 2))
             failed = np.zeros(len(candidates), int)
             week_B = {j: {} for j in range(len(candidates))}
-            for _, monday, _, values in parallel(shared_job, subset, state, cores):
+            for ck, monday, _, values in parallel(shared_job, subset, state, cores):
                 if values[0] is None:
-                    raise RuntimeError("Uncertified shared-policy reference")
+                    raise RuntimeError(f"Uncertified shared-policy reference: {ck}")
                 for j, value in enumerate(values):
                     if value is None:
                         failed[j] += 1
@@ -246,10 +246,14 @@ def save_components(folder, items, state, cores):
     folder.mkdir(parents=True, exist_ok=True)
     pending = [item for item in items if not (folder / (item[0]+".json")).exists()]
     total = len(pending)
-    for i, (ck, result) in enumerate(parallel(evaluated_job, pending, state, cores)):
-        write(folder / (ck+".json"), result)
-        if (i+1) % 100 == 0:
-            print(f"Evaluation: {i+1}/{total} components", flush=True)
+    try:
+        for i, (ck, result) in enumerate(parallel(evaluated_job, pending, state, cores)):
+            write(folder / (ck+".json"), result)
+            if (i+1) % 100 == 0:
+                print(f"Evaluation: {i+1}/{total} components", flush=True)
+    except Exception as exc:
+        write(folder/"failure.json", dict(error=str(exc), pending_at_start=total))
+        raise
     return [json.loads((folder/(item[0]+".json")).read_text()) for item in items]
 
 
