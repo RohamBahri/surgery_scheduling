@@ -406,16 +406,17 @@ def main():
     if not 1 <= args.cores <= 15 or args.seconds <= 0 or args.budget <= 0:
         parser.error("cores must be 1..15 and time limits positive")
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.final_2013 and args.fold != "both":
+        parser.error("--final-2013 requires both completed development folds")
     _, cohort = read_cohort(args.workbook)
+    if args.final_2013:
+        run_final(args, cohort)
+        return
     all_rows = []
     for fold in ((0, 1) if args.fold == "both" else (int(args.fold),)):
         all_rows.extend(run_fold(args, fold, cohort))
     if args.fold == "both":
         report(all_rows, (0, 1, 2), args.out/"pooled.json")
-    if args.final_2013:
-        if args.fold != "both":
-            parser.error("--final-2013 requires both completed development folds")
-        run_final(args, cohort)
 
 
 if __name__ == "__main__":
