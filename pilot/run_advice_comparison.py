@@ -592,7 +592,8 @@ def run_sensitivity(args, cohort, raw):
                 prev = json.loads(manifest_path.read_text())
             except (OSError, ValueError):
                 continue
-            if any(prev.get(k) != fingerprint.get(k)
+            if any(json.dumps(prev.get(k), sort_keys=True)
+                   != json.dumps(fingerprint.get(k), sort_keys=True)
                    for k in ("workbook", "response_sweep", "cutoff", "seeds", "seconds")):
                 continue
             prev_sources = prev.get("source", {})
