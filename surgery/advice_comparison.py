@@ -275,7 +275,7 @@ def init_worker(state):
     global _STATE
     _STATE = state
     from threadpoolctl import threadpool_limits
-    threadpool_limits(1)
+    _STATE["_thread_limit"] = threadpool_limits(1)
 
 
 def baseline_job(item):
