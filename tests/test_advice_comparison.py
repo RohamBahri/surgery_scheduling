@@ -64,3 +64,22 @@ def test_transition_reachable():
     assert np.isfinite(result).all()
     assert np.all(result >= 76.) and np.all(result <= 124.)
     assert evaluate(c, (0, 0), c.booked)["cost"] > 0.
+
+
+def test_advice_does_not_read_evaluation_realizations(monkeypatch):
+    import surgery.advice_comparison as ac
+    c = toy()
+    monkeypatch.setattr(ac, "certified",
+                        lambda c, d, seed, seconds: (0, 1) if d[0] > 110 else (0, 0))
+    data = dict(X=np.ones((2, 1)), case_w=np.zeros(1),
+                booked=c.booked.copy(), actual=c.actual.copy())
+    pools = {"S1": np.array([["2011-10-03", np.log(100.), 0.]],
+                              dtype=object)}
+    item = ("toy", c, np.array([0, 1]), data, np.zeros((2, 5)),
+            pools, np.zeros(5), np.zeros(5), (0, 1, 2), 1., 1.)
+    first = ac.component_job(item)[1]
+    c.actual[:] = 500.
+    second = ac.component_job(item)[1]
+    for name in first["arms"]:
+        assert first["arms"][name]["displayed"] == second["arms"][name]["displayed"]
+        assert first["arms"][name]["assignments"] == second["arms"][name]["assignments"]
