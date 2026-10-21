@@ -204,7 +204,8 @@ def _vf_component(m, c, base, d0, H, coeff, bank, lam, *, index):
 
 
 def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
-                    coefficient_radius=32., lam=.001, bank_seed=20261020):
+                    coefficient_radius=32., lam=.001, bank_seed=20261020,
+                    restart_dir=None):
     """Single globally bounded MIP/MIQP on ALL training components.
 
     This has 5 coefficient variables and no schedule-library restriction.
@@ -224,6 +225,12 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
     model.Params.MIPGap=0
     model.Params.MIPGapAbs=0
     model.Params.NonConvex=2
+    # Nodefile spill is disk-backed memory management, NOT B&B-tree restart.
+    model.Params.NodefileStart=0.5
+    if restart_dir is not None:
+        from pathlib import Path
+        Path(restart_dir).mkdir(parents=True,exist_ok=True)
+        model.Params.NodefileDir=str(Path(restart_dir).resolve())
     # base/coefficients are exactly the same five-feature representation as STAT.
     coef=model.addVars(5,lb=-float(coefficient_radius),ub=float(coefficient_radius),name="theta")
     objective=gp.QuadExpr(); used_cases=0
@@ -243,7 +250,14 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
         return Certificate(None,None,None,False,'MODEL_BUILD_TIME_LIMIT',
                            time.monotonic()-start)
     model.Params.TimeLimit=remaining
+    # A MIP-start file can restore a previously completed feasible incumbent;
+    # Gurobi cannot reload the entire explored branch-and-bound search tree.
+    if restart_dir is not None:
+        saved=Path(restart_dir)/'vf_incumbent.mst'
+        if saved.exists():model.read(str(saved))
     model.optimize()
+    if restart_dir is not None and model.SolCount:
+        model.write(str(Path(restart_dir)/'vf_incumbent.mst'))
     rec=_safe_certificate(model,start,"shared VF")
     if model.SolCount:
         from surgery.weekly_planner import _assignment
