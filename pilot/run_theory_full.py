@@ -295,6 +295,7 @@ def _eval_component(task):
     d0=reviewed(c.booked,base[rows]);banks=init_bank(c,d0,pools)
     cases={};start=time.monotonic()
     def add(name,d,extra=None):
+        evaluation_start=time.monotonic()
         record=dict(status='COMPLETE',duration=list(np.asarray(d,float)))
         if extra:record.update(extra)
         try:
@@ -323,6 +324,7 @@ def _eval_component(task):
                                               min(record['realized'].values())>1e-5)
             record['changed']=int(np.sum(abs(np.asarray(d)-d0)>1e-7))
         except RuntimeError as exc:record.update(status='UNRESOLVED',error=str(exc))
+        record['evaluation_seconds']=time.monotonic()-evaluation_start
         cases[name]=record
     add('CASE',d0)
     add('BOOKED',c.booked)
@@ -402,7 +404,9 @@ def evaluate_all(args,ctx,models):
     if todo:
         with ProcessPoolExecutor(max_workers=min(args.cores,len(todo)),
                                  mp_context=get_context('spawn')) as pool:
-            for idx,(ck,record) in enumerate(pool.map(_eval_component,todo,chunksize=1)):
+            futures=[pool.submit(_eval_component,job) for job in todo]
+            for idx,future in enumerate(as_completed(futures)):
+                ck,record=future.result()
                 atomic_json(root/(ck+'.json'),record)
                 done[ck]=record
                 if (idx+1)%50==0:print('Saved',idx+1,'/',len(todo),'new complete components',flush=True)
@@ -423,7 +427,9 @@ def evaluate_all(args,ctx,models):
                 mean_realized_cost_per_case=None if len(records)!=len(rows) else
                 sum(np.mean(list(r['methods'][arm]['realized'].values())) for r in records)/sum(r['cases'] for r in records),
                 model_C_per_case=None if len(records)!=len(rows) else
-                sum(r['methods'][arm]['model']['C'] for r in records)/sum(r['cases'] for r in records))
+                sum(r['methods'][arm]['model']['C'] for r in records)/sum(r['cases'] for r in records),
+                 evaluation_wall_hours=sum(float(r['methods'][arm].get('evaluation_seconds',0.))
+                                            for r in records)/3600.)
     hindsight_all=all(r.get('hindsight',{}).get('complete') for r in rows)
     if hindsight_all:
         output['hindsight_cost_per_case']=sum(float(r['hindsight']['cost']) for r in rows)/sum(r['cases'] for r in rows)
@@ -595,5 +601,10 @@ def main():
         summaries.append(summary)
         print(json.dumps(summary,indent=2),flush=True)
     atomic_json(args.out/'summary.json',dict(folds=summaries))
+    if args.fold=='both':
+        from surgery.theory_reporting import pooled_development
+        pooled=pooled_development(args.out)
+        print('Pooled development comparison:',pooled['n_cases'],'cases,',
+              pooled['n_mondays'],'calendar Mondays',flush=True)
 
 if __name__=='__main__':main()
