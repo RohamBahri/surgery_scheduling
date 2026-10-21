@@ -35,7 +35,9 @@ def parallel(fn, items, state, cores):
 
 def case_baseline(folder, data, cores):
     folder.mkdir(parents=True, exist_ok=True)
-    w = get_case(folder, data)
+    from threadpoolctl import threadpool_limits
+    with threadpool_limits(limits=cores):
+        w = get_case(folder, data)
     if not np.isfinite(w).all():
         raise RuntimeError("CASE fit contains nonfinite coefficients")
     data["case_w"] = w
