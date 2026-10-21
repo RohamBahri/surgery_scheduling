@@ -113,7 +113,7 @@ def shared_control(data, H):
     d0 = reviewed(booked, base)
 
     def loss(beta):
-        d = reviewed(booked, base + H @ beta)
+        d = reviewed(booked, d0 - booked + H @ beta)
         error = actual - d
         return (np.maximum(error, 0).sum()*1.75
                 + np.maximum(-error, 0).sum()
@@ -237,55 +237,119 @@ def save_components(folder, items, state, cores):
     return [json.loads((folder/(item[0]+".json")).read_text()) for item in items]
 
 
+
 def report(rows, seeds, filename):
+    """Paired calendar-Monday bootstrap; three hashes form ONE primary estimate."""
     from collections import defaultdict
+    if not rows:
+        raise ValueError("No evaluated components")
     arms = list(rows[0]["arms"])
+    if any(set(row["arms"]) != set(arms) for row in rows):
+        raise ValueError("Unmatched policy arms")
     n = sum(row["cases"] for row in rows)
-    by_monday = defaultdict(lambda: defaultdict(lambda: [0., 0]))
+    by_monday = defaultdict(lambda: defaultdict(float))
+    counts = defaultdict(int)
     for row in rows:
+        counts[row["monday"]] += row["cases"]
         for name, rec in row["arms"].items():
             for seed in seeds:
-                entry = by_monday[row["monday"]][name, seed]
-                entry[0] += rec["realized"][str(seed)]
-                entry[1] += row["cases"]
-    result = dict(n_cases=n, n_components=len(rows),
-                  mondays=len(by_monday), seeds=list(seeds), arms={})
+                by_monday[row["monday"]][name, seed] += rec["realized"][str(seed)]
+    mondays = sorted(counts)
+    den = np.asarray([counts[m] for m in mondays], float)
+    if sum(den) != n:
+        raise AssertionError("Unmatched calendar-week denominators")
     rng = np.random.default_rng(20261020)
-    mondays = sorted(by_monday)
-    boot = rng.integers(len(mondays), size=(5000, len(mondays)))
-    for name in arms:
-        diffs = []
-        for seed in seeds:
-            paired = np.array([[by_monday[m][name,seed][0]-by_monday[m]["CASE",seed][0],
-                                by_monday[m][name,seed][1]] for m in mondays], float)
-            if not np.array_equal(paired[:, 1], [by_monday[m]["CASE",seed][1] for m in mondays]):
-                raise AssertionError("Unmatched cohort or tie rule")
-            b = paired[boot]
-            samples = b[:, :, 0].sum(axis=1)/b[:, :, 1].sum(axis=1)
-            diffs.append(dict(seed=seed, difference=float(paired[:, 0].sum()/n),
-                              ci95=np.quantile(samples, [.025, .975]).tolist()))
-        result["arms"][name] = dict(per_seed=diffs,
-              changed_cases=sum(row["arms"][name]["changed"] for row in rows))
-    # Every stratum uses the same case denominator and identical planner tie rules.
-    result["by_site"] = {}
-    result["by_size"] = {}
-    size_label = lambda n: ("fixed/1" if n == 1 else "2-5" if n <= 5
-                            else "6-10" if n <= 10 else "11-20" if n <= 20
-                            else "21-34" if n <= 34 else "35+")
-    for category, label_fn in (("by_site", lambda row: row["site"]),
-                               ("by_size", lambda row: size_label(row["cases"]))):
-        for label in sorted({label_fn(row) for row in rows}):
-            subset = [row for row in rows if label_fn(row) == label]
-            den = sum(row["cases"] for row in subset)
-            result[category][label] = dict(cases=den, components=len(subset),
-                differences={name: {str(seed): sum(
-                    row["arms"][name]["realized"][str(seed)] -
-                    row["arms"]["CASE"]["realized"][str(seed)]
-                    for row in subset)/den for seed in seeds}
-                    for name in arms})
-    write(filename, result)
-    return result
+    boot = rng.integers(len(mondays), size=(20000, len(mondays)))
+    sampled_den = den[boot].sum(axis=1)
 
+    def contrast(a, b):
+        diff_seeds = np.asarray([
+            [by_monday[m][a, seed] - by_monday[m][b, seed] for m in mondays]
+            for seed in seeds
+        ], float)
+        per_monday = diff_seeds.mean(axis=0)
+        effect = float(per_monday.sum() / n)
+        samples = per_monday[boot].sum(axis=1) / sampled_den
+        # Null-centered cluster bootstrap, two-sided; Holm only for P1/P2.
+        p = float((1 + np.count_nonzero(
+            np.abs(samples - effect) >= abs(effect))) / (len(samples) + 1))
+        return dict(difference=effect,
+                    ci95=np.quantile(samples, [.025, .975]).tolist(),
+                    p_two_sided=p)
+
+    results = dict(n_cases=n, n_components=len(rows), mondays=len(mondays),
+                   seeds=list(seeds), bootstrap_resamples=20000,
+                   arms={}, contrasts={})
+    for name in arms:
+        seed_effects = []
+        for seed in seeds:
+            delta = np.asarray([
+                by_monday[m][name, seed] - by_monday[m]["CASE", seed]
+                for m in mondays
+            ], float)
+            samples = delta[boot].sum(axis=1) / sampled_den
+            seed_effects.append(dict(
+                seed=seed, difference=float(delta.sum() / n),
+                ci95=np.quantile(samples, [.025, .975]).tolist()))
+        results["arms"][name] = dict(
+            per_seed=seed_effects,
+            mean_realized_cost_per_case=float(np.mean([
+                sum(by_monday[m][name, seed] for m in mondays) / n
+                for seed in seeds])),
+            averaged_seeds=contrast(name, "CASE"),
+            changed_cases=sum(row["arms"][name]["changed"] for row in rows),
+            uncertified_fallback_components=sum(
+                str(row["arms"][name].get("status", "")).startswith("UNCERTIFIED")
+                for row in rows))
+
+    pairs = {
+        "PER_WEEK_REF_minus_CASE": ("PER_WEEK_REF", "CASE"),
+        "PER_WEEK_minus_CASE": ("PER_WEEK", "CASE"),
+        "SHARED_minus_CASE": ("SHARED", "CASE"),
+        "ROBUST_minus_PER_WEEK": ("PER_WEEK_ROBUST", "PER_WEEK"),
+        "SHARED_minus_STAT": ("SHARED", "STAT"),
+        "PER_WEEK_minus_SHARED": ("PER_WEEK", "SHARED"),
+        "PER_WEEK_minus_RISK": ("PER_WEEK", "RISK"),
+    }
+    for name, (a, b) in pairs.items():
+        if a in arms and b in arms:
+            results["contrasts"][name] = contrast(a, b)
+    # Predeclared primary comparisons: P1 per-week vs CASE; P2 shared vs CASE.
+    primary = {"P1": "PER_WEEK_minus_CASE", "P2": "SHARED_minus_CASE"}
+    available = sorted(((key, results["contrasts"][val]["p_two_sided"])
+                        for key, val in primary.items()
+                        if val in results["contrasts"]), key=lambda a: a[1])
+    adjusted = 0.
+    for rank, (label, raw_p) in enumerate(available):
+        adjusted = max(adjusted, min(1., raw_p*(len(available)-rank)))
+        results["contrasts"][primary[label]]["holm_p"] = adjusted
+        results["contrasts"][primary[label]]["primary"] = label
+
+    def strata(subset):
+        count = sum(r["cases"] for r in subset)
+        return dict(cases=count, components=len(subset),
+                    averaged_seed_differences={
+                        name: float(np.mean([
+                            sum(row["arms"][name]["realized"][str(seed)] -
+                                row["arms"]["CASE"]["realized"][str(seed)]
+                                for row in subset) / count
+                            for seed in seeds]))
+                        for name in arms})
+    results["by_fold"] = {
+        str(fold): strata([r for r in rows if r.get("fold") == fold])
+        for fold in sorted({r["fold"] for r in rows if "fold" in r})
+    }
+    size_label = lambda x: ("fixed/1" if x == 1 else "2-5" if x <= 5
+                            else "6-10" if x <= 10 else "11-20" if x <= 20
+                            else "21-34" if x <= 34 else "35+")
+    results["by_site"], results["by_size"] = {}, {}
+    for category, label_fn in (("by_site", lambda r: r["site"]),
+                               ("by_size", lambda r: size_label(r["cases"]))):
+        for label in sorted({label_fn(r) for r in rows}):
+            subset = [r for r in rows if label_fn(r) == label]
+            results[category][label] = strata(subset)
+    write(filename, results)
+    return results
 
 def run_fold(args, fold, cohort):
     folder = args.out / f"fold_{fold}"
@@ -319,6 +383,8 @@ def run_fold(args, fold, cohort):
     state = dict(data=held, H=H_eval, pools=pools, beta=beta, theta=theta,
                  seeds=seeds, seconds=args.seconds, budget=args.budget)
     rows = save_components(folder/"components", eval_items, state, args.cores)
+    for row in rows:
+        row["fold"] = fold
     output = report(rows, seeds, folder/"summary.json")
     print(f"Fold {fold}: {output['n_cases']} held-out cases, {output['n_components']} components")
     return rows
