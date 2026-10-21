@@ -481,7 +481,8 @@ def sharp_margin_bound(c, bank, d_center, boxlo, boxhi, *, seconds, seeds=(0,1,2
 
 
 def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
-                     nodes=100, seeds=(0,1,2), lam=.001, restricted=None):
+                     nodes=100, seeds=(0,1,2), lam=.001, restricted=None,
+                     saa_reference=None):
     """Global-bound optimization over ALL casewise reviewed durations.
 
     `restricted` optionally limits target schedules (ANCHORED restricted step).
@@ -498,7 +499,8 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
     deadline=clock+seconds
     def limit():
         return min(solve_seconds,max(0.,deadline-time.monotonic()))
-    saa=saa_mip(c,bank,seconds=max(.001,limit()))
+    saa=(saa_reference if saa_reference is not None else
+         saa_mip(c,bank,seconds=max(.001,limit())))
     global_lb=max(0.,float(saa.lower or 0.))
     if restricted == 'case+saa':
         from surgery.anchored_weekly_solver import solve_week
