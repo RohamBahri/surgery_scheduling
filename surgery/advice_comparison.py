@@ -243,3 +243,55 @@ def component_job(job):
             displayed=display(booked, d).tolist(),
         )
     return ck, dict(site=c.group, monday=c.monday, cases=c.n, arms=report)
+
+# Worker state is installed ONCE per process rather than pickling matrices and
+# residual pools thousands of times for independent Gurobi component solves.
+_STATE = {}
+
+
+def init_worker(state):
+    global _STATE
+    _STATE = state
+    from threadpoolctl import threadpool_limits
+    threadpool_limits(1)
+
+
+def baseline_job(item):
+    ck, c, rows = item
+    state = _STATE
+    data, names = state["data"], state["names"]
+    d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
+    z = certified(c, d0, 0, state["seconds"])
+    return ck, rows, case_features(c, z, d0, data["X"][rows], names)
+
+
+def shared_job(item):
+    """Score candidates on the same training components and scenario banks."""
+    ck, c, rows = item
+    state = _STATE
+    data, H, pools = state["data"], state["H"], state["pools"]
+    d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
+    draws = {name: scenarios(c, d0, pools, 20261020+j)
+             for j, name in enumerate(("A", "B"))}
+    out = []
+    for coeff in state["candidates"]:
+        d = reviewed(c.booked, d0-c.booked + H[rows] @ coeff)
+        try:
+            z = [certified(c, d, r, state["seconds"]) for r in state["seeds"]]
+        except RuntimeError:
+            # An uncertified proposed policy cannot be ranked as an improvement.
+            out.append(None)
+            continue
+        penalty = LAM/2 * np.sum((d - d0)**2)
+        out.append([float(np.mean([cost(c, a, draws[bank])
+                                   for a in z])) + penalty
+                    for bank in ("A", "B")])
+    return ck, c.monday, c.n, out
+
+
+def evaluated_job(item):
+    ck, c, rows = item
+    s = _STATE
+    return component_job((ck, c, rows, s["data"], s["H"], s["pools"],
+                          s["theta"], s["beta"], s["seeds"],
+                          s["seconds"], s["budget"]))
