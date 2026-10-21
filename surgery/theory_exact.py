@@ -237,6 +237,12 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
         details.append((ck,vars_,bank,d0,H[rows]))
         used_cases+=c.n
     model.setObjective(objective/used_cases,GRB.MINIMIZE)
+    remaining=seconds-(time.monotonic()-start)
+    if remaining<=0:
+        model.dispose()
+        return Certificate(None,None,None,False,'MODEL_BUILD_TIME_LIMIT',
+                           time.monotonic()-start)
+    model.Params.TimeLimit=remaining
     model.optimize()
     rec=_safe_certificate(model,start,"shared VF")
     if model.SolCount:
@@ -442,7 +448,7 @@ def regret_bounds(c, bank, d, d0, *, seconds, seeds=(0,1,2), lam=.001):
                 saa=lower.to_json(), seconds=time.monotonic()-start)
 
 
-def sharp_margin_bound(c, bank, d_center, boxlo, boxhi, *, seconds, seeds=(0,1,2)):
+def sharp_margin_bound(c, bank, d_center, boxlo, boxhi, *, seconds, seeds=(0,1,2),deadline=None):
     """Certified fixed deployed schedules throughout a full duration box.
 
     This is intentionally CONSERVATIVE: it never treats a hash tie as stable
@@ -451,18 +457,23 @@ def sharp_margin_bound(c, bank, d_center, boxlo, boxhi, *, seconds, seeds=(0,1,2
     from surgery.anchored_weekly_solver import solve_week
     from surgery.weekly_planner import _objective_tolerance
     eps=KAPPA*np.maximum(np.abs(boxlo-d_center),np.abs(boxhi-d_center)).sum()
+    def limit():
+        return seconds if deadline is None else min(seconds,max(0.,deadline-time.monotonic()))
     plans=[]
     for seed in seeds:
-        ans=solve_week(c,d_center,seconds=seconds,threads=1,tie=True,hash_seed=seed)
+        if limit()<=0:return None
+        ans=solve_week(c,d_center,seconds=limit(),threads=1,tie=True,hash_seed=seed)
         if not ans.complete or ans.assignment is None:return None
         plans.append(tuple(map(int,ans.assignment)))
     if len(set(plans))!=1:
         return None
-    ans=solve_week(c,d_center,seconds=seconds,threads=1,tie=False)
+    if limit()<=0:return None
+    ans=solve_week(c,d_center,seconds=limit(),threads=1,tie=False)
     if not ans.complete or ans.assignment is None:return None
     selected=plans[0]
     if tuple(map(int,ans.assignment))!=selected:return None
-    runner=second_best_primary(c,d_center,selected,seconds=seconds)
+    if limit()<=0:return None
+    runner=second_best_primary(c,d_center,selected,seconds=limit())
     if runner.lower is None:return None
     if runner.lower-ans.value > .1+eps+1e-7:
         return selected
@@ -484,13 +495,20 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
     lo,hi=map(lambda x: np.asarray(x,float),reachable(c.booked,.8,30.))
     base=np.clip(np.asarray(d0,float),lo,hi)
     clock=time.monotonic()
-    saa=saa_mip(c,bank,seconds=solve_seconds)
+    deadline=clock+seconds
+    def limit():
+        return min(solve_seconds,max(0.,deadline-time.monotonic()))
+    saa=saa_mip(c,bank,seconds=max(.001,limit()))
     global_lb=max(0.,float(saa.lower or 0.))
     if restricted == 'case+saa':
         from surgery.anchored_weekly_solver import solve_week
         incumbent=[]
         for seed in seeds:
-            result=solve_week(c,base,seconds=solve_seconds,threads=1,tie=True,hash_seed=seed)
+            if limit()<=0:
+                return dict(lower=global_lb,upper=None,complete=False,
+                            status='TIME_LIMIT',nodes=0,seconds=time.monotonic()-clock,
+                            reviewed=None,assignments=None,saa=saa.to_json())
+            result=solve_week(c,base,seconds=limit(),threads=1,tie=True,hash_seed=seed)
             if not result.complete:
                 return dict(lower=global_lb,upper=None,complete=False,
                             status='UNCERTIFIED_CASE',nodes=0,seconds=time.monotonic()-clock,
@@ -514,7 +532,8 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
         nonlocal best,bestd,bestz
         candidates=[]
         for seed in seeds:
-            r=solve_week(c,d,seconds=solve_seconds,threads=1,tie=True,hash_seed=seed)
+            if limit()<=0:return None
+            r=solve_week(c,d,seconds=limit(),threads=1,tie=True,hash_seed=seed)
             if not r.complete:return None
             candidates.append(tuple(map(int,r.assignment)))
         if target_set is not None and any(z not in target_set[j]
@@ -538,7 +557,8 @@ def exact_box_policy(c, bank, d0, *, seconds=900., solve_seconds=120.,
             # Cannot certify deployment here; node remains unresolved.
             uid+=1;heapq.heappush(queue,(lb,uid,a,b))
             break
-        stable=sharp_margin_bound(c,bank,mid,a,b,seconds=solve_seconds,seeds=seeds)
+        stable=sharp_margin_bound(c,bank,mid,a,b,seconds=solve_seconds,
+                                  seeds=seeds,deadline=deadline)
         if stable is not None:
             if target_set is not None and any(stable not in group for group in target_set):
                 continue  # Certified infeasible for the restricted policy class.
