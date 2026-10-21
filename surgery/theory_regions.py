@@ -188,6 +188,11 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     global-optimality claim is made unless the reported absolute gap closes.
     """
     output=Path(out);output.mkdir(parents=True,exist_ok=True)
+    final_result=output/'result.json'
+    if final_result.exists():
+        # A completed time-budgeted search is a frozen fitted method.
+        # Continuing it silently would invalidate cached evaluation records.
+        return json.loads(final_result.read_text())
     start=time.monotonic();deadline=start+seconds
     checkpoint=output/'search_state.json'
     signature=hashlib.sha256(json.dumps(dict(
