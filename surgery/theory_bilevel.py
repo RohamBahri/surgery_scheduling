@@ -111,6 +111,8 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
     from surgery.weekly_planner import evaluate
     from surgery.advice_comparison import certified
     tic=time.monotonic()
+    def limit():
+        return min(separation_seconds,max(0.,seconds-(time.monotonic()-tic)))
     lo,hi=reachable(c.booked,.8,30.)
     m=gp.Model('exact_deployed_value_function_cuts')
     m.Params.OutputFlag=0
@@ -136,7 +138,7 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
     obj=_scenario_expected_cost(m,c,x,used,byroom,np.asarray(bank,float),'expected')
     obj+=lam/2*gp.quicksum((d[i]-float(d0[i]))**2 for i in range(c.n))
     m.setObjective(obj,GRB.MINIMIZE)
-    baseline=solve_week(c,d0,seconds=separation_seconds,threads=1,
+    baseline=solve_week(c,d0,seconds=max(.001,limit()),threads=1,
                         tie=True,hash_seed=seed)
     if baseline.complete and baseline.assignment is not None:
         bestd=np.asarray(d0,float).copy()
@@ -144,7 +146,7 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
         best=expected_reduced(c,bestz,bank)
     else:
         best=np.inf;bestd=None;bestz=None
-    saa=saa_mip(c,bank,seconds=separation_seconds)
+    saa=saa_mip(c,bank,seconds=max(.001,limit()))
     last_lb=max(0.,float(saa.lower or 0.))
     history=[];fixed_cache={};hash_cache=set()
     try:
@@ -165,7 +167,10 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
             reviewed=np.asarray([v.X for v in d],float)
             proposed=tuple(map(int,_assignment(c,x)))
             witness=tuple(map(int,_assignment(c,y)))
-            follower=solve_week(c,reviewed,seconds=separation_seconds,
+            if limit()<=0:
+                history.append(dict(iteration=it,status='TIME_LIMIT'))
+                break
+            follower=solve_week(c,reviewed,seconds=limit(),
                                 threads=1,tie=False)
             if not follower.complete or follower.assignment is None:
                 history.append(dict(iteration=it,status='PRIMARY_UNCERTIFIED'))
@@ -185,7 +190,10 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
                 fixed_cache[competitor]=fix
                 history.append(dict(iteration=it,status='PRIMARY_CUT'))
                 continue
-            deployed=solve_week(c,reviewed,seconds=separation_seconds,threads=1,
+            if limit()<=0:
+                history.append(dict(iteration=it,status='TIME_LIMIT'))
+                break
+            deployed=solve_week(c,reviewed,seconds=limit(),threads=1,
                                 tie=True,hash_seed=seed)
             if not deployed.complete or deployed.assignment is None:
                 history.append(dict(iteration=it,status='HASH_UNCERTIFIED'))
