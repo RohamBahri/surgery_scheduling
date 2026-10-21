@@ -34,7 +34,7 @@ def parallel(fn, items, state, cores):
         yield from pool.map(fn, items, chunksize=1)
 
 
-def case_baseline(folder, data):
+def case_baseline(folder, data, cores):
     folder.mkdir(parents=True, exist_ok=True)
     w = get_case(folder, data)
     if not np.isfinite(w).all():
@@ -203,7 +203,7 @@ def run_fold(args, fold, cohort):
     if manifest.exists() and json.loads(manifest.read_text()) != fingerprint:
         raise RuntimeError("Experiment specification changed; use a fresh output directory")
     write(manifest, fingerprint)
-    case_baseline(folder, fit)
+    case_baseline(folder, fit, args.cores)
     held["case_w"] = fit["case_w"]
     fit_items = components(trainweeks, fitindex)
     eval_items = components(evalweeks, evalindex)
@@ -223,6 +223,78 @@ def run_fold(args, fold, cohort):
     return rows
 
 
+
+def final_data(workbook):
+    """Refit on all pre-2013 data, freezing the model before opening 2013 outcomes."""
+    from run_weekly_rich import read_cohort
+    from surgery.rich_features import RichCorrectionEncoder
+    from surgery.weekly_data import build_weeks, performed_events
+    from pilot.run_pilot import add_context
+
+    raw, cohort = read_cohort(workbook)
+    train = cohort[cohort.split.eq("train")].reset_index(drop=True)
+    test = cohort[cohort.split.eq("test")].reset_index(drop=True)
+    if len(train) != 24506 or len(test) != 8774:
+        raise AssertionError("2013 evaluation must have 8,774 cases after 24,506 fit cases")
+    events = performed_events(raw)
+    fitweeks = build_weeks(cohort, events[events.date < "2013-01-01"],
+                           split="train", prior_dates=1)
+    evalweeks = build_weeks(cohort, events, split="test", prior_dates=1)
+    fitindex = {int(v): i for i, v in enumerate(train.case_id)}
+    evalindex = {int(v): i for i, v in enumerate(test.case_id)}
+    encoder = RichCorrectionEncoder(history_mode="leave_date_out")
+    X = encoder.fit_transform(train)
+    T = encoder.transform(test)
+    names = list(encoder.names)
+    X, extra, mu, sd = add_context(X, fitweeks, fitindex, variant="cohort")
+    T, _, _, _ = add_context(T, evalweeks, evalindex, variant="cohort", scaler=(mu, sd))
+    names.extend(extra)
+    j = names.index("surgeon_week_booked_minutes")
+    for name in ("hist_surgeon_mean_abs_error", "hist_procedure_mean_abs_error"):
+        if name in names:
+            k = names.index(name)
+            X = np.column_stack([X, X[:, k]*X[:, j]])
+            T = np.column_stack([T, T[:, k]*T[:, j]])
+            names.append(name+"_x_surgeon_week_load")
+    fitted = dict(X=X, booked=train.booked.to_numpy(float),
+                  actual=train.actual.to_numpy(float), case_id=train.case_id.to_numpy(int))
+    held = dict(X=T, booked=test.booked.to_numpy(float),
+                actual=test.actual.to_numpy(float), case_id=test.case_id.to_numpy(int))
+    return fitted, held, fitweeks, evalweeks, fitindex, evalindex, names
+
+
+def run_final(args, cohort):
+    """2013 is never used for fitting, tuning, scenario construction or method choice."""
+    if not (args.out/"pooled.json").exists():
+        raise RuntimeError("Complete both development folds before the frozen 2013 replay")
+    folder = args.out/"final_2013"
+    folder.mkdir(parents=True, exist_ok=True)
+    fit, held, trainweeks, evalweeks, fitindex, evalindex, names = final_data(args.workbook)
+    development_hash = hashlib.sha256((args.out/"pooled.json").read_bytes()).hexdigest()
+    manifest = folder/"freeze.json"
+    frozen = dict(development_sha256=development_hash, cases=8774,
+                  seconds=args.seconds, budget=args.budget, shared_rounds=args.shared_rounds,
+                  code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+    if manifest.exists() and json.loads(manifest.read_text()) != frozen:
+        raise RuntimeError("Final 2013 was already opened with other settings")
+    write(manifest, frozen)
+    case_baseline(folder, fit, args.cores)
+    held["case_w"] = fit["case_w"]
+    fit_items, eval_items = components(trainweeks, fitindex), components(evalweeks, evalindex)
+    H, mu, sd = fit_features(folder, fit_items, fit, names, args.seconds, args.cores)
+    T = test_features(eval_items, held, names, mu, sd, args.seconds, args.cores)
+    fit_frame = cohort[cohort.case_id.isin(fit["case_id"])]
+    pools = residual_history(fit_items, fit, fit_frame)
+    beta = shared_control(fit, H)
+    theta = fit_shared(folder, fit_items, fit, H, pools, beta,
+                       args.seconds, args.cores, args.shared_rounds, (0, 1, 2))
+    state = dict(data=held, H=T, pools=pools, beta=beta, theta=theta,
+                 seeds=(0, 1, 2), seconds=args.seconds, budget=args.budget)
+    rows = save_components(folder/"components", eval_items, state, args.cores)
+    report(rows, (0, 1, 2), folder/"summary.json")
+    print("Frozen 2013 replay:", len(held["booked"]), "cases", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workbook", type=Path, required=True)
@@ -232,6 +304,7 @@ def main():
     parser.add_argument("--budget", type=float, default=900.)
     parser.add_argument("--shared-rounds", type=int, default=2)
     parser.add_argument("--fold", choices=("0", "1", "both"), default="both")
+    parser.add_argument("--final-2013", action="store_true", help="One frozen 2013 replay after both development folds")
     args = parser.parse_args()
     if not 1 <= args.cores <= 15 or args.seconds <= 0 or args.budget <= 0:
         parser.error("cores must be 1..15 and time limits positive")
