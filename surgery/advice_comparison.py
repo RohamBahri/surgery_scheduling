@@ -355,3 +355,68 @@ def evaluated_job(item):
     return component_job((ck, c, rows, s["data"], s["H"], s["pools"],
                           s["theta"], s["beta"], s["seeds"],
                           s["seconds"], s["budget"]))
+
+
+def sensitivity_job(item):
+    """Replan frozen displays under alternative response maps or an observed cutoff.
+
+    Uses no evaluation actual durations before the certified deployment.
+    """
+    import json
+    from pathlib import Path
+    from surgery.planner import response
+
+    ck, c, _ = item
+    state = _STATE
+    original = json.loads((Path(state["components_dir"])/(ck+".json")).read_text())
+    seeds = state["seeds"]
+    outputs = {}
+    proposed = {name: np.asarray(rec["displayed"], float)
+                for name, rec in original["arms"].items()}
+    known = np.asarray([
+        state["decision_dates"].get(int(cid)) is not None
+        and state["decision_dates"][int(cid)] < c.monday
+        for cid in c.case_ids], bool)
+    unknown = sum(state["decision_dates"].get(int(cid)) is None for cid in c.case_ids)
+    configurations = {
+        f"alpha_{a:g}_h_{h:g}": (a, h, None)
+        for a, h in state["response_sweep"]
+    }
+    configurations["cutoff_week_start"] = (.8, 30., known)
+    for label, (alpha, h, mask) in configurations.items():
+        result = {}
+        case_display = proposed["CASE"]
+        case_u = case_display if mask is None else np.where(mask, case_display, case_display)
+        case_d = c.booked + response(case_u, alpha, h)
+        if alpha == .8 and h == 30. and mask is None:
+            case_z = {seed: tuple(original["arms"]["CASE"]["assignments"][str(seed)])
+                      for seed in seeds}
+        else:
+            case_z = {seed: certified(c, case_d, seed, max(600., state["seconds"]))
+                      for seed in seeds}
+        for name, u in proposed.items():
+            mixed_u = u if mask is None else np.where(mask, u, case_display)
+            d = c.booked + response(mixed_u, alpha, h)
+            if np.array_equal(mixed_u, case_u):
+                z, status = case_z, "CASE_REUSE"
+            elif alpha == .8 and h == 30. and mask is None:
+                z = {seed: tuple(original["arms"][name]["assignments"][str(seed)])
+                     for seed in seeds}
+                status = "FROZEN_REUSE"
+            else:
+                try:
+                    z = {seed: certified(c, d, seed, state["seconds"]) for seed in seeds}
+                    status = "CERTIFIED"
+                except RuntimeError as exc:
+                    z, status = case_z, "UNCERTIFIED_FALLBACK: " + str(exc)
+            # An uncertified optional arm must be scored as its *deployed*
+            # CASE fallback, not with the unverified recommendation.
+            final_d = case_d if status.startswith("UNCERTIFIED") else d
+            result[name] = dict(
+                status=status, changed=int(np.sum(abs(final_d-case_d) > 1e-7)),
+                realized={str(seed): evaluate(c, z[seed], c.actual)["cost"]
+                          for seed in seeds})
+        outputs[label] = dict(site=c.group, monday=c.monday, cases=c.n,
+                              arms=result, eligible_at_cutoff=int(known.sum()),
+                              unknown_decision_date=int(unknown))
+    return ck, outputs
