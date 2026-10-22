@@ -69,8 +69,7 @@ def secure_manifest(root,args):
                 shared_seconds=args.shared_seconds,rounds=args.rounds,search_seconds=args.search_seconds,
                 task_seconds=args.task_seconds,round_seconds=args.round_seconds,
                 global_nodes=args.global_nodes,global_seconds=args.global_seconds,
-                eval_component_seconds=args.eval_component_seconds,
-                mechanism_seconds=args.mechanism_seconds,
+                eval_arm_seconds=args.eval_arm_seconds,
                 preprocess_seconds=args.preprocess_seconds,
                 setup_seconds=args.setup_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
@@ -695,7 +694,7 @@ def evaluate_all(args,ctx,models):
                 elif arm=='SAA':done[ck]['saa_reference']=record
                 else:done[ck]['methods'][arm]=record
                 continue
-            jobs.append((ck,c,rows,arm,args.eval_component_seconds))
+            jobs.append((ck,c,rows,arm,args.eval_arm_seconds))
     if jobs:
         with ProcessPoolExecutor(max_workers=min(args.cores,len(jobs)),
                 mp_context=get_context('spawn'),initializer=_eval_initializer,
@@ -978,10 +977,9 @@ def main():
     ap.add_argument('--methods',default='STAT_PLUS,VF,SHARED,EG,OBS,ROBUST')
     ap.add_argument('--global-nodes',type=int,default=40)
     ap.add_argument('--global-seconds',type=float,default=14400.)
-    ap.add_argument('--mechanism-seconds',type=float,default=600.,
-                    help='Final optional per-component sensitivity budget')
-    ap.add_argument('--eval-component-seconds',type=float,default=1500.,
-                    help='Independent per component-METHOD wall budget, never shared')
+    ap.add_argument('--eval-arm-seconds','--eval-component-seconds',
+                    dest='eval_arm_seconds',type=float,default=1500.,
+                    help='Independent wall budget for each test (component, method) task')
     ap.add_argument('--eval-arms',default=(
         'BOOKED,CASE,RISK,STAT,STAT_PLUS,SHARED,VF_SHARED,EG,OBS,ROBUST,'
         'PER_WEEK_ROBUST,QFILL,VF_PW,SAA,HINDSIGHT'),
@@ -996,7 +994,7 @@ def main():
     if not set(args.methods)<=set(['STAT_PLUS','VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
-                                         args.eval_component_seconds,args.preprocess_seconds,args.setup_seconds,args.mechanism_seconds,
+                                         args.eval_arm_seconds,args.preprocess_seconds,args.setup_seconds,
                                          args.stat_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
