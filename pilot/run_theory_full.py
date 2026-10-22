@@ -192,6 +192,7 @@ _SCORE_STATE = None
 def _score_initializer(state):
     global _SCORE_STATE
     _SCORE_STATE=state
+    os.environ['SURGERY_SOLVER_THREADS']='1'
     from threadpoolctl import threadpool_limits
     from surgery.theory_cache import connect
     _SCORE_STATE["_thread_limit"]=threadpool_limits(limits=1)
@@ -879,8 +880,8 @@ def evaluate_all(args,ctx,models):
                 inducibility_gap_upper=max(0.,U-L),
                 statement='Valid conservative interval [0, U_policy - LB_SAA]; '
                           'NOT a point estimate of the optimal inducibility gap. '
-                          'Seed-specific optimization certificate not interchangeable '
-                          'with the three-seed deployment objective.')
+                          'Use bounds only for their declared policy class and seed objective; '
+                          'PW_VFCG now uses the same three-seed average.')
     if 'model_A_upper_per_case' in saa and 'model_A_lower_per_case' in saa:
         output['saa_reference']['scenario_A_optimality_gap_per_case']=(
             saa['model_A_upper_per_case']-saa['model_A_lower_per_case'])
