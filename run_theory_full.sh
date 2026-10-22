@@ -4,8 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 : "${PYTHON_BIN:=python}"
 : "${WORKBOOK:=data/UHNOperating_RoomScheduling2011-2013.xlsx}"
-: "${OUT:=artifacts/theory_single_split_v1}"
+: "${OUT:=artifacts/theory_single_split_paper_v2}"
 : "${CORES:=15}"
+: "${SETUP_SECONDS:=14400}"
+: "${STAT_SECONDS:=1800}"
 : "${SOLVE_SECONDS:=120}"
 : "${TASK_SECONDS:=1500}"
 : "${ROUND_SECONDS:=7200}"
@@ -14,13 +16,14 @@ cd "$(dirname "$0")"
 : "${GLOBAL_SECONDS:=14400}"
 : "${SHARED_SECONDS:=14400}"
 : "${PW_SECONDS:=480}"
-: "${EVAL_COMPONENT_SECONDS:=4200}"
+: "${EVAL_COMPONENT_SECONDS:=1500}"
 : "${MECHANISM_SECONDS:=600}"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
-"$PYTHON_BIN" -m pytest -q tests/test_theory_exact.py tests/test_theory_solver.py tests/test_theory_regressions.py
+"$PYTHON_BIN" -m pytest -q tests/test_theory_exact.py tests/test_theory_solver.py tests/test_theory_regressions.py tests/test_theory_paper.py
 cmd=("$PYTHON_BIN" pilot/run_theory_full.py
   --workbook "$WORKBOOK" --out "$OUT" --fold 2013 --acknowledge-final
-  --methods VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED
+  --methods STAT_PLUS,VF,SHARED,EG,OBS,ROBUST
+  --stat-seconds "$STAT_SECONDS" --setup-seconds "$SETUP_SECONDS"
   --cores "$CORES" --seconds "$SOLVE_SECONDS" --task-seconds "$TASK_SECONDS"
   --round-seconds "$ROUND_SECONDS" --search-seconds "$SEARCH_SECONDS"
   --preprocess-seconds "$PREPROCESS_SECONDS"
