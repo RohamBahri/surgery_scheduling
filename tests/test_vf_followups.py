@@ -57,3 +57,29 @@ def test_historical_heterogeneity_is_not_mislabeled_adoption():
     assert r.RESPONSE_SCENARIOS[-1][0]=="heterogeneous"
     assert r.RESPONSE_SCENARIOS[-1][1:]==(None,None)
     assert 0<r.stable_fraction("surgeon-123")<1
+
+
+def test_solver_backed_response_tie_and_variant_smoke():
+    """Tiny end-to-end gate for the three computational follow-up engines."""
+    pytest.importorskip("gurobipy")
+    from pilot.run_vf_followups import _response_task,tie_bracket,_variant_task
+    c=component()
+    target=np.asarray(c.booked,float)
+    bank=np.array([[145.,235.,250.],[155.,300.,220.],
+                   [170.,210.,255.]],float)
+    rec=_response_task(("synthetic",c,
+          {"STAT":target.tolist(),"VF":target.tolist()},
+          ("nominal",.8,30.),20.))
+    assert rec["method"]["STAT"]["status"]=="COMPLETE"
+    assert rec["method"]["VF"]["status"]=="COMPLETE"
+    assert rec["method"]["VF"]["cost"]==pytest.approx(rec["method"]["STAT"]["cost"])
+    interval=tie_bracket(("synthetic",c,target,bank,25.))
+    assert interval["status"]=="COMPLETE"
+    for k in ("best","worst"):
+        assert interval["entries"][k]["status"] in ("CERTIFIED","FEASIBLE_UNCERTIFIED",
+                                                    "BUDGET_EXHAUSTED","NO_INCUMBENT")
+    if all(v["status"]=="CERTIFIED" for v in interval["entries"].values()):
+        assert interval["entries"]["best"]["cost"]<=interval["entries"]["worst"]["cost"]+1e-6
+    res=_variant_task(("synthetic",c,"congestion_only",np.zeros(5),
+        np.zeros(c.n),np.zeros((c.n,5)),np.arange(c.n),20.))
+    assert res["status"]=="COMPLETE"
