@@ -242,7 +242,11 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
     tasks=[]
     for ck,c,rows in items:
         # One large component's 51 candidates are now spread across workers.
-        shard=1 if c.n>=25 else 3 if c.n>=12 else 6
+        # ROBUST makes four response-model by three hash deployments for
+        # EACH candidate. Keep one candidate per task to avoid serializing
+        # twelve solves for several candidates behind the same hard case.
+        shard=(1 if method=='ROBUST' or c.n>=25
+               else 3 if c.n>=12 else 6)
         for start in range(0,len(coefficients),shard):
             indices=list(range(start,min(start+shard,len(coefficients))))
             path=folder/(ck+f'_shard_{start:04d}.json')
