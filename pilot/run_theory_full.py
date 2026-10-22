@@ -841,8 +841,16 @@ def main():
         ctx=make_context(args,fold,cohort)
         models={'STAT':ctx['beta']}
         failures={}
+        if 'VF' in args.methods:
+            try:
+                vf=train_vf(args,ctx)
+                models['VF_SHARED']=(None if vf.get('reviewed') is None else
+                                    ctx['beta']+np.asarray(vf['reviewed'],float))
+            except RuntimeError as exc:
+                failures['VF']=str(exc);models['VF_SHARED']=None
         if 'SHARED' in args.methods:
-            try:models['SHARED']=train_search(args,ctx,'SHARED')
+            try:models['SHARED']=train_search(
+                    args,ctx,'SHARED',warm_start=models.get('VF_SHARED'))
             except RuntimeError as exc:
                 failures['SHARED']=str(exc);models['SHARED']=None
         if 'SHARED_LEGACY' in args.methods:
@@ -890,16 +898,13 @@ def main():
                 except RuntimeError as exc:
                     failures['ANCHORED_TARGET']=str(exc);models['ANCHORED_TARGET']=None
         for method in args.methods:
-            if method in ('SHARED','SHARED_LEGACY','GLOBAL','ANCHORED'):continue
+            if method in ('SHARED','SHARED_LEGACY','GLOBAL','ANCHORED','VF'):continue
             try:
-                if method=='VF':
-                    rec=train_vf(args,ctx)
-                    models['VF_SHARED']=(None if rec['reviewed'] is None else
-                                         ctx['beta']+np.asarray(rec['reviewed']))
-                else:models[method]=train_search(args,ctx,method)
+                models[method]=train_search(args,ctx,method,
+                                      warm_start=models.get('VF_SHARED'))
             except RuntimeError as exc:
                 failures[method]=str(exc)
-                models['VF_SHARED' if method=='VF' else method]=None
+                models[method]=None
         atomic_json(ctx['root']/'training_failures.json',failures)
         summary=evaluate_all(args,ctx,models)
         summaries.append(summary)
