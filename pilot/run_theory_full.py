@@ -699,23 +699,36 @@ def evaluate_all(args,ctx,models):
         with ProcessPoolExecutor(max_workers=min(args.cores,len(jobs)),
                 mp_context=get_context('spawn'),initializer=_eval_initializer,
                 initargs=(state,)) as pool:
-            futures={pool.submit(_eval_arm_task,job):(job[0],job[3]) for job in jobs}
-            for idx,future in enumerate(as_completed(futures)):
-                ck,arm=futures[future]
-                try:
-                    returned_ck,returned_arm,record=future.result()
-                    if returned_ck!=ck or returned_arm!=arm:
-                        raise AssertionError('Evaluation identity mismatch')
-                except Exception as exc:
-                    import traceback
-                    record=dict(status='INTERNAL_ERROR',error=repr(exc),
-                                traceback=traceback.format_exc())
-                atomic_json(shard_root/(ck+'__'+arm+'.json'),record)
-                if arm=='HINDSIGHT':done[ck]['hindsight']=record
-                elif arm=='SAA':done[ck]['saa_reference']=record
-                else:done[ck]['methods'][arm]=record
-                if (idx+1)%100==0:
-                    print(f'Evaluation arms saved {idx+1}/{len(jobs)}',flush=True)
+            from concurrent.futures import wait,FIRST_COMPLETED
+            backlog=iter(jobs);active={};completed=0
+            def submit_next():
+                try:job=next(backlog)
+                except StopIteration:return False
+                future=pool.submit(_eval_arm_task,job)
+                active[future]=(job[0],job[3])
+                return True
+            for _ in range(min(args.cores,len(jobs))):
+                if not submit_next():break
+            while active:
+                finished,_=wait(active,return_when=FIRST_COMPLETED)
+                for future in finished:
+                    ck,arm=active.pop(future)
+                    try:
+                        returned_ck,returned_arm,record=future.result()
+                        if returned_ck!=ck or returned_arm!=arm:
+                            raise AssertionError('Evaluation identity mismatch')
+                    except Exception as exc:
+                        import traceback
+                        record=dict(status='INTERNAL_ERROR',error=repr(exc),
+                                    traceback=traceback.format_exc())
+                    atomic_json(shard_root/(ck+'__'+arm+'.json'),record)
+                    if arm=='HINDSIGHT':done[ck]['hindsight']=record
+                    elif arm=='SAA':done[ck]['saa_reference']=record
+                    else:done[ck]['methods'][arm]=record
+                    completed+=1
+                    if completed%100==0:
+                        print(f'Evaluation arms saved {completed}/{len(jobs)}',flush=True)
+                    submit_next()
     for ck,_,_ in ctx['eval']:
         record=done[ck]
         record['elapsed']=sum(float(x.get('method_wall_seconds',0.))
