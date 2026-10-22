@@ -47,7 +47,8 @@ def test_frozen_reporting_no_case_outcomes_no_inference(tmp_path,monkeypatch):
     runner.summarize(args)
     summary=json.loads((tmp_path/'selection'/'selection_summary.json').read_text())
     assert summary['status']=='COMPLETE_COMPARISON_WITH_FALLBACK'
-    assert summary['provisional_main_method']=='SHARED_PLUS'
+    assert summary['provisional_main_method'] is None
+    assert summary['selection_reason']=='SHARED_PLUS_NOT_SUFFICIENTLY_EVALUATED'
     assert summary['case_fallback']['SHARED_PLUS']['mean_cost_per_case']==10.
     assert summary['case_fallback']['SHARED_PLUS']['original_assignment_fallback_cases']==1
     assert summary['arms']['CASE']['exact_coverage']==0
