@@ -645,24 +645,64 @@ def _eval_arm_task(task):
 
 
 def evaluate_all(args,ctx,models):
-    root=ctx['root']/'full_evaluation';root.mkdir(exist_ok=True)
-    base=ctx['held']['X']@ctx['held']['case_w']
-    done={};todo=[]
-    for ck,c,rows in ctx['eval']:
-        p=root/(ck+'.json')
-        if p.exists():done[ck]=json.loads(p.read_text());continue
-        todo.append((ck,c,rows,base,ctx['H_eval'],models,ctx['pools'],
-                     args.seconds,args.pw_seconds,args.pw_nodes,args.eval_component_seconds,
-               args.mechanism_seconds))
-    if todo:
-        with ProcessPoolExecutor(max_workers=min(args.cores,len(todo)),
-                                 mp_context=get_context('spawn')) as pool:
-            futures=[pool.submit(_eval_component,job) for job in todo]
+    """One method per component per task, with independent wall limits."""
+    root=ctx['root']/'full_evaluation'
+    root.mkdir(exist_ok=True)
+    shard_root=root/'per_arm';shard_root.mkdir(exist_ok=True)
+    chosen=list(args.eval_arms)
+    admissible=set(('BOOKED','CASE','RISK','STAT','STAT_PLUS','SHARED',
+                    'VF_SHARED','EG','OBS','ROBUST','SHARED_GLOBAL',
+                    'ANCHORED_TARGET','PER_WEEK','PER_WEEK_ROBUST','QFILL',
+                    'VF_PW','PW_VFCG','PW_BOUNDED','PW_ANCHORED','SAA','HINDSIGHT'))
+    if len(chosen)!=len(set(chosen)) or not set(chosen)<=admissible:
+        raise ValueError('Duplicate or unsupported evaluation method')
+    if 'CASE' not in chosen:
+        raise ValueError('CASE must be included for the predeclared fallback')
+    state=dict(base=ctx['held']['X']@ctx['held']['case_w'],
+        H=ctx['H_eval'],pools=ctx['pools'],models=models,
+        seconds=args.seconds,pw_seconds=args.pw_seconds,pw_nodes=args.pw_nodes,
+        cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
+    from surgery.theory_cache import connect
+    connection=connect(state['cache_path']);connection.close()
+    jobs=[];done={}
+    for ck,c,rows in sorted(ctx['eval'],key=lambda item:-item[1].n):
+        done[ck]=dict(site=c.group,monday=c.monday,cases=c.n,methods={},
+                      hindsight={},saa_reference={},mechanism_diagnostics={})
+        for arm in chosen:
+            path=shard_root/(ck+'__'+arm+'.json')
+            if path.exists():
+                record=json.loads(path.read_text())
+                if arm=='HINDSIGHT':done[ck]['hindsight']=record
+                elif arm=='SAA':done[ck]['saa_reference']=record
+                else:done[ck]['methods'][arm]=record
+                continue
+            jobs.append((ck,c,rows,arm,args.eval_component_seconds))
+    if jobs:
+        with ProcessPoolExecutor(max_workers=min(args.cores,len(jobs)),
+                mp_context=get_context('spawn'),initializer=_eval_initializer,
+                initargs=(state,)) as pool:
+            futures={pool.submit(_eval_arm_task,job):(job[0],job[3]) for job in jobs}
             for idx,future in enumerate(as_completed(futures)):
-                ck,record=future.result()
-                atomic_json(root/(ck+'.json'),record)
-                done[ck]=record
-                if (idx+1)%50==0:print('Saved',idx+1,'/',len(todo),'new complete components',flush=True)
+                ck,arm=futures[future]
+                try:
+                    returned_ck,returned_arm,record=future.result()
+                    if returned_ck!=ck or returned_arm!=arm:
+                        raise AssertionError('Evaluation identity mismatch')
+                except Exception as exc:
+                    import traceback
+                    record=dict(status='INTERNAL_ERROR',error=repr(exc),
+                                traceback=traceback.format_exc())
+                atomic_json(shard_root/(ck+'__'+arm+'.json'),record)
+                if arm=='HINDSIGHT':done[ck]['hindsight']=record
+                elif arm=='SAA':done[ck]['saa_reference']=record
+                else:done[ck]['methods'][arm]=record
+                if (idx+1)%100==0:
+                    print(f'Evaluation arms saved {idx+1}/{len(jobs)}',flush=True)
+    for ck,_,_ in ctx['eval']:
+        record=done[ck]
+        record['elapsed']=sum(float(x.get('method_wall_seconds',0.))
+                     for x in record['methods'].values())
+        atomic_json(root/(ck+'.json'),record)
     rows=[done[ck] for ck,_,_ in ctx['eval']]
     arms=sorted({m for row in rows for m in row['methods']})
     output=dict(fold=ctx['root'].name,n_cases=sum(r['cases'] for r in rows),
