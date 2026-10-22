@@ -68,6 +68,8 @@ def secure_manifest(root,args):
                 shared_seconds=args.shared_seconds,rounds=args.rounds,search_seconds=args.search_seconds,
                 task_seconds=args.task_seconds,round_seconds=args.round_seconds,
                 global_nodes=args.global_nodes,global_seconds=args.global_seconds,
+                eval_component_seconds=args.eval_component_seconds,
+                preprocess_seconds=args.preprocess_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
                 scenario_seed=20261020,scenarios=dict(A=50,B=50,C=200),
                 response_grid=SWEEP,hash_seeds=SEEDS,
@@ -750,10 +752,10 @@ def main():
     ap.add_argument('--workbook',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
     ap.add_argument('--cores',type=int,default=15)
-    ap.add_argument('--seconds',type=float,default=120)
-    ap.add_argument('--pw-seconds',type=float,default=900)
+    ap.add_argument('--seconds',type=float,default=90)
+    ap.add_argument('--pw-seconds',type=float,default=480)
     ap.add_argument('--pw-nodes',type=int,default=100)
-    ap.add_argument('--shared-seconds',type=float,default=21600)
+    ap.add_argument('--shared-seconds',type=float,default=14400)
     ap.add_argument('--radius',type=float,default=32.)
     ap.add_argument('--rounds',type=int,default=10)
     ap.add_argument('--search-seconds',type=float,default=21600.,
@@ -768,12 +770,17 @@ def main():
                     help='Explicitly acknowledge that the 2013 test is being opened once')
     ap.add_argument('--methods',default='VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED')
     ap.add_argument('--global-nodes',type=int,default=40)
-    ap.add_argument('--global-seconds',type=float,default=14400.)
+    ap.add_argument('--global-seconds',type=float,default=7200.)
+    ap.add_argument('--eval-component-seconds',type=float,default=4200.,
+                    help='Whole wall budget for one test component, all methods combined')
+    ap.add_argument('--preprocess-seconds',type=float,default=7200.,
+                    help='Whole wall budget for training SAA preprocessing stage')
     args=ap.parse_args()
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
     if not set(args.methods)<=set(['VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
-    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds)<=0:
+    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
+                                         args.eval_component_seconds,args.preprocess_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
         ap.error('Opening the 2013 test requires --acknowledge-final')
@@ -804,7 +811,8 @@ def main():
             try:
                 allproblems=build_problems(ctx['train'],ctx['fit'],ctx['H'],
                        ctx['beta'],ctx['pools'],bounds_root,
-                       seconds=args.seconds,target_restricted=False,cores=args.cores)
+                       seconds=args.seconds,target_restricted=False,cores=args.cores,
+                       stage_seconds=args.preprocess_seconds)
             except RuntimeError as exc:
                 allproblems=None
                 failures['GLOBAL_SAA_BUILD']=str(exc)
@@ -824,7 +832,8 @@ def main():
                 try:
                     targets=build_problems(ctx['train'],ctx['fit'],ctx['H'],
                          ctx['beta'],ctx['pools'],bounds_root,
-                         seconds=args.seconds,target_restricted=True,cores=args.cores)
+                         seconds=args.seconds,target_restricted=True,cores=args.cores,
+                         stage_seconds=args.preprocess_seconds)
                     cert=global_shared_search(targets,ctx['beta'],
                          out=bounds_root/'target',seconds=args.global_seconds,
                          solve_seconds=args.seconds,max_nodes=args.global_nodes,
