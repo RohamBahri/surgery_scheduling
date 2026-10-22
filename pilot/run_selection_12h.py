@@ -159,7 +159,8 @@ def stage(args):
         coeff=full.train_search(cfg,ctx,'SHARED_PLUS',
                               warm_start=get_policy(args,'VF_PLUS'))
         rec=json.loads((ctx['root']/'shared_plus'/'trained.json').read_text())
-        improved=bool(any(x.get('accepted') for x in rec['history']))
+        improved=bool(any(x.get('accepted') for x in rec['history']) or
+                      str(rec.get('warm_start','')).startswith('ACCEPTED'))
         record_policy(args,'SHARED_PLUS',coeff,
             'PAIRED_TRAINING_HEURISTIC' if any(
               x.get('accepted_partial_training_only') for x in rec['history']) else
