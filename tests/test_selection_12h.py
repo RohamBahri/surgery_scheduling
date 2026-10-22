@@ -34,7 +34,7 @@ def test_anchor_sampler_preserves_large_components_and_no_array_comparisons():
 def test_frozen_reporting_no_case_outcomes_no_inference(tmp_path,monkeypatch):
     from pilot import run_selection_12h as runner
     c=SimpleNamespace(group='TGH',monday='2013-02-04',n=1)
-    ctx=dict(eval=[('one',c,np.array([0]))])
+    ctx=dict(root=tmp_path,eval=[('one',c,np.array([0]))])
     ctxfile=tmp_path/'selection'/'context.pkl'
     ctxfile.parent.mkdir(parents=True)
     import pickle
