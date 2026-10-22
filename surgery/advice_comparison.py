@@ -340,10 +340,22 @@ def baseline_job(item):
     data, names = state["data"], state["names"]
     d0 = reviewed(c.booked, data["X"][rows] @ data["case_w"])
     try:
-        z = {r: certified(c, d0, r, max(state["seconds"], 600.)) for r in (0, 1, 2)}
+        z={}
+        for seed in (0,1,2):
+            last_error=None
+            for factor in (1.,2.):
+                try:
+                    z[seed]=certified(c,d0,seed,state["seconds"]*factor)
+                    last_error=None
+                    break
+                except RuntimeError as exc:
+                    last_error=exc
+            if last_error is not None:raise last_error
+        return ck,rows,case_features(c,z,d0,data["X"][rows],names)
     except RuntimeError as exc:
-        raise RuntimeError(f"CASE feature solve failed for {ck}: {exc}") from exc
-    return ck, rows, case_features(c, z, d0, data["X"][rows], names)
+        # Do not crash the process pool. The caller preserves every previously
+        # completed CASE feature and records the missing dependency.
+        return ck,rows,dict(status="UNRESOLVED",error=str(exc))
 
 
 def shared_job(item):
