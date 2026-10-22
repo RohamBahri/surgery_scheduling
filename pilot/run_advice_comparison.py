@@ -177,6 +177,27 @@ def collect_features(items,data,names,seconds,cores,checkpoint,stage_seconds=Non
                 completed_cases=int(seen.sum()),total_cases=n,
                 failures=failures,deadline_exhausted=time.monotonic()>=deadline),
                 sort_keys=True,indent=2))
+    if stage_seconds is None:
+        # Preserve the historical public helper/checkpoint contract. The
+        # paper runner always supplies a finite stage budget and uses the
+        # completion-order scheduler below instead.
+        state=dict(data=data,names=names,seconds=seconds)
+        try:
+            for ck,rows,features in parallel(baseline_job,pending,state,cores):
+                if isinstance(features,dict):
+                    failures[ck]=features.get('error','Uncertified CASE feature')
+                else:
+                    H[rows]=features
+                    seen[rows]=True
+                save()
+        except BaseException:
+            save()
+            raise
+        save()
+        if not seen.all():
+            raise RuntimeError('FEATURE_SETUP_INCOMPLETE: unresolved CASE features')
+        if checkpoint is not None:checkpoint.unlink(missing_ok=True)
+        return H
     if pending:
         workers=min(cores,len(pending))
         state=dict(data=data,names=names,seconds=seconds,threads=1)
