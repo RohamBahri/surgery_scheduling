@@ -1,9 +1,9 @@
-# One bounded VF follow-up campaign
+# Frozen VF follow-up campaign (completed October 2026; reproducibility guide)
 
 Keep the paper-selection VF choice and the 2013 policies frozen. Run from
 the repository root with the original experiment artifacts still present:
 
-    git switch paper-selection-12h
+    git switch main
     git pull --ff-only origin paper-selection-12h
     bash run_vf_followups.sh
 
