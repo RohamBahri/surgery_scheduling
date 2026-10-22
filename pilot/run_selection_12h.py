@@ -343,10 +343,22 @@ def supervise(args):
     root=args.out/'selection';root.mkdir(exist_ok=True)
     marker=root/'run_contract.json'
     source=Path(__file__).resolve()
-    digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    repo=source.parents[1]
+    provenance=[
+        'pilot/run_selection_12h.py','pilot/run_theory_full.py',
+        'pilot/run_advice_comparison.py','surgery/theory_selection.py',
+        'surgery/theory_stat.py','surgery/theory_exact.py',
+        'surgery/anchored_core.py','surgery/anchored_weekly_solver.py',
+        'surgery/weekly_planner.py','surgery/advice_comparison.py',
+        'surgery/theory_cache.py',
+    ]
+    sources={p:hashlib.sha256((repo/p).read_bytes()).hexdigest() for p in provenance}
     payload=dict(workbook_sha256=hashlib.sha256(args.workbook.read_bytes()).hexdigest(),
-                 script_sha256=digest,hash_seed=0,method_arms=list(ARMS),
-                 budgets=list(STAGES),cores=args.cores)
+                 source_sha256=sources,hash_seed=0,method_arms=list(ARMS),
+                 budgets=list(STAGES),cores=args.cores,
+                 training_solver_seconds=args.train_solver_seconds,
+                 evaluation_solver_seconds=args.eval_solver_seconds,
+                 setup_solver_seconds=args.setup_solver_seconds)
     if marker.exists() and json.loads(marker.read_text())!=json.loads(json.dumps(payload)):
         raise RuntimeError('Run specification changed. Use a new --out directory')
     atomic(marker,payload)
