@@ -78,6 +78,7 @@ def _library_one(task):
     unique=list(dict.fromkeys(solutions))
     gA=[float(expected_reduced(c,z,A)) for z in unique]
     gB=[float(expected_reduced(c,z,B)) for z in unique]
+    statuses['LIBRARY']='ENRICHED_ATTEMPTED'
     return ck,dict(schedules=[list(z) for z in unique],g_A=gA,g_B=gB,
                    statuses=statuses,seconds=time.monotonic()-tic,
                    n=c.n,scenario_A_seed=20261020,scenario_B_seed=20261021)
@@ -86,9 +87,12 @@ def _library_one(task):
 def build_library(ctx,out,*,cores=15,seconds=1800.,task_seconds=25.):
     from pilot import run_theory_full as full
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
+    # Guarantee an original-feasible library for EVERY training component
+    # before starting any optional scheduling MILPs.
+    libraries=load_library(ctx,out)
     pending=[(ck,c,rows,min(task_seconds,seconds))
              for ck,c,rows in sorted(ctx['train'],key=lambda x:-x[1].n)
-             if not (out/(ck+'.json')).exists()]
+             if libraries[ck]['statuses'].get('LIBRARY')=='ORIGINAL_ONLY']
     deadline=time.monotonic()+seconds
     if pending:
         state=dict(base=ctx['fit']['X']@ctx['fit']['case_w'],
@@ -120,14 +124,34 @@ def build_library(ctx,out,*,cores=15,seconds=1800.,task_seconds=25.):
 
 
 def load_library(ctx,out):
+    """Ensure every component has a mathematically valid starting library.
+
+    Original-only is not a certified primary or SAA result. It is sufficient
+    to define the restricted objective and is explicitly labeled.
+    """
+    from pilot import run_theory_full as full
+    folder=Path(out);folder.mkdir(parents=True,exist_ok=True)
+    base=ctx['fit']['X']@ctx['fit']['case_w']
     library={}
     for ck,c,rows in ctx['train']:
-        file=Path(out)/(ck+'.json')
+        file=folder/(ck+'.json')
         if file.exists():
             rec=json.loads(file.read_text())
-            if rec.get('n')!=c.n or not rec.get('schedules'):
-                raise AssertionError('Invalid saved schedule library')
-            library[ck]=rec
+        else:
+            d0=full.reviewed(c.booked,base[rows])
+            bankA=full.scenarios(c,d0,ctx['pools'],20261020,count=50)
+            bankB=full.scenarios(c,d0,ctx['pools'],20261021,count=50)
+            z=list(map(int,c.original))
+            rec=dict(n=c.n,schedules=[z],
+                 g_A=[float(expected_reduced(c,z,bankA))],
+                 g_B=[float(expected_reduced(c,z,bankB))],
+                 statuses=dict(ORIGINAL='FEASIBLE',LIBRARY='ORIGINAL_ONLY'),
+                 scenario_A_seed=20261020,scenario_B_seed=20261021,
+                 seconds=0.)
+            _save(file,rec)
+        if rec.get('n')!=c.n or not rec.get('schedules') or len(rec['g_A'])!=len(rec['schedules']):
+            raise AssertionError('Invalid saved schedule library')
+        library[ck]=rec
     return library
 
 
