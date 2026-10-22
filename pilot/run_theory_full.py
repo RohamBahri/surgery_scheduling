@@ -484,6 +484,9 @@ def _eval_component(task):
     deadline=started+component_seconds
     d0=reviewed(c.booked,base[rows])
     banks=init_bank(c,d0,pools)
+    # This rearrangement preserves EVERY empirical duration marginal but
+    # imposes perfect positive rank-dependence across the cases.
+    comonotone=np.sort(np.asarray(banks['C'],float),axis=0)
     cases={}
     def remaining(requested):
         return min(float(requested), max(0.,deadline-time.monotonic()))
@@ -502,6 +505,8 @@ def _eval_component(task):
             rec['model']={label:float(np.mean([
                  expected_reduced(c,z,draws) for z in selected.values()]))
                  for label,draws in banks.items()}
+            rec['model']['C_comonotone']=float(np.mean([
+                 expected_reduced(c,z,comonotone) for z in selected.values()]))
             rec['over720']={str(sd):evaluate(c,z,c.actual)['room_days_over_720']
                             for sd,z in selected.items()}
             rec['max_room_load']={str(sd):evaluate(c,z,c.actual)['max_room_load']
@@ -579,6 +584,8 @@ def _eval_component(task):
                     model={label:expected_reduced(c,z,draws)
                            for label,draws in banks.items()},
                     realized=float(evaluate(c,z,c.actual)['cost']))
+                reference['model']['C_comonotone']=float(
+                    expected_reduced(c,z,comonotone))
                 if saa.lower is not None and saa.lower>reference['model']['A']+1e-4:
                     raise AssertionError('SAA dual exceeds feasible benchmark')
         except (RuntimeError,GurobiError) as exc:
