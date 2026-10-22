@@ -23,10 +23,10 @@ These implement obsolete *research experiments*, not current paper alternatives.
 
 | Family | Entrypoints | Retention reason |
 |---|---|---|
-| Early daily and weekly planning | `run_weekly.py`, `run_weekly_diagnostics.py` | Called by regression tests for scheduling and reproducibility |
+| Early daily and weekly planning | `legacy/weekly/run_weekly.py`, `legacy/weekly/run_weekly_diagnostics.py` | Called by regression tests for scheduling and reproducibility |
 | Weekly feature and case training | `run_weekly_rich.py`, `run_weekly_train.py` | Imported by current research dependencies and tests |
-| Weekly GAP and anchored study | `run_weekly_gap.py`, `run_weekly_anchored.py` | Used by legacy research and regression tests |
-| Anchored diagnostics | `run_anchored_extras.py`, `run_anchored_research_diagnostics.py` | Imported by retained tests |
+| Weekly GAP and anchored study | `legacy/weekly/run_weekly_gap.py`, `legacy/anchored/run_weekly_anchored.py` | Used by legacy research and regression tests |
+| Anchored diagnostics | `legacy/anchored/run_anchored_extras.py`, `legacy/anchored/run_anchored_research_diagnostics.py` | Imported by retained tests |
 | Folded and frozen pilots | `pilot/run_pilot.py`, `pilot/run_fold_pilot.py`, `pilot/run_frozen_validation.py` | Dependencies and earlier experiment audit |
 | Retrospective 2013 pilot | `pilot/run_final_2013.py`, `pilot/audit_final_2013.py` | Earlier experiment and provenance |
 | ASDBS and advice comparison | `pilot/run_asdbs.py`, `pilot/run_advice_comparison.py` | **Imported by the current VF evaluation stack**; keep |
@@ -48,3 +48,12 @@ Remote branches have already been retired, leaving `main`. Verified annotated ta
 - `archive/w2b-weekly-surrogates-2026-10-22`
 
 Local branches may still exist after remote deletion. Inspect `git branch -vv` and use `git branch -d <branch>` only for branches merged into main. Keep any locally divergent branch until its unpublished commits are reviewed.
+
+### Running a historical experiment
+
+Run historical modules from the repository root using `python -m`, for example
+`python -m legacy.weekly.run_weekly --help` or
+`python -m legacy.anchored.run_weekly_anchored --help`. These are archived
+research workflows, not the current VF methodology. The two root
+`run_weekly_rich.py` and `run_weekly_train.py` files remain because the
+current VF dependency chain imports them by those original names.

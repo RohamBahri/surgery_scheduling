@@ -7,7 +7,7 @@ import pytest
 from surgery.weekly_data import Week
 from surgery.weekly_planner import evaluate, solve_week
 from surgery.planner import display_and_duration
-from run_weekly_gap import evaluate_week_gap
+from legacy.weekly.run_weekly_gap import evaluate_week_gap
 from surgery.gap_learning import (
     oracle_week, array_hash, week_key, ScheduleLibrary,
     certify, certified_score, room_cost_and_derivative, train_gap

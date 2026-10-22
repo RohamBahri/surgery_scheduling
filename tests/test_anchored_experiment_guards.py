@@ -81,7 +81,7 @@ def test_hash_sensitivity_scores_frozen_weights_without_retraining(tmp_path, mon
     import json
     import os
     from types import SimpleNamespace
-    import run_weekly_anchored as runner
+    from legacy.anchored import run_weekly_anchored as runner
     count=54
     case_ids=np.arange(1,count+1)
     frames={'validation':dict(

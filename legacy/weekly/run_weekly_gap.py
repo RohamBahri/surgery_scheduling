@@ -35,7 +35,7 @@ def legacy_source_hash():
     """Compute the *original* trainer fingerprint from an audited git commit."""
     h=hashlib.sha256()
     root=Path(__file__).resolve().parent
-    for name in ("run_weekly_gap.py","surgery/gap_learning.py"):
+    for name in ("legacy/weekly/run_weekly_gap.py","surgery/gap_learning.py"):
         raw=subprocess.check_output(
             ["git","show",f"{LEGACY_TRAINER_COMMIT}:{name}"],cwd=root)
         h.update(name.encode())
@@ -136,7 +136,7 @@ def initialize(args):
     init=models[args.initial]["weights" if args.initial=="LASSO" else "w"]
     source_root=Path(__file__).resolve().parent
     trainer_sha=hashlib.sha256()
-    for name in ("run_weekly_gap.py","surgery/gap_learning.py",
+    for name in ("legacy/weekly/run_weekly_gap.py","surgery/gap_learning.py",
                  "surgery/gap_intervals.py"):
         trainer_sha.update(name.encode())
         trainer_sha.update((source_root/name).read_bytes())

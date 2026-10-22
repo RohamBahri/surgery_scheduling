@@ -47,7 +47,7 @@ The code source fingerprint has legitimately changed. Adopt old run metadata
 explicitly (one time only), preserving the completed weeks:
 
 ```bash
-python3.14 run_weekly_gap.py \
+python3.14 -m legacy.weekly.run_weekly_gap \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifacts artifacts/weekly_rich_v2 \
   --output artifacts/weekly_gap_v1 \
@@ -70,7 +70,7 @@ refinement budget only if the full objective intervals overlap:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-caffeinate -i python3.14 run_weekly_gap.py \
+caffeinate -i python3.14 -m legacy.weekly.run_weekly_gap \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifacts artifacts/weekly_rich_v2 \
   --output artifacts/weekly_gap_v1 \

@@ -4,8 +4,8 @@ import pytest
 
 from surgery.rich_features import RichCorrectionEncoder, REMOVED_SERVICE_FEATURES
 from surgery.anchored_master import restricted_value
-from run_anchored_extras import _describe
-from run_anchored_research_diagnostics import audit_features, response_regions
+from legacy.anchored.run_anchored_extras import _describe
+from legacy.anchored.run_anchored_research_diagnostics import audit_features, response_regions
 from test_rich_features import sample
 
 def test_offline_service_columns_absent_and_remaining_effects_auditable():
@@ -66,7 +66,7 @@ def test_full_offline_history_preserves_informative_features_without_lodo_contra
 
 
 def test_boosted_raw_preoperative_features_exclude_all_actual_outcomes():
-    from run_anchored_extras import _raw_preoperative
+    from legacy.anchored.run_anchored_extras import _raw_preoperative
     cases=sample(days=7)
     raw=_raw_preoperative(cases)
     altered=cases.copy()

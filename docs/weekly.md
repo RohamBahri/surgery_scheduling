@@ -188,11 +188,11 @@ are not evidence about rich-feature learning.
   between cases on the same room-day, including unused staffed sessions.
 - Planner minimizes predicted cost, then moved cases, then canonical
   assignment. Load-balance tie-breaking remains an **audit option** in
-  `run_weekly_diagnostics.py`, not part of training.
+  `legacy/weekly/run_weekly_diagnostics.py`, not part of training.
 - Solvers must certify every stage. An incomplete result is labeled
   incomplete, never treated as an optimum.
 
-For the solver-only audit and benchmark use `run_weekly.py` (see
-`python run_weekly.py --help`). The independent overload-diagnostics
+For the solver-only audit and benchmark use `legacy/weekly/run_weekly.py` (see
+`python -m legacy.weekly.run_weekly --help`). The independent overload-diagnostics
 script remains available because implausible realized block loads still
 require investigation.

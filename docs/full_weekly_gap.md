@@ -54,7 +54,7 @@ into a distinct directory; do not overwrite `weekly_rich_v2`.
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-caffeinate -i python3.14 run_weekly_gap.py \
+caffeinate -i python3.14 -m legacy.weekly.run_weekly_gap \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifacts artifacts/weekly_rich_v2 \
   --output artifacts/weekly_gap_v1 \
@@ -90,7 +90,7 @@ regret. The training report prints both values separately.
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-caffeinate -i python3.14 run_weekly_gap.py \
+caffeinate -i python3.14 -m legacy.weekly.run_weekly_gap \
   data/UHNOperating_RoomScheduling2011-2013.xlsx \
   --artifacts artifacts/weekly_rich_v2 \
   --output artifacts/weekly_gap_v1 \

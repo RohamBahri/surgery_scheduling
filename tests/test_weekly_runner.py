@@ -6,7 +6,7 @@ import multiprocessing as mp
 import numpy as np
 import pytest
 
-from run_weekly import _atomic_csv, _retry_rows, benchmark_component
+from legacy.weekly.run_weekly import _atomic_csv, _retry_rows, benchmark_component
 from surgery.weekly_data import Week
 
 

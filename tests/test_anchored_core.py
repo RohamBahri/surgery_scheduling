@@ -453,7 +453,7 @@ def test_certify_anchors_at_final_deployed_policy_on_realized_ties(
     """Regression: certify used BOOKED anchors instead of the final policy."""
     import json
     from types import SimpleNamespace
-    import run_weekly_anchored as runner
+    from legacy.anchored import run_weekly_anchored as runner
     from surgery.anchored_core import key
     c=component()
     index={int(cid):i for i,cid in enumerate(c.case_ids)}
@@ -531,7 +531,7 @@ def test_fresh_experiment_rejects_mismatched_source_without_migration(
         tmp_path,monkeypatch):
     import json
     from types import SimpleNamespace
-    import run_weekly_anchored as runner
+    from legacy.anchored import run_weekly_anchored as runner
     artifacts=tmp_path/'baselines';artifacts.mkdir()
     workbook=tmp_path/'data.xlsx';workbook.write_bytes(b'fixed fake workbook')
     names=['intercept']+[f'feature_{i}' for i in range(73)]

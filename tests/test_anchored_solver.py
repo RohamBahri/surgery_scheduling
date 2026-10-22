@@ -13,7 +13,7 @@ from surgery.weekly_planner import (
 )
 from surgery import anchored_weekly_solver as improved
 from surgery import anchored_oracles as oracles
-import run_weekly_anchored as runner
+from legacy.anchored import run_weekly_anchored as runner
 
 
 def example():

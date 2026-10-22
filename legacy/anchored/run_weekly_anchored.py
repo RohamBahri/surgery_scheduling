@@ -28,7 +28,7 @@ from surgery.anchored_core import key
 from surgery.anchored_master import prepare_components
 from surgery.anchored_oracles import certified_bound
 
-SOURCE_FILES=('run_weekly_anchored.py','surgery/anchored_core.py',
+SOURCE_FILES=('legacy/anchored/run_weekly_anchored.py','surgery/anchored_core.py',
               'surgery/anchored_oracles.py','surgery/anchored_master.py',
               'surgery/anchored_training.py',
               'surgery/anchored_weekly_solver.py')

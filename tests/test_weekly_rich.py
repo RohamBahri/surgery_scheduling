@@ -16,7 +16,7 @@ from surgery.data import GROUPS
 from surgery.rich_features import RichCorrectionEncoder
 from surgery.weekly_data import Week
 from surgery.weekly_planner import evaluate, solve_week
-from run_weekly_diagnostics import audit_component
+from legacy.weekly.run_weekly_diagnostics import audit_component
 
 
 def example():

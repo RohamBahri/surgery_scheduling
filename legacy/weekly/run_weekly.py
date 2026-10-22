@@ -151,7 +151,7 @@ def main():
     sha = hashlib.sha256(args.workbook.read_bytes()).hexdigest()
     source_root = Path(__file__).resolve().parent
     code_hasher = hashlib.sha256()
-    for name in ("run_weekly.py", "surgery/data.py", "surgery/weekly_data.py",
+    for name in ("legacy/weekly/run_weekly.py", "surgery/data.py", "surgery/weekly_data.py",
                  "surgery/weekly_planner.py"):
         code_hasher.update(name.encode())
         code_hasher.update((source_root / name).read_bytes())

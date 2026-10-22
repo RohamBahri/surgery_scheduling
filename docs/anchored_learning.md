@@ -134,7 +134,7 @@ sensitivity under prespecified other hash seeds separately, without choosing
 or refitting a favorable seed. Audit physical room-day loads above 720, 960,
 and 1440 minutes before concluding that the modeled mobility is realistic.
 To inspect the frozen ANCHORED model on training seeds 1--4, use
-`python3.14 run_weekly_anchored.py ... --stage sensitivity --sensitivity-split train`
+`python3.14 -m legacy.anchored.run_weekly_anchored ... --stage sensitivity --sensitivity-split train`
 with the same pinned workbook/artifact/solver flags as the all-site runner.
 Each run writes seed-specific resumable CSVs and a separate summary; no
 training coefficients or acceptance decisions change. Evaluate seed 0 first.
