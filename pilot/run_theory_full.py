@@ -189,8 +189,8 @@ def _score_initializer(state):
 
 def _train_component(task):
     """Bounded coefficient shard. Unfinished scores are missing, not approximate."""
-    if len(task)==7:
-        ck,c,rows,coefficients,round_id,indices,task_seconds=task
+    if len(task)==8:
+        ck,c,rows,coefficients,round_id,indices,task_seconds,parent_deadline=task
         state=_SCORE_STATE
         base,H,method,pools,seconds=(state["base"],state["H"],
                                       state["method"],state["pools"],state["seconds"])
@@ -200,8 +200,11 @@ def _train_component(task):
         ck,c,rows,base,H,_,coefficients,method,pools,seconds,round_id=task
         indices=list(range(len(coefficients)))
         task_seconds=float('inf')
+        parent_deadline=None
         legacy=True
-    started=time.monotonic();deadline=started+task_seconds
+    started=time.monotonic()
+    deadline=min(started+task_seconds,
+                 float('inf') if parent_deadline is None else parent_deadline)
     d0=reviewed(c.booked,base[rows])
     bank=scenarios(c,d0,pools,(20261020 if round_id>=0
                         else 20261021+1009*(-round_id-1)),count=50)
@@ -271,10 +274,11 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
             try:work=next(queue)
             except StopIteration:return False
             ck,c,rows,coeff,ri,ind,limit,path=work
-            future=executor.submit(_train_component,(ck,c,rows,coeff,ri,ind,limit))
+            future=executor.submit(_train_component,(ck,c,rows,coeff,ri,ind,limit,deadline))
             active[future]=(ck,ind,path)
             return True
-        for _ in range(min(2*cores,len(tasks))):
+        # Do not queue a second wave with a fresh subtask allowance.
+        for _ in range(min(cores,len(tasks))):
             if not submit_next():break
         while active:
             finished,_=wait(active,return_when=FIRST_COMPLETED)
