@@ -267,7 +267,9 @@ def _train_component(task):
     seed=(20261020 if round_id>=0 else
           20261021 if (_SCORE_STATE or {}).get('fixed_banks') else
           20261021+1009*(-round_id-1))
-    bank=scenarios(c,d0,pools,seed,count=50)
+    bank=(np.asarray(c.actual,float)[None,:]
+          if (_SCORE_STATE or {}).get('scenario_mode')=='observed'
+          else scenarios(c,d0,pools,seed,count=50))
     results=[]
     for j in indices:
         stats=(_SCORE_STATE or {}).get('planner_stats',{})
