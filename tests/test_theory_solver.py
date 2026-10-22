@@ -107,11 +107,15 @@ def test_bilevel_bounds_versus_full_grid():
     # bound (not an exact continuous optimum).
     best=np.inf
     for d in itertools.product(*[np.linspace(lo[i],hi[i],3) for i in range(c.n)]):
-        sol=solve_week(c,np.asarray(d),seconds=30,tie=True,hash_seed=0)
-        assert sol.complete
-        best=min(best,expected_reduced(c,sol.assignment,draws)
+        deployed=[]
+        for hash_seed in (0,1,2):
+            sol=solve_week(c,np.asarray(d),seconds=30,tie=True,hash_seed=hash_seed)
+            assert sol.complete
+            deployed.append(expected_reduced(c,sol.assignment,draws))
+        best=min(best,float(np.mean(deployed))
                  + .001/2 * np.square(np.asarray(d)-c.booked).sum())
     result=value_function_exact(c,draws,c.booked,seconds=90,separation_seconds=30,cuts=80)
+    assert result['hash_seeds']==[0,1,2],result
     assert result['lower']<=best+1e-4,result
     if result['upper'] is not None:
         assert result['upper']>=result['lower']-1e-4
