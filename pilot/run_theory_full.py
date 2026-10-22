@@ -824,7 +824,7 @@ def main():
                     cert=global_shared_search(allproblems,ctx['beta'],
                          out=bounds_root/'direct',seconds=args.global_seconds,
                          solve_seconds=args.seconds,max_nodes=args.global_nodes,
-                         radius=args.radius,start_theta=prior)
+                         radius=args.radius,start_theta=prior,cores=args.cores)
                     models['SHARED_GLOBAL']=ctx['beta']+np.asarray(cert['theta'])
                 except RuntimeError as exc:
                     failures['SHARED_GLOBAL']=str(exc);models['SHARED_GLOBAL']=None
@@ -837,7 +837,7 @@ def main():
                     cert=global_shared_search(targets,ctx['beta'],
                          out=bounds_root/'target',seconds=args.global_seconds,
                          solve_seconds=args.seconds,max_nodes=args.global_nodes,
-                         radius=args.radius)
+                         radius=args.radius,cores=args.cores)
                     models['ANCHORED_TARGET']=ctx['beta']+np.asarray(cert['theta'])
                 except RuntimeError as exc:
                     failures['ANCHORED_TARGET']=str(exc);models['ANCHORED_TARGET']=None
