@@ -389,7 +389,7 @@ def summarize(args):
         files=[f for f in p.glob("*.json") if f.name not in
                  ("status.json","selection.json","summary.json")]
         output["stages"][stage]=dict(artifact_files=len(files))
-    def paired_from_stage(stage,variants):
+    def paired_from_stage(stage,variants,baseline_arm="STAT"):
         results={}
         for key in variants:
             pairs=[]
@@ -405,7 +405,7 @@ def summarize(args):
                     p=dst/stage/(ck+"__"+key+".json")
                     if not p.exists():continue
                     data=load(p)
-                    baseline=record(ctx,ck,"STAT")
+                    baseline=record(ctx,ck,baseline_arm)
                     if data.get("status")!="COMPLETE" or baseline.get("status")!="COMPLETE":
                         continue
                     diff=float(data["cost"])-float(baseline["realized"]["0"])
@@ -427,6 +427,8 @@ def summarize(args):
         return results
     output["response_sensitivity"]=paired_from_stage("response",[x[0] for x in RESPONSE_SCENARIOS])
     output["vf_variants"]=paired_from_stage("evaluate_variants",list(VARIANTS))
+    output["vf_variants_vs_frozen_VF"]=paired_from_stage(
+        "evaluate_variants",list(VARIANTS),baseline_arm="VF")
     d=dst/"duration"/"summary.json"
     if d.exists():output["duration_heterogeneity"]=load(d)
     diag=dst/"diagnose"
