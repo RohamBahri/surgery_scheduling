@@ -94,10 +94,12 @@ report. Avoid another CPU-intensive workload competing for the 15 cores.
 * Main test arms use separate task budgets and a **90-second** initial
   solver allowance, and share certified identical advice deployments.
   Unresolved tasks remain explicitly unresolved.
-* When an exact deployed recommendation is missing, an **all-case
-  operational fallback** uses CASE if certified; otherwise it uses
-  the workbook's recorded feasible original assignment. The latter
-  is **not** represented as the advice method's exact selected plan.
+* When an exact deployed recommendation is missing, a separate **all-case
+  fallback replay** uses CASE if certified; otherwise it uses the
+  workbook's recorded feasible original assignment. That performed
+  assignment is **retrospective**, not available as an assumed prospective
+  room plan. It is not represented as the advice method's exact
+  selected plan or claimed to be an implementable operational fallback.
 * A high-cost or unfinished solver does not stop subsequent policy
   families. A fatal mathematical inconsistency is logged and never
   converted to a certified plan.
