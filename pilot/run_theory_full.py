@@ -482,240 +482,166 @@ def train_vf(args,ctx):
     return payload
 
 
-def _eval_component(task):
-    """Every method gets a finite budget; timeouts preserve the feasible witness."""
-    ck,c,rows,base,H,models,pools,seconds,pw_seconds,pw_nodes,component_seconds,mechanism_seconds=task
-    from surgery.anchored_weekly_solver import solve_week
+_EVAL_STATE = None
+
+
+def _eval_initializer(state):
+    """One Gurobi thread per independent evaluation worker."""
+    global _EVAL_STATE
+    _EVAL_STATE=state
+    os.environ['SURGERY_SOLVER_THREADS']='1'
+    from threadpoolctl import threadpool_limits
+    from surgery.theory_cache import connect
+    state['_thread_limit']=threadpool_limits(limits=1)
+    state['planner_conn']=connect(state['cache_path'])
+    state['planner_stats']=dict(hits=0,solves=0)
+    global _SCORE_STATE
+    _SCORE_STATE=state
+
+
+def _eval_arm_task(task):
+    """Independent budgeted (component, arm) task; no arm can starve another."""
+    ck,c,rows,arm,budget=task
+    state=_EVAL_STATE
+    tic=time.monotonic();deadline=tic+float(budget)
     from gurobipy import GurobiError
-    started=time.monotonic()
-    deadline=started+component_seconds
+    from surgery.anchored_weekly_solver import solve_week
+    base=state['base'];H=state['H'];pools=state['pools']
+    models=state['models'];seconds=state['seconds']
+    pw_seconds=state['pw_seconds']
     d0=reviewed(c.booked,base[rows])
     banks=init_bank(c,d0,pools)
-    # This rearrangement preserves EVERY empirical duration marginal but
-    # imposes perfect positive rank-dependence across the cases.
-    comonotone=np.sort(np.asarray(banks['C'],float),axis=0)
-    cases={}
-    def remaining(requested):
-        return min(float(requested), max(0.,deadline-time.monotonic()))
-    def require_budget(requested):
-        budget=remaining(requested)
-        if budget<=.1:raise RuntimeError('COMPONENT_WALL_LIMIT')
-        return budget
-    def add(name,d,extra=None):
-        tick=time.monotonic()
-        rec=dict(status='COMPLETE',duration=np.asarray(d,float).tolist())
-        if extra:rec.update(extra)
-        try:
-            selected=deploy(c,d,require_budget(seconds),deadline=deadline)
-            rec['assignments']={str(sd):list(z) for sd,z in selected.items()}
-            rec['realized']={str(sd):evaluate(c,z,c.actual)['cost'] for sd,z in selected.items()}
-            rec['model']={label:float(np.mean([
-                 expected_reduced(c,z,draws) for z in selected.values()]))
-                 for label,draws in banks.items()}
-            rec['model']['C_comonotone']=float(np.mean([
-                 expected_reduced(c,z,comonotone) for z in selected.values()]))
-            rec['over720']={str(sd):evaluate(c,z,c.actual)['room_days_over_720']
-                            for sd,z in selected.items()}
-            rec['max_room_load']={str(sd):evaluate(c,z,c.actual)['max_room_load']
-                                  for sd,z in selected.items()}
-            regimes={};imbalance={}
-            for sd,z in selected.items():
-                load=loads(c,z,d)
-                occupied=np.bincount(np.asarray(z,int),minlength=c.k)>0
-                overload=float(np.maximum(load[occupied]-480.,0.).sum())
-                idle=float(np.maximum(480.-load[occupied],0.).sum())
-                imbalance[str(sd)]=min(overload,idle)
-                regimes[str(sd)]=('LIGHT_UNIFORM' if overload<1e-7 else
-                                  'HEAVY_UNIFORM' if idle<1e-7 else 'MIXED')
-            rec['regime']=regimes
-            rec['planned_imbalance']=imbalance
-            rec['hash_assignment_disagreement']=int(len({tuple(z) for z in selected.values()})>1)
-            rec['hash_cost_disagreement']=int(
-                 max(rec['realized'].values())-min(rec['realized'].values())>1e-5)
-            rec['changed']=int(np.sum(np.abs(np.asarray(d)-d0)>1e-7))
-        except (RuntimeError,GurobiError) as exc:
-            rec.update(status='UNRESOLVED',error=str(exc))
-        rec['evaluation_seconds']=time.monotonic()-tick
-        cases[name]=rec
-    def attempt(name,fun):
-        started_method=time.monotonic()
-        if remaining(.5)<=.1:
-            cases[name]=dict(status='COMPONENT_WALL_LIMIT',
-                             method_wall_seconds=0.)
-            return
-        try:
-            fun()
-        except (RuntimeError,GurobiError) as exc:
-            cases[name]=dict(status='UNRESOLVED',error=str(exc))
-        cases.setdefault(name,dict(status='UNRESOLVED'))
-        cases[name]['method_wall_seconds']=time.monotonic()-started_method
-    # Test outcomes are not read into the training stage. Hindsight is a
-    # reporting-only oracle; do not permit it to influence the advice policy.
+    report=dict(status='UNRESOLVED',arm=arm,budget_seconds=float(budget),
+                solver_threads=1)
+    def left(request):
+        amount=min(float(request),deadline-time.monotonic())
+        if amount<=.1:raise RuntimeError('ARM_WALL_LIMIT')
+        return amount
+    def deployment(duration,preverified=None):
+        t0=time.monotonic()
+        dur=np.asarray(duration,float)
+        z=None
+        if preverified is not None and set(map(int,preverified))==set(SEEDS):
+            # Only caller-provided exact deployments for the SAME duration
+            # are reused, e.g. from the certified PER_WEEK search itself.
+            z={int(k):tuple(map(int,v)) for k,v in preverified.items()}
+        if z is None:
+            z=deploy(c,dur,left(seconds),deadline=deadline)
+        outcome=dict(status='COMPLETE',duration=dur.tolist(),
+               assignments={str(sd):list(zi) for sd,zi in z.items()},
+               realized={str(sd):float(evaluate(c,zi,c.actual)['cost'])
+                         for sd,zi in z.items()},
+               model={name:float(np.mean([expected_reduced(c,zi,draws)
+                                         for zi in z.values()]))
+                      for name,draws in banks.items()})
+        comonotone=np.sort(np.asarray(banks['C'],float),axis=0)
+        outcome['model']['C_comonotone']=float(np.mean(
+              [expected_reduced(c,zi,comonotone) for zi in z.values()]))
+        outcome['over720']={str(sd):int(evaluate(c,zi,c.actual)['room_days_over_720'])
+                            for sd,zi in z.items()}
+        outcome['max_room_load']={str(sd):float(evaluate(c,zi,c.actual)['max_room_load'])
+                                  for sd,zi in z.items()}
+        regimes={};imbalances={}
+        for sd,zi in z.items():
+            load=loads(c,zi,dur)
+            occupied=np.bincount(np.asarray(zi,int),minlength=c.k)>0
+            overflow=float(np.maximum(load[occupied]-480.,0.).sum())
+            idle=float(np.maximum(480.-load[occupied],0.).sum())
+            imbalances[str(sd)]=min(overflow,idle)
+            regimes[str(sd)]=('LIGHT_UNIFORM' if overflow<1e-7 else
+                              'HEAVY_UNIFORM' if idle<1e-7 else 'MIXED')
+        outcome['regime']=regimes
+        outcome['planned_imbalance']=imbalances
+        outcome['hash_assignment_disagreement']=int(
+              len({tuple(v) for v in z.values()})>1)
+        vals=list(outcome['realized'].values())
+        outcome['hash_cost_disagreement']=int(max(vals)-min(vals)>1e-5)
+        outcome['changed']=int(np.sum(np.abs(dur-d0)>1e-7))
+        outcome['verification_seconds']=time.monotonic()-t0
+        return outcome
     try:
-        hist=solve_week(c,c.actual,seconds=require_budget(seconds),
-                        threads=1,tie=False)
-        hindsight=dict(complete=hist.complete,
-              cost=hist.value if hist.complete else None,
-              lower=hist.bound,status=hist.status)
+        if arm=='HINDSIGHT':
+            result=solve_week(c,c.actual,seconds=left(pw_seconds),
+                              threads=1,tie=False)
+            report=dict(complete=bool(result.complete),
+                cost=float(result.value) if result.complete else None,
+                lower=result.bound,status=result.status,
+                budget_seconds=budget,solver_threads=1)
+        elif arm=='SAA':
+            result=saa_mip(c,banks['A'],seconds=left(pw_seconds),threads=1)
+            report=dict(status=result.status,certified=bool(result.complete),
+                lower=result.lower,upper=result.upper,
+                seconds=result.seconds,solver_threads=1,budget_seconds=budget,
+                assignment=None if result.assignment is None else list(result.assignment))
+            if result.assignment is not None:
+                z=tuple(map(int,result.assignment))
+                report['model']={name:float(expected_reduced(c,z,draws))
+                                 for name,draws in banks.items()}
+                report['model']['C_comonotone']=float(
+                      expected_reduced(c,z,np.sort(banks['C'],axis=0)))
+                report['realized']=float(evaluate(c,z,c.actual)['cost'])
+        else:
+            extra={}
+            verified=None
+            if arm=='CASE':d=d0
+            elif arm=='BOOKED':d=np.asarray(c.booked,float)
+            elif arm=='RISK':
+                d=reviewed(c.booked,np.quantile(banks['A'],1.75/2.75,axis=0)-c.booked)
+            elif arm in models:
+                coeff=models[arm]
+                if coeff is None:
+                    raise RuntimeError('TRAINING_UNRESOLVED')
+                d=reviewed_policy(c,rows,H,d0,coeff)
+            elif arm in ('PER_WEEK','PER_WEEK_ROBUST'):
+                seeds=(0,) if arm=='PER_WEEK' else SEEDS
+                d,verified,accepted,status,_=prescription(c,d0,banks,seeds=seeds,
+                       seconds=left(seconds),budget=left(pw_seconds))
+                extra=dict(search_status=status,search_accepted=bool(accepted),
+                           operational_fallback=not bool(accepted))
+            elif arm=='QFILL':
+                baseline=deploy(c,d0,left(seconds),deadline=deadline)
+                cert=vf_fixed_plan_lp(c,baseline[0],banks['A'],
+                       seconds=left(pw_seconds),d0=d0)
+                extra=dict(vf_cert=cert.to_json())
+                if cert.reviewed is None:raise RuntimeError('QFILL_NO_FEASIBLE_ADVICE')
+                d=np.asarray(cert.reviewed,float)
+            elif arm=='VF_PW':
+                cert=vf_per_week_milp(c,banks['A'],seconds=left(pw_seconds),d0=d0,
+                                      threads=1)
+                extra=dict(vf_cert=cert.to_json())
+                if cert.reviewed is None:raise RuntimeError('VF_PW_NO_FEASIBLE_ADVICE')
+                d=np.asarray(cert.reviewed,float)
+            elif arm in ('PW_VFCG','PW_BOUNDED','PW_ANCHORED'):
+                if arm=='PW_VFCG':
+                    ans=value_function_exact(c,banks['A'],d0,
+                        seconds=left(pw_seconds),separation_seconds=min(seconds,left(pw_seconds)),
+                        seeds=SEEDS)
+                else:
+                    ans=exact_box_policy(c,banks['A'],d0,seconds=left(pw_seconds),
+                       solve_seconds=min(seconds,left(pw_seconds)),
+                       nodes=state['pw_nodes'],
+                       restricted='case+saa' if arm=='PW_ANCHORED' else None)
+                extra=dict(global_certificate=ans)
+                if ans['reviewed'] is None:
+                    raise RuntimeError('NO_FEASIBLE_INCUMBENT')
+                d=np.asarray(ans['reviewed'],float)
+                # Exact VFCG output records the SAME hash seeds/durations.
+                if arm=='PW_VFCG' and ans.get('assignments') is not None:
+                    verified={int(k):tuple(v) for k,v in ans['assignments'].items()}
+            else:
+                raise ValueError('Unknown evaluation method '+arm)
+            report=deployment(d,preverified=verified)
+            report.update(extra)
     except (RuntimeError,GurobiError) as exc:
-        hindsight=dict(complete=False,cost=None,lower=None,status=str(exc))
-    for name,d in [('CASE',d0),('BOOKED',c.booked),
-                   ('RISK',reviewed(c.booked,
-                       np.quantile(banks['A'],1.75/2.75,axis=0)-c.booked))]:
-        add(name,d)
-    for name,coeff in models.items():
-        if coeff is None:
-            cases[name]=dict(status='TRAINING_UNRESOLVED')
-        else:
-            attempt(name,lambda name=name,coeff=coeff:
-                    add(name,reviewed_policy(c,rows,H,d0,coeff)))
-    for name,seeds in (('PER_WEEK',(0,)),('PER_WEEK_ROBUST',SEEDS)):
-        def run_pw(name=name,seeds=seeds):
-            duration,_,accepted,status,_=prescription(
-                c,d0,banks,seeds=seeds,seconds=require_budget(seconds),
-                budget=require_budget(pw_seconds))
-            add(name,duration,dict(search_status=status,
-                                   search_accepted=bool(accepted)))
-        attempt(name,run_pw)
-
-    # Nondeployable unrestricted stochastic-planning benchmark. The same
-    # feasible SAA schedule is evaluated separately on Banks B/C and history.
-    saa=None
-    reference=dict(status='UNRESOLVED',certified=False,lower=None,
-                   upper=None,seconds=0.,assignment=None)
-    if remaining(pw_seconds)>.1:
-        try:
-            saa=saa_mip(c,banks['A'],seconds=require_budget(pw_seconds))
-            reference=dict(status=saa.status,certified=bool(saa.complete),
-                       lower=saa.lower,upper=saa.upper,seconds=saa.seconds,
-                       assignment=None if saa.assignment is None else list(saa.assignment))
-            if saa.assignment is not None:
-                z=tuple(map(int,saa.assignment))
-                reference.update(
-                    model={label:expected_reduced(c,z,draws)
-                           for label,draws in banks.items()},
-                    realized=float(evaluate(c,z,c.actual)['cost']))
-                reference['model']['C_comonotone']=float(
-                    expected_reduced(c,z,comonotone))
-                if saa.lower is not None and saa.lower>reference['model']['A']+1e-4:
-                    raise AssertionError('SAA dual exceeds feasible benchmark')
-        except (RuntimeError,GurobiError) as exc:
-            reference['status']='UNRESOLVED: '+str(exc)
-    else:
-        reference['status']='COMPONENT_WALL_LIMIT'
-    if saa is not None and saa.lower is not None:
-        for name,rec in cases.items():
-            if rec.get('status')=='COMPLETE' and rec['model']['A']<saa.lower-1e-4:
-                raise AssertionError(f'{name} scenario score violates SAA lower bound')
-
-    if cases.get('CASE',{}).get('status')=='COMPLETE':
-        def qfill():
-            z=cases['CASE']['assignments']['0']
-            cert=vf_fixed_plan_lp(c,z,banks['A'],seconds=require_budget(pw_seconds),d0=d0)
-            if cert.reviewed is None:
-                cases['QFILL']=dict(status='UNRESOLVED',vf_cert=cert.to_json())
-            else:
-                add('QFILL',cert.reviewed,dict(vf_cert=cert.to_json()))
-        attempt('QFILL',qfill)
-    else:
-        cases['QFILL']=dict(status='DEPENDENCY_UNRESOLVED')
-    def vf_case():
-        cert=vf_per_week_milp(c,banks['A'],seconds=require_budget(pw_seconds),d0=d0)
-        if cert.reviewed is None:
-            cases['VF_PW']=dict(status='UNRESOLVED',vf_cert=cert.to_json())
-        else:add('VF_PW',cert.reviewed,dict(vf_cert=cert.to_json()))
-    attempt('VF_PW',vf_case)
-    for name,restricted in (('PW_BOUNDED',None),('PW_ANCHORED','case+saa')):
-        def bounded(name=name,restricted=restricted):
-            ans=exact_box_policy(c,banks['A'],d0,
-                 seconds=require_budget(pw_seconds),
-                 solve_seconds=min(seconds,remaining(pw_seconds)),
-                 nodes=pw_nodes,restricted=restricted,saa_reference=saa)
-            if ans['reviewed'] is None:
-                cases[name]=dict(status='UNRESOLVED',global_certificate=ans)
-            else:
-                add(name,ans['reviewed'],dict(global_certificate=ans))
-        attempt(name,bounded)
-    def vfcg():
-        ans=value_function_exact(c,banks['A'],d0,
-                  seconds=require_budget(pw_seconds),
-                  separation_seconds=min(seconds,remaining(pw_seconds)),
-                  seeds=SEEDS,saa_reference=saa)
-        if ans['reviewed'] is None:
-            cases['PW_VFCG']=dict(status='UNRESOLVED',global_certificate=ans)
-        else:
-            add('PW_VFCG',ans['reviewed'],dict(global_certificate=ans,
-                 optimization_hash_seeds=list(SEEDS)))
-    attempt('PW_VFCG',vfcg)
-    # Mechanism-only post hoc evaluations: same learned advice, but either
-    # alternative near-tie selection or a different response realization.
-    # No re-fitting or changes to the main deployed-policy scores.
-    mechanism_start=time.monotonic()
-    mechanism_deadline=min(deadline,mechanism_start+mechanism_seconds)
-    mechanisms={}
-    core=('CASE','STAT','SHARED','OBS','EG','ROBUST','VF_SHARED')
-    from surgery.planner import response as surgeon_response
-    from surgery.weekly_planner import solve_week as balanced_planner
-    for name in core:
-        rec=cases.get(name,{})
-        if rec.get('status')!='COMPLETE':continue
-        reviewed_duration=np.asarray(rec['duration'],float)
-        analysis=dict()
-        budget=min(seconds,mechanism_deadline-time.monotonic())
-        if budget>.1:
-            try:
-                chosen=balanced_planner(c,reviewed_duration,seconds=budget,
-                      threads=1,tie=True,balance=True)
-                if chosen.complete and chosen.assignment is not None:
-                    analysis['balanced_tie']=dict(status='COMPLETE',
-                      realized=evaluate(c,chosen.assignment,c.actual)['cost'],
-                      model_C=expected_reduced(c,chosen.assignment,banks['C']),
-                      max_realized_room_load=evaluate(
-                          c,chosen.assignment,c.actual)['max_room_load'])
-                else:
-                    analysis['balanced_tie']=dict(status='UNRESOLVED',
-                                                  solver_status=chosen.status)
-            except (RuntimeError,GurobiError) as exc:
-                analysis['balanced_tie']=dict(status='UNRESOLVED',error=str(exc))
-        else:analysis['balanced_tie']=dict(status='MECHANISM_WALL_LIMIT')
-        changes={}
-        try:
-            displayed=display(c.booked,reviewed_duration)
-        except ValueError:
-            analysis['response_sweep']=dict(status='INVALID_NOMINAL_INVERSION')
-        else:
-            for alpha,h in SWEEP[1:]:
-                setting=f'{alpha:g}_{h:g}'
-                test_duration=np.maximum(1.,c.booked+surgeon_response(displayed,alpha,h))
-                if np.allclose(test_duration,reviewed_duration,rtol=0,atol=1e-9):
-                    selected={int(k):tuple(z) for k,z in rec['assignments'].items()}
-                    status='REUSED_NOMINAL'
-                else:
-                    selected={}
-                    status='COMPLETE'
-                    for sd in SEEDS:
-                        budget=min(seconds,mechanism_deadline-time.monotonic())
-                        if budget<=.1:
-                            status='MECHANISM_WALL_LIMIT';break
-                        try:selected[sd]=certified(c,test_duration,sd,budget)
-                        except (RuntimeError,GurobiError) as exc:
-                            status='UNRESOLVED: '+str(exc);break
-                if status in ('COMPLETE','REUSED_NOMINAL'):
-                    changes[setting]=dict(status=status,
-                       cost_model_C=float(np.mean([
-                          expected_reduced(c,z,banks['C']) for z in selected.values()])),
-                       cost_realized=float(np.mean([
-                          evaluate(c,z,c.actual)['cost'] for z in selected.values()])))
-                else:changes[setting]=dict(status=status)
-            analysis['response_sweep']=changes
-        mechanisms[name]=analysis
-
-    return ck,dict(site=c.group,monday=c.monday,cases=c.n,
-                   methods=cases,mechanism_diagnostics=mechanisms,
-                   hindsight=hindsight,saa_reference=reference,
-                   component_wall_seconds=float(component_seconds),
-                   component_wall_limit_hit=bool(remaining(0.2)<=.1),
-                   elapsed=time.monotonic()-started)
+        report.update(status='UNRESOLVED',error=str(exc))
+    except Exception as exc:
+        # Unexpected code/mathematics errors must not kill other tasks; the
+        # final audit is invalid until every INTERNAL_ERROR is investigated.
+        import traceback
+        report.update(status='INTERNAL_ERROR',error=repr(exc),
+                      traceback=traceback.format_exc())
+    report['method_wall_seconds']=time.monotonic()-tic
+    return ck,arm,report
 
 
 def evaluate_all(args,ctx,models):
