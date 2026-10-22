@@ -236,6 +236,10 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
     objective=gp.QuadExpr(); used_cases=0
     details=[]
     for t,(ck,c,rows) in enumerate(items):
+        if time.monotonic()-start>=seconds:
+            model.dispose()
+            return Certificate(None,None,None,False,"VF_MODEL_BUILD_WALL_LIMIT",
+                               time.monotonic()-start)
         d0=reviewed(c.booked,data["X"][rows]@data["case_w"])
         bank=scenarios(c,d0,pools,bank_seed,count=50)
         off=d0+H[rows]@np.asarray(beta,float)
@@ -349,12 +353,16 @@ def expected_gap_mip(c,d,bank,*,seconds,threads=1,gamma=1.):
     from surgery.anchored_weekly_solver import solve_week
     from surgery.weekly_planner import _objective_tolerance
     start=time.monotonic()
-    ans=solve_week(c,d,seconds=seconds,threads=threads,tie=False)
+    ans=solve_week(c,d,seconds=max(.001,seconds),threads=threads,tie=False)
     if not ans.complete or ans.value is None:
         return Certificate(None,None,None,False,"PRIMARY_UNCERTIFIED",time.monotonic()-start)
     q=ans.value - CAP*c.k + float(np.sum(d))+TURN*c.n
     eps=_objective_tolerance(ans.value)
-    m,x,used,byroom=_setup(c,seconds,threads,"expected_gap")
+    left=float(seconds)-(time.monotonic()-start)
+    if left<=.1:
+        return Certificate(None,None,None,False,"EG_WALL_LIMIT_AFTER_PRIMARY",
+                           time.monotonic()-start)
+    m,x,used,byroom=_setup(c,left,threads,"expected_gap")
     zero=m.addVar(lb=0,ub=0,name="zero")
     def exact_overtime(a,prefix):
         ot=[]
@@ -373,6 +381,14 @@ def expected_gap_mip(c,d,bank,*,seconds,threads=1,gamma=1.):
     excess=m.addVar(lb=0,name="outside_tie_penalty")
     m.addConstr(excess>=pred-q-eps)
     m.setObjective(g-float(gamma)*excess,GRB.MAXIMIZE)
+    # Use remaining wall budget after model construction, not another full
+    # time allowance following the primary planner solve.
+    left=float(seconds)-(time.monotonic()-start)
+    if left<=.1:
+        m.dispose()
+        return Certificate(None,None,None,False,"EG_MODEL_BUILD_WALL_LIMIT",
+                           time.monotonic()-start)
+    m.Params.TimeLimit=left
     m.optimize()
     # Maximization has the reverse dual direction.
     status=str(m.Status); has=m.SolCount>0
