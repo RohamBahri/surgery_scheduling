@@ -58,8 +58,11 @@ def test_objective_library_matches_independent_EG_and_target_formula(monkeypatch
         assert sol.complete
         Q=sol.value-480*c.k+d.sum()+30*c.n
         eps=_objective_tolerance(sol.value)
-        expected_eg=Q+max(gz-max(fz-Q-eps,0.)
-                         for gz,fz in zip(g,phi))
+        primary=tuple(map(int,sol.assignment))
+        expected_eg=max(
+            [gz-max(fz-Q-eps,0.) for gz,fz in zip(g,phi)]+
+            [expected_reduced(c,primary,draws)-
+             max(reduced(c,primary,d)-Q-eps,0.)])
         got_eg=runner.scores(c,d,d0,draws,'EG_LIB',30.,seed=20261020)
         assert got_eg==pytest.approx(expected_eg,abs=1e-5)
         assert got_eg<=runner.scores(c,d,d0,draws,'EG_LIB',30.,
@@ -80,11 +83,11 @@ def test_restricted_eg_is_lower_than_exact_eg_on_same_bank():
     Q=sol.value-480*c.k+d.sum()+30*c.n
     eps=_objective_tolerance(sol.value)
     subset=([0,1,0],[1,0,1])
-    restricted=Q+max(expected_reduced(c,z,draws)-
-                     max(reduced(c,z,d)-Q-eps,0.) for z in subset)
+    restricted=max(expected_reduced(c,z,draws)-
+                   max(reduced(c,z,d)-Q-eps,0.) for z in subset)
     oracle=expected_gap_mip(c,d,draws,seconds=20)
     assert oracle.complete
-    assert restricted<=Q+oracle.value+1e-5
+    assert restricted<=oracle.value+1e-5
 
 
 def test_library_sampling_unique_and_full_training_preserved():
@@ -112,3 +115,51 @@ def test_recorded_room_fallback_cannot_be_called_exact_deployment(tmp_path):
     output=tmp_path/run.ROOT_NAME
     run.save(output/'run_status.json',dict(report=dict(status='PARTIAL')))
     assert json.loads((output/'run_status.json').read_text())['report']['status']=='PARTIAL'
+
+
+
+def test_current_primary_schedule_enters_EG_even_if_not_in_library():
+    from pilot import run_theory_full as runner
+    from surgery.theory_exact import reduced,expected_reduced
+    from surgery.anchored_weekly_solver import solve_week
+    from surgery.weekly_planner import _objective_tolerance
+    c,draws=sample()
+    d=c.booked.astype(float)
+    sol=solve_week(c,d,seconds=20,threads=1,tie=False)
+    assert sol.complete and sol.assignment is not None
+    primary=tuple(map(int,sol.assignment))
+    other=next((z for z in ((0,1,0),(1,0,1)) if z!=primary),None)
+    assert other is not None
+    library=dict(schedules=[list(other)],
+                 g_A=[expected_reduced(c,other,draws)],
+                 g_B=[expected_reduced(c,other,draws)])
+    runner._SCORE_STATE=dict(libraries={runner.key(c):library})
+    try:
+        got=runner.scores(c,d,d,draws,'EG_LIB',30.,seed=20261020)
+    finally:
+        runner._SCORE_STATE=None
+    Q=sol.value-480*c.k+d.sum()+30*c.n
+    eps=_objective_tolerance(sol.value)
+    expected=max(expected_reduced(c,z,draws)-
+                 max(reduced(c,z,d)-Q-eps,0.) for z in (other,primary))
+    assert got==pytest.approx(expected,abs=1e-5)
+    assert got>=expected_reduced(c,primary,draws)-1e-4
+
+
+def test_exact_EG_certificate_does_not_add_primary_value(monkeypatch):
+    from pilot import run_objective_selection as run
+    import surgery.theory_exact as ex
+    c,draws=sample()
+    monkeypatch.setattr(ex,'expected_gap_mip',lambda *a,**k:
+         SimpleNamespace(lower=7.,upper=11.,complete=False,status='TIME_LIMIT'))
+    out=run._eg_certificate_one((c,c.booked.astype(float),
+                                 c.booked.astype(float),draws,'STAT',20.))
+    assert out['lower']==pytest.approx(7.)
+    assert out['upper']==pytest.approx(11.)
+    assert not out['globally_closed']
+
+
+def test_certificate_and_test_budgets():
+    from pilot import run_objective_selection as run
+    assert dict(run.STAGES)['certificates']>=4*1200
+    assert sum(s for _,s in run.STAGES)<11.5*3600
