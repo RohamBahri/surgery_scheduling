@@ -446,6 +446,61 @@ def summarize(args):
             matched_cases=int(a[:,0].sum()),delta_upper_per_case=float(a[:,1].sum()/a[:,0].sum()),
             delta_dependence_per_case=float(a[:,2].sum()/a[:,0].sum()),
             delta_split_per_case=float(a[:,3].sum()/a[:,0].sum()))
+    # Tie-bracket widths and completeness are reported independently
+    # of the full-cohort policy comparison.
+    brackets={}
+    for p in (dst/"tie").glob("*.json"):
+        if p.name=="selection.json":continue
+        rec=load(p)
+        if not isinstance(rec.get("entries"),dict):continue
+        short=p.stem.rsplit("__",1)
+        if len(short)!=2:continue
+        arm=short[1]
+        q=brackets.setdefault(arm,dict(attempted=0,certified=0,
+                                       spread_sum=0.,cases_certified=0))
+        q["attempted"]+=1
+        lo=rec["entries"].get("best",{})
+        hi=rec["entries"].get("worst",{})
+        if lo.get("status")=="CERTIFIED" and hi.get("status")=="CERTIFIED":
+            q["certified"]+=1
+            q["spread_sum"]+=float(hi["cost"])-float(lo["cost"])
+            q["cases_certified"]+=rec["n"]
+    for q in brackets.values():
+        q["mean_bracket_per_case"]=(q["spread_sum"]/q["cases_certified"]
+                                   if q["cases_certified"] else None)
+        del q["spread_sum"]
+    output["tie_bracket_sample"]=brackets
+    output["tie_bracket_caveat"]="Selected 25-scenario component subset, not full-cohort primary-optimal interval"
+    # Read per-site response results on the same completed components.
+    by_site={}
+    for name,_,_ in RESPONSE_SCENARIOS:
+        for site in SITES.values():
+            rows=[]
+            for ck,c,_ in ctx["eval"]:
+                if c.group!=site:continue
+                p=dst/"response"/(ck+"__"+name+".json")
+                if not p.exists():continue
+                r=load(p).get("method",{})
+                if any(r.get(k,{}).get("status")!="COMPLETE" for k in ("VF","STAT")):continue
+                rows.append((c.n,r["VF"]["cost"]-r["STAT"]["cost"]))
+            n=sum(x for x,_ in rows)
+            by_site[name+"__"+site]=dict(coverage_cases=n,
+                paired_change_per_case=(sum(v for _,v in rows)/n if n else None))
+    output["response_by_site"]=by_site
+    # Recovery-check the nominal-response replay against the frozen exact
+    # original policy results; a mismatch invalidates response sensitivity.
+    diffs=[]
+    for ck,c,_ in ctx["eval"]:
+        p=dst/"response"/(ck+"__nominal.json")
+        if not p.exists():continue
+        r=load(p).get("method",{})
+        for k in ("VF","STAT"):
+            base=record(ctx,ck,k)
+            if r.get(k,{}).get("status")=="COMPLETE" and base.get("status")=="COMPLETE":
+                diffs.append(abs(float(r[k]["cost"])-float(base["realized"]["0"])))
+    output["nominal_replay"]=dict(compared_arm_components=len(diffs),
+        max_cost_discrepancy=max(diffs) if diffs else None,
+        verified_exact=bool(diffs and max(diffs)<=1e-6))
     save(dst/"summary.json",output)
     print(json.dumps(output,indent=2))
 
@@ -522,7 +577,7 @@ def supervisor(args):
     begun=time.monotonic()
     status=load(dst/"run_status.json") if (dst/"run_status.json").exists() else {}
     for name,budget in STAGES:
-        if status.get(name,{}).get("status")=="COMPLETE" and stage_completeness(name,args):
+        if name!="report" and status.get(name,{}).get("status")=="COMPLETE" and stage_completeness(name,args):
             continue
         remaining=11.5*3600-(time.monotonic()-begun)
         if remaining<30:break
