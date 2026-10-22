@@ -72,6 +72,7 @@ def secure_manifest(root,args):
                 eval_component_seconds=args.eval_component_seconds,
                 mechanism_seconds=args.mechanism_seconds,
                 preprocess_seconds=args.preprocess_seconds,
+                setup_seconds=args.setup_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
                 pw_nodes=args.pw_nodes,stat_seconds=args.stat_seconds,
                 eval_arms=args.eval_arms,
@@ -88,6 +89,11 @@ def secure_manifest(root,args):
 def make_context(args,fold,cohort):
     root=args.out/'single_split_2013'
     root.mkdir(parents=True,exist_ok=True)
+    setup_start=time.monotonic()
+    def setup_left():
+        remaining=args.setup_seconds-(time.monotonic()-setup_start)
+        if remaining<=.1:raise RuntimeError('SETUP_WALL_LIMIT: checkpoints retained')
+        return remaining
     if fold=='2013':
         fit,held,tw,ew,tidx,eidx,names=final_data(args.workbook)
     else:
@@ -97,6 +103,7 @@ def make_context(args,fold,cohort):
             raise AssertionError('Unexpected training/test cohort for 2013')
     elif len(fit['booked'])+len(held['booked'])!=24506:
         raise AssertionError('The full 24,506-case development cohort is required')
+    setup_left()
     case_baseline(root,fit,args.cores)
     held['case_w']=fit['case_w']
     titems,eitems=components(tw,tidx),components(ew,eidx)
@@ -106,11 +113,15 @@ def make_context(args,fold,cohort):
             raise AssertionError(f'{label} cases were dropped or duplicated')
     assert_partition(titems,len(fit['booked']),'Fit')
     assert_partition(eitems,len(held['booked']),'Evaluation')
-    H,mu,sd=fit_features(root,titems,fit,names,args.seconds,args.cores)
-    H_eval=test_features(eitems,held,names,mu,sd,args.seconds,args.cores,folder=root)
+    H,mu,sd=fit_features(root,titems,fit,names,args.seconds,args.cores,
+                         stage_seconds=setup_left())
+    H_eval=test_features(eitems,held,names,mu,sd,args.seconds,args.cores,
+                         folder=root,stage_seconds=setup_left())
     fframe=cohort[cohort.case_id.isin(fit['case_id'])]
+    setup_left()
     errors=out_of_fold_residuals(root,cohort,tw,fit,args.cores)
     pools=residual_history(titems,fit,fframe,errors)
+    setup_left()
     beta=shared_control(fit,H)
     atomic_json(root/'stat.json',dict(beta=beta.tolist()))
     return dict(root=root,train=titems,eval=eitems,fit=fit,held=held,
@@ -937,6 +948,8 @@ def main():
         'BOOKED,CASE,RISK,STAT,STAT_PLUS,SHARED,VF_SHARED,EG,OBS,ROBUST,'
         'PER_WEEK_ROBUST,QFILL,VF_PW,SAA,HINDSIGHT'),
         help='Full-test methods; optional expensive solvers are opt-in')
+    ap.add_argument('--setup-seconds',type=float,default=14400.,
+                    help='Cooperative overall training/test feature-preparation wall limit')
     ap.add_argument('--preprocess-seconds',type=float,default=14400.,
                     help='Whole wall budget for training SAA preprocessing stage')
     args=ap.parse_args()
@@ -945,7 +958,7 @@ def main():
     if not set(args.methods)<=set(['STAT_PLUS','VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
-                                         args.eval_component_seconds,args.preprocess_seconds,args.mechanism_seconds,
+                                         args.eval_component_seconds,args.preprocess_seconds,args.setup_seconds,args.mechanism_seconds,
                                          args.stat_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
@@ -956,7 +969,18 @@ def main():
     raw,cohort=read_cohort(args.workbook)
     summaries=[]
     for fold in ('2013',):
-        ctx=make_context(args,fold,cohort)
+        try:
+            ctx=make_context(args,fold,cohort)
+        except RuntimeError as exc:
+            if not any(term in str(exc) for term in ('FEATURE_SETUP_INCOMPLETE','SETUP_WALL_LIMIT')):
+                raise
+            root=args.out/'single_split_2013'
+            atomic_json(root/'setup_status.json',dict(status='DEPENDENCY_UNRESOLVED',
+                        error=str(exc),training_cases=24506,test_cases=8774))
+            atomic_json(args.out/'summary.json',dict(status='INCOMPLETE_SETUP',
+                        error=str(exc),no_test_outcomes_used=True))
+            print('Setup incomplete; durable progress retained:',exc,flush=True)
+            return
         models={'STAT':ctx['beta']}
         failures={}
         if 'STAT_PLUS' in args.methods:
