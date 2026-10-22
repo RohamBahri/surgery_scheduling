@@ -655,6 +655,8 @@ def _eval_arm_task(task):
         import traceback
         report.update(status='INTERNAL_ERROR',error=repr(exc),
                       traceback=traceback.format_exc())
+    report.setdefault('budget_seconds',float(budget))
+    report.setdefault('solver_threads',1)
     report['method_wall_seconds']=time.monotonic()-tic
     return ck,arm,report
 
