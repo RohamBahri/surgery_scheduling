@@ -38,13 +38,29 @@ def _confirm(ctx, start, proposed, output, seconds, cores):
     from pilot import run_theory_full as runner
     deadline=time.monotonic()+max(.1,seconds)
     cands=[np.asarray(start,float).tolist(),np.asarray(proposed,float).tolist()]
-    score,valid=runner.parallel_score(ctx['train'],ctx['fit'],ctx['H'],
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+    state=dict(base=ctx['fit']['X']@ctx['fit']['case_w'],
+               H=ctx['H'],method='SHARED',pools=ctx['pools'],
+               seconds=min(120.,seconds),retry_seconds=min(360.,seconds),
+               cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
+    with ProcessPoolExecutor(max_workers=cores,mp_context=get_context('spawn'),
+             initializer=runner._score_initializer,initargs=(state,)) as pool:
+        score,valid=runner.parallel_score(ctx['train'],ctx['fit'],ctx['H'],
              cands,'SHARED',ctx['pools'],min(120.,seconds),cores,190,
-             output/'full_direct_A',task_seconds=min(480.,seconds),deadline=deadline)
+             output/'full_direct_A',task_seconds=min(480.,seconds),
+             deadline=deadline,pool=pool)
     record=dict(completed=bool(valid.all()),validated_components=len(ctx['train']),
                 baseline_score=float(score[0]) if valid[0] else None,
                 proposed_score=float(score[1]) if valid[1] else None)
     record['accepted']=bool(valid.all() and score[1]<score[0]-1e-7)
+    if not valid.all():
+        partial=runner._selection_paired_candidate(
+            output/'full_direct_A',ctx['train'],[0,1])
+        if partial is not None:
+            record['accepted']=True
+            record['accepted_partial_training_only']=True
+            record['paired_subset']=partial
     return (np.asarray(proposed if record['accepted'] else start,float),record)
 
 
@@ -115,8 +131,10 @@ def anchored_proposal(ctx,start,output,*,seconds=1800.,cores=15):
                           anchored_components=len(blocks),missing=missing,
                           surrogate=surrogate,confirmed=False)
     final,certificate=_confirm(ctx,start,proposed,output,left,cores)
-    return final,dict(status='ACCEPTED' if certificate['accepted'] else
-                      'FULL_DIRECT_CONFIRMATION_INCOMPLETE_OR_NOT_BETTER',
+    return final,dict(status=('PAIRED_TRAINING_HEURISTIC' if
+                      certificate.get('accepted_partial_training_only') else
+                      'ACCEPTED' if certificate['accepted'] else
+                      'FULL_DIRECT_CONFIRMATION_INCOMPLETE_OR_NOT_BETTER'),
                       anchored_components=len(blocks),missing=missing,
                       surrogate=surrogate,confirmed=certificate['completed'],
                       direct_confirmation=certificate,
@@ -207,8 +225,10 @@ def gap_proposal(ctx,start,vf,output,*,seconds=1800.,cores=15):
         return start,dict(status='NO_EG_VERIFIED_PROPOSAL',EG_intervals=score,
                           screened_components=len(banked),confirmed=False)
     final,confirmation=_confirm(ctx,start,selected,output,left,cores)
-    return final,dict(status='ACCEPTED' if confirmation['accepted'] else
-                      'NOT_FULLY_CONFIRMED_OR_INFERIOR',
+    return final,dict(status=('PAIRED_TRAINING_HEURISTIC' if
+                      confirmation.get('accepted_partial_training_only') else
+                      'ACCEPTED' if confirmation['accepted'] else
+                      'NOT_FULLY_CONFIRMED_OR_INFERIOR'),
                       EG_intervals=score,screened_components=len(banked),
                       candidate_source='bounded_expected_gap_maximization',
                       candidate=selected.tolist(),confirmed=confirmation['completed'],
