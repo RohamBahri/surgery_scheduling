@@ -102,7 +102,7 @@ The fitted methods are SHARED, OBS, EG, ROBUST, globally bounded
 SHARED, ANCHORED_TARGET and the globally bounded five-coefficient
 VF objective. The test comparison includes BOOKED, CASE, STAT, RISK,
 QFILL, VF per-instance, PER_WEEK, PER_WEEK_ROBUST, bounded unrestricted
-advice, target-restricted advice, the seed-0 value-function-cut model,
+advice, target-restricted advice, the three-hash common-advice value-function-cut model,
 and the nondeployable unrestricted SAA reference.
 
 EG remains an **exact inner adversarial MILP** within an
@@ -132,3 +132,50 @@ Check status by inspecting the newest JSON files below
 `artifacts/theory_single_split_v1/single_split_2013`.
 The final report is `theory_summary.json` there, plus root
 `summary.json`. No background service or automated upload is implied.
+
+## Mathematical and comparison corrections after external audit
+
+* VF is a globally bounded **surrogate**, not a globally certified direct
+  regret optimum. Its direct-method warm start is compared against the
+  STAT incumbent under the *target method's actual objective*.
+* The shared policy search now explores the whole declared coefficient box
+  with boundary moves and step sizes beginning at the box radius. It still
+  screens up to 150 flexible components and compares finalists on all
+  training components: this is a heuristic search, **not** a global proof.
+* OBS uses actual fitting outcomes. Independently seeded scenario banks
+  contain the *same* observed outcomes; OBS thus has **no fake independent
+  Bank-B confirmation**. Its acceptance is based on the full training
+  observed-cost objective, and its test generalization requires separate
+  evaluation.
+* The VFCG master now uses **one common reviewed-duration vector** and
+  distinct feasible leader assignments for seeds 0, 1 and 2. Its bounds
+  correspond to their **average deployed objective**. Hash cuts are
+  necessary nonstrict outer relaxations and might remain weak at strict
+  selection boundaries. A report of `GAP_CERTIFIED` requires matching
+  certified verified upper/lower bounds, not merely completing the primary
+  oracle. Primary cut installation is tracked separately from cached
+  fixed-schedule expressions.
+* Casewise duration dependence: Bank C is additionally evaluated under a
+  comonotonic rearrangement obtained by sorting each case's 200 duration
+  draws. This **preserves the empirical case marginals exactly** and
+  replaces their joint dependence. The result is a model stress, not a
+  statement about true within-room dependence.
+* Peak-balancing ties and behavioral response sweeps are evaluated
+  as **separate post-fit diagnostics** for CASE, STAT, SHARED, OBS, EG,
+  ROBUST and VF_SHARED, under a bounded `MECHANISM_SECONDS` allowance.
+  Unfinished diagnostics do not convert a successful primary deployment into
+  a failure. The alternative tie rule optimizes primary cost, then peak
+  planned load, before deterministic movement/canonical criteria.
+  It is *not* the same deployed hash policy. The response assumptions
+  are unobserved counterfactuals, not identified adoption rates.
+* The scheduling environment remains retrospective. Especially, operating
+  room availability uses performed-record information from the target week.
+  Findings do not establish deployable advance-known availability or
+  surgeon cross-room nonoverlap. The 2013 test was discussed and previously
+  evaluated during the project; describing it as a pristine untouched
+  prospective holdout would be inaccurate. The single-split study is a
+  retrospective evaluation conditional on this research history.
+* No completed large-scale empirical comparison, model superiority,
+  global-gap closure or hospital operational improvement is implied by CI.
+  We preserve solver statuses, objective differences, runtime, test-data
+  exposure, and bound mismatch diagnostics.
