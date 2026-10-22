@@ -933,15 +933,15 @@ def main():
     ap.add_argument('--workbook',type=Path,required=True)
     ap.add_argument('--out',type=Path,required=True)
     ap.add_argument('--cores',type=int,default=15)
-    ap.add_argument('--seconds',type=float,default=90)
+    ap.add_argument('--seconds',type=float,default=120)
     ap.add_argument('--pw-seconds',type=float,default=480)
     ap.add_argument('--pw-nodes',type=int,default=100)
     ap.add_argument('--shared-seconds',type=float,default=14400)
     ap.add_argument('--radius',type=float,default=32.)
     ap.add_argument('--rounds',type=int,default=10)
-    ap.add_argument('--search-seconds',type=float,default=21600.,
+    ap.add_argument('--search-seconds',type=float,default=14400.,
                     help='Soft per-method directional training budget; stops between rounds')
-    ap.add_argument('--task-seconds',type=float,default=600.,
+    ap.add_argument('--task-seconds',type=float,default=1500.,
                     help='Maximum wall seconds for one component/candidate shard')
     ap.add_argument('--round-seconds',type=float,default=7200.,
                     help='Maximum wall seconds for a directional learning round')
@@ -951,12 +951,12 @@ def main():
                     help='Explicitly acknowledge that the 2013 test is being opened once')
     ap.add_argument('--methods',default='VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED')
     ap.add_argument('--global-nodes',type=int,default=40)
-    ap.add_argument('--global-seconds',type=float,default=7200.)
+    ap.add_argument('--global-seconds',type=float,default=14400.)
     ap.add_argument('--mechanism-seconds',type=float,default=600.,
                     help='Final optional per-component sensitivity budget')
     ap.add_argument('--eval-component-seconds',type=float,default=4200.,
                     help='Whole wall budget for one test component, all methods combined')
-    ap.add_argument('--preprocess-seconds',type=float,default=7200.,
+    ap.add_argument('--preprocess-seconds',type=float,default=14400.,
                     help='Whole wall budget for training SAA preprocessing stage')
     args=ap.parse_args()
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
