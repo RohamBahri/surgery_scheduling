@@ -42,7 +42,7 @@ from surgery.theory_regions import build_problems, global_shared_search
 from surgery.theory_bilevel import value_function_exact
 from surgery.planner import response
 
-SEEDS=(0,1,2)
+SEEDS=tuple(int(v) for v in os.environ.get('SURGERY_HASH_SEEDS','0,1,2').split(','))
 SWEEP=((.8,30.),(.5,30.),(.8,15.),(.5,15.))
 
 
@@ -167,7 +167,7 @@ def scores(c,d,d0,bank,method,seconds,seed=0,deadline=None):
         if not ans.complete:
             raise RuntimeError('EG adversary incomplete: '+ans.status)
         return float(ans.value)+LAM/2*np.square(d-d0).sum()
-    if method in ('SHARED','SHARED_LEGACY','OBS','ROBUST'):
+    if method in ('SHARED','SHARED_BASE','SHARED_PLUS','SHARED_LEGACY','OBS','ROBUST'):
         if method=='ROBUST':
             u=display(c.booked,d)
             cost=[]
@@ -349,9 +349,10 @@ def train_search(args,ctx,method,*,warm_start=None):
     from numpy.linalg import norm
     import itertools
     directions=np.eye(H.shape[1]).tolist()
-    for j,k in itertools.combinations(range(H.shape[1]),2):
-        x=np.eye(H.shape[1]);directions.extend(((x[j]+x[k])/np.sqrt(2),
-                                               (x[j]-x[k])/np.sqrt(2)))
+    if not getattr(args,'selection_fast',False):
+        for j,k in itertools.combinations(range(H.shape[1]),2):
+            x=np.eye(H.shape[1]);directions.extend(((x[j]+x[k])/np.sqrt(2),
+                                                   (x[j]-x[k])/np.sqrt(2)))
     progress=root/'progress.json'
     if progress.exists():
         saved=json.loads(progress.read_text())
@@ -364,7 +365,7 @@ def train_search(args,ctx,method,*,warm_start=None):
     flexible=[x for x in items if any(len(x[1].allowed[int(s)])>1 for s in x[1].surgeon)]
     candidates=flexible or items
     rg=np.random.default_rng(20261020)
-    sampled=rg.choice(len(candidates),size=min(150,len(candidates)),replace=False)
+    sampled=rg.choice(len(candidates),size=min(32 if getattr(args,'selection_fast',False) else 150,len(candidates)),replace=False)
     shortlist_items=[candidates[int(j)] for j in sampled]
     search_start=time.monotonic()
     method_deadline=search_start+args.search_seconds
@@ -419,7 +420,7 @@ def train_search(args,ctx,method,*,warm_start=None):
             # Include coordinate-wise extreme advice coefficients. The old
             # 8/2**round schedule could move only 15.984 units in ten rounds,
             # even though the declared coefficient domain is [-32,32].
-            for j in range(len(theta)):
+            for j in range(len(theta)) if not getattr(args,'selection_fast',False) else []:
                 for sign in (-1.,1.):
                     boundary=theta.copy();boundary[j]=sign*args.radius
                     proposed.append(beta+boundary)
@@ -428,7 +429,7 @@ def train_search(args,ctx,method,*,warm_start=None):
                                  method,ctx['pools'],args.seconds,args.cores,round_id,
                                  root/f'round_{round_id:02d}'/'screen',pool=score_pool,
                                  task_seconds=args.task_seconds,deadline=round_deadline)
-            order=sorted((i for i in range(1,len(proposed)) if valid[i]),key=lambda i:preview[i])[:5]
+            order=sorted((i for i in range(1,len(proposed)) if valid[i]),key=lambda i:preview[i])[:(2 if getattr(args,'selection_fast',False) else 5)]
             indices=[0]+order
             allscore,valid=parallel_score(items,fit,H,[proposed[i].tolist() for i in indices],
                                method,ctx['pools'],args.seconds,args.cores,round_id,
@@ -670,7 +671,8 @@ def evaluate_all(args,ctx,models):
     chosen=list(args.eval_arms)
     admissible=set(('BOOKED','CASE','RISK','STAT','STAT_PLUS','SHARED',
                     'VF_SHARED','EG','OBS','ROBUST','SHARED_GLOBAL',
-                    'ANCHORED_TARGET','PER_WEEK','PER_WEEK_ROBUST','QFILL',
+                    'ANCHORED_TARGET','SHARED_BASE','SHARED_PLUS','VF_PLUS',
+                    'GAP_PLUS','ANCHORED_PLUS','PER_WEEK','PER_WEEK_ROBUST','QFILL',
                     'VF_PW','PW_VFCG','PW_BOUNDED','PW_ANCHORED','SAA','HINDSIGHT'))
     if len(chosen)!=len(set(chosen)) or not set(chosen)<=admissible:
         raise ValueError('Duplicate or unsupported evaluation method')
