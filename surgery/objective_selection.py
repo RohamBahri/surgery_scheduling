@@ -231,6 +231,12 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
     screen=_sample(ctx['train'])
     missing_initial=len(ctx['train'])-len(libraries)
     stopped=None
+    def batch_coverage(folder):
+        path=folder/'batch_status.json'
+        if not path.exists():return dict(status='NOT_ATTEMPTED')
+        rec=json.loads(path.read_text())
+        return {k:rec.get(k) for k in ('unfinished_scores','unresolved_components',
+                                        'unresolved_cases','complete_candidates')}
     for round_id in range(len(history),rounds):
         if deadline-time.monotonic()<10:
             stopped='STAGE_DEADLINE';break
@@ -251,7 +257,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                                key=lambda j:preview[j])[:3]
             if len(indices)==1:
                 history.append(dict(round=round_id,status='NO_CERTIFIED_SCREEN_DIRECTION',
-                                    step=step,screen_certified=int(eligible.sum())))
+                                    step=step,screen_certified=int(eligible.sum()),
+                                    screen_coverage=batch_coverage(rounddir/'screen')))
                 _save(path,dict(theta=theta.tolist(),history=history,method=method))
                 continue
             candidates=[starts[i].tolist() for i in indices]
@@ -263,6 +270,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                            and A[j]<A[0]-1e-7]
             decision=dict(round=round_id,step=step,
                           full_A_completed=int(goodA.sum()),
+                          screen_coverage=batch_coverage(rounddir/'screen'),
+                          full_A_coverage=batch_coverage(rounddir/'all_A'),
                           training_components=len(ctx['train']),
                           training_cases=len(ctx['fit']['booked']),
                           original_objective_A=float(A[0]) if goodA[0] else None,
@@ -277,6 +286,7 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                    pool=pool,task_seconds=task_seconds,deadline=deadline)
                 decision['winning_objective_A']=float(A[chosen])
                 decision['bank_B_certified']=bool(goodB.all())
+                decision['full_B_coverage']=batch_coverage(rounddir/'all_B')
                 if goodB.all():
                     decision['own_objective_B_change']=float(B[1]-B[0])
                     if B[1]<B[0]-1e-7:
