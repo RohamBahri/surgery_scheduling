@@ -191,8 +191,12 @@ def _score_initializer(state):
 
 def _train_component(task):
     """Bounded coefficient shard. Unfinished scores are missing, not approximate."""
-    if len(task)==8:
-        ck,c,rows,coefficients,round_id,indices,task_seconds,parent_deadline=task
+    if len(task) in (7,8):
+        if len(task)==8:
+            ck,c,rows,coefficients,round_id,indices,task_seconds,parent_deadline=task
+        else:
+            ck,c,rows,coefficients,round_id,indices,task_seconds=task
+            parent_deadline=None
         state=_SCORE_STATE
         base,H,method,pools,seconds=(state["base"],state["H"],
                                       state["method"],state["pools"],state["seconds"])
