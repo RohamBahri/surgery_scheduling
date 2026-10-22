@@ -246,7 +246,16 @@ def stage(args):
         library=build_library(ctx,root(args)/'library',cores=args.cores,
                               seconds=1700.,task_seconds=24.)
         save(root(args)/'library_status.json',dict(
-              complete_components=len(library),total_components=len(ctx['train'])))
+              all_components_have_at_least_original=len(library)==len(ctx['train']),
+              components_with_feasible_library=len(library),
+              enriched_components=sum(rec['statuses'].get('LIBRARY')=='ENRICHED_ATTEMPTED'
+                                     for rec in library.values()),
+              SAA_feasible_components=sum(rec['statuses'].get('SAA')
+                       in ('OPTIMAL','FEASIBLE_UNFINISHED')
+                       for rec in library.values()),
+              original_only_components=sum(rec['statuses'].get('LIBRARY')=='ORIGINAL_ONLY'
+                                      for rec in library.values()),
+              total_components=len(ctx['train'])))
     elif name=='scan':
         ctx=load_context(args);libraries=load_library(ctx,root(args)/'library')
         probe_landscape(ctx,libraries,root(args)/'landscape',
@@ -391,7 +400,10 @@ def summarize(args):
     output=dict(status='FALLBACK_COMPLETE' if total_valid else 'PARTIAL_TEST',
           cases=N,calendar_weeks=len(weekdata),method_coverage=coverage,
           fallback_replay=fallback,contrasts=contrasts,
-          training=summaries,training_objective_vs_deployed=diagnostics,
+          training=summaries,
+          training_library=(json.loads((folder/'library_status.json').read_text())
+            if (folder/'library_status.json').exists() else None),
+          training_objective_vs_deployed=diagnostics,
           mechanism_classification=mechanism,landscape=landscape,
           eg_exact_sample=(json.loads((folder/'certificates'/'eg_exact_sample.json').read_text())
              if (folder/'certificates'/'eg_exact_sample.json').exists() else None),
