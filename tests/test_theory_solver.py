@@ -124,3 +124,37 @@ def test_bilevel_bounds_versus_full_grid():
         # Only a certified global optimum must beat this finite grid.
         if result['complete']:
             assert result['upper']<=best+1e-4
+
+def test_qfill_can_change_deployed_partition_with_exact_fixed_plan_lp():
+    """Counterexample: VF fixed-plan fill can change hash-selected partition."""
+    from surgery.theory_exact import vf_fixed_plan_lp
+    c=Week(group='TGH',monday='2012-01-02',
+       slots=((0,'OR1'),(0,'OR2')),
+       case_ids=np.array([1003,1004,1005,1006]),
+       surgeon_ids=('S1','S2','S3','S4'),
+       surgeon=np.array([0,1,2,3]),
+       original=np.array([0,1,0,1]),
+       allowed=((0,1),)*4,
+       required_days=((0,),)*4,
+       booked=np.full(4,225.),
+       actual=np.full(4,225.),
+       added_days=()).validate()
+    d0=np.array([210.,240.,210.,240.])
+    scenarios=np.array([[a,225.,b,225.]
+                        for a in (125.,225.,325.)
+                        for b in (125.,225.,325.)],float)
+    first=solve_week(c,d0,seconds=30.,tie=True,hash_seed=0)
+    assert first.complete
+    fill=vf_fixed_plan_lp(c,first.assignment,scenarios,seconds=30.,d0=d0)
+    assert fill.complete and fill.reviewed is not None
+    second=solve_week(c,np.asarray(fill.reviewed),seconds=30.,
+                      tie=True,hash_seed=0)
+    assert second.complete
+    def partition(z):
+        z=np.asarray(z,int)
+        return frozenset(frozenset(np.flatnonzero(z==r))
+                         for r in set(z))
+    assert partition(first.assignment)!=partition(second.assignment)
+    before=expected_reduced(c,first.assignment,scenarios)
+    after=expected_reduced(c,second.assignment,scenarios)
+    assert abs(before-after)>1e-6
