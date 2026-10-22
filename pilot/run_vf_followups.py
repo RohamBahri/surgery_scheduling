@@ -45,6 +45,8 @@ VARIANTS={
     "without_congestion":dict(active_features=(0,1),coefficient_radius=16.),
     "without_interactions":dict(active_features=(0,1,2),coefficient_radius=16.),
     "wider_32":dict(active_features=(0,1,2,3,4),coefficient_radius=32.),
+    "observed_outcomes":dict(active_features=(0,1,2,3,4),
+                             coefficient_radius=16.,scenario_mode="observed"),
     "leave_out_TGH":dict(active_features=(0,1,2,3,4),coefficient_radius=16.),
     "leave_out_TWH_main":dict(active_features=(0,1,2,3,4),coefficient_radius=16.),
     "leave_out_TWH_day":dict(active_features=(0,1,2,3,4),coefficient_radius=16.)}
