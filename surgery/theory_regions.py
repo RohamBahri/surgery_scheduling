@@ -136,7 +136,10 @@ def build_problems(items,data,H,beta,pools,output,*,seconds=90.,
         rec=json.loads(file.read_text()) if file.exists() else dict(
              status='PREPROCESS_WALL_LIMIT',lower=None,assignment=None)
         if rec.get('lower') is None:unresolved_saa+=1
-        lb=max(0.,float(rec['lower'] or 0.))
+        raw_lb=rec.get('lower')
+        if raw_lb is not None and not np.isfinite(float(raw_lb)):
+            raise AssertionError(f'Nonfinite SAA bound for {ck}')
+        lb=max(0.,float(raw_lb)) if raw_lb is not None else 0.
         targets=None
         if target_restricted:
             targetfile=target_folder/(ck+'.json')
