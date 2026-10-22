@@ -99,164 +99,164 @@ def _hash_rank(c,z,seed):
 
 
 def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
-                         cuts=100,seed=0,lam=.001,gap_abs=1e-3,
+                         cuts=100,seeds=(0,1,2),seed=None,lam=.001,gap_abs=1e-3,
                          saa_reference=None):
-    """Global outer-bounded optimistic/deployed value-function cut method.
+    """Globally bounded three-hash direct advice with ONE reviewed vector.
 
-    Returns a certified deployed upper bound and a valid global master lower
-    bound. A positive gap or failed hash separation is *not* a certified exact
-    solution. Uses continuous advice, not a reduced finite advice grid.
+    Each seed has its own feasible master assignment but shares the primary
+    follower witness and true near-optimal tolerance. Primary cuts are common;
+    necessary (nonstrict) hash-exclusion cuts apply to the corresponding
+    seed's leader assignment. Tight primal/dual bounds certify exactly the
+    requested average-of-seeds objective; otherwise report unresolved.
     """
     import gurobipy as gp
     from gurobipy import GRB
     from surgery.weekly_planner import evaluate
-    from surgery.advice_comparison import certified
     tic=time.monotonic()
+    if seed is not None:seeds=(int(seed),)
+    seeds=tuple(int(a) for a in seeds)
+    if not seeds or len(set(seeds))!=len(seeds):
+        raise ValueError('Distinct nonempty hash seed tuple required')
     def limit():
         return min(separation_seconds,max(0.,seconds-(time.monotonic()-tic)))
     lo,hi=reachable(c.booked,.8,30.)
-    m=gp.Model('exact_deployed_value_function_cuts')
-    m.Params.OutputFlag=0
-    m.Params.Threads=1
-    m.Params.MIPGap=0
-    m.Params.MIPGapAbs=0
-    m.Params.FeasibilityTol=1e-9
-    m.Params.IntFeasTol=1e-9
+    m=gp.Model('deployed_three_hash_value_function_cuts')
+    m.Params.OutputFlag=0;m.Params.Threads=1
+    m.Params.MIPGap=0;m.Params.MIPGapAbs=0
+    m.Params.FeasibilityTol=1e-9;m.Params.IntFeasTol=1e-9
     m.Params.NonConvex=2
     d=[m.addVar(lb=float(lo[i]),ub=float(hi[i]),name=f'd{i}') for i in range(c.n)]
     zero=m.addVar(lb=0,ub=0,name='zero')
-    x,used,byroom=_assign_vars(m,c,'upper')
-    y,yused,ybyroom=_assign_vars(m,c,'primary_witness')
-    upper_phi=_variable_phi(m,c,x,used,byroom,d,lo,hi,zero,'leader')
-    witness_phi=_variable_phi(m,c,y,yused,ybyroom,d,lo,hi,zero,'witness')
-    v=m.addVar(lb=0,name='primary_reduced_value')
+    leaders={}
+    witness,wused,wbyroom=_assign_vars(m,c,'primary_witness')
+    witness_phi=_variable_phi(m,c,witness,wused,wbyroom,d,lo,hi,zero,
+                              'primary_witness')
+    v=m.addVar(lb=0.,name='primary_reduced_value')
     m.addConstr(v==witness_phi)
     max_full=CAP*c.k+1.75*(float(hi.sum())+TURN*c.n)+100.
-    vfull=m.addVar(lb=0,ub=max_full,name='primary_full_cost')
-    m.addConstr(vfull==v+CAP*c.k-gp.quicksum(d)-TURN*c.n)
-    epsilon=_epsilon(m,vfull,max_full)
-    m.addConstr(upper_phi<=v+epsilon)
-    obj=_scenario_expected_cost(m,c,x,used,byroom,np.asarray(bank,float),'expected')
-    obj+=lam/2*gp.quicksum((d[i]-float(d0[i]))**2 for i in range(c.n))
-    m.setObjective(obj,GRB.MINIMIZE)
-    baseline=solve_week(c,d0,seconds=max(.001,limit()),threads=1,
-                        tie=True,hash_seed=seed)
-    if baseline.complete and baseline.assignment is not None:
+    full=m.addVar(lb=0.,ub=max_full,name='primary_full_cost')
+    m.addConstr(full==v+CAP*c.k-gp.quicksum(d)-TURN*c.n)
+    epsilon=_epsilon(m,full,max_full)
+    objective=gp.LinExpr(0.)
+    for sd in seeds:
+        x,used,byroom=_assign_vars(m,c,f'hash_{sd}')
+        phi=_variable_phi(m,c,x,used,byroom,d,lo,hi,zero,f'hash_{sd}')
+        m.addConstr(phi<=v+epsilon)
+        objective+=(1./len(seeds))*_scenario_expected_cost(
+                        m,c,x,used,byroom,np.asarray(bank,float),f'expected_{sd}')
+        leaders[sd]=x
+    objective+=lam/2*gp.quicksum((d[i]-float(d0[i]))**2 for i in range(c.n))
+    m.setObjective(objective,GRB.MINIMIZE)
+    best=float('inf');bestd=None;bestz=None
+    baseline={}
+    for sd in seeds:
+        if limit()<=.1:break
+        ans=solve_week(c,d0,seconds=limit(),threads=1,tie=True,hash_seed=sd)
+        if not ans.complete or ans.assignment is None:break
+        baseline[sd]=tuple(map(int,ans.assignment))
+    if len(baseline)==len(seeds):
         bestd=np.asarray(d0,float).copy()
-        bestz=tuple(map(int,baseline.assignment))
-        best=expected_reduced(c,bestz,bank)
-    else:
-        best=np.inf;bestd=None;bestz=None
+        bestz=dict(baseline)
+        best=float(np.mean([expected_reduced(c,z,bank) for z in baseline.values()]))
     saa=(saa_reference if saa_reference is not None else
          saa_mip(c,bank,seconds=max(.001,limit())))
     last_lb=max(0.,float(saa.lower or 0.))
-    history=[];fixed_cache={};installed_primary=set();hash_cache=set()
+    history=[];fixed_cache={};installed_primary=set();hash_cuts=set()
     try:
         for it in range(cuts):
             remaining=seconds-(time.monotonic()-tic)
-            if remaining<=0:break
-            m.Params.TimeLimit=max(.001,remaining)
+            if remaining<=.1:
+                history.append(dict(iteration=it,status='TIME_LIMIT'));break
+            m.Params.TimeLimit=remaining
             m.optimize()
             if m.Status in (GRB.OPTIMAL,GRB.TIME_LIMIT,GRB.SUBOPTIMAL):
                 last_lb=max(last_lb,float(m.ObjBound))
             if m.Status==GRB.INFEASIBLE:
-                # A globally valid outer relaxation is infeasible only if
-                # something fundamental is wrong: the original planner always
-                # selects a schedule for a nonempty reachable box.
-                raise AssertionError('Value-function master infeasible')
-            if not m.SolCount:
-                break
-            reviewed=np.asarray([v.X for v in d],float)
-            proposed=tuple(map(int,_assignment(c,x)))
-            witness=tuple(map(int,_assignment(c,y)))
-            if limit()<=0:
-                history.append(dict(iteration=it,status='TIME_LIMIT'))
-                break
-            follower=solve_week(c,reviewed,seconds=limit(),
-                                threads=1,tie=False)
+                raise AssertionError('Three-hash value-function outer relaxation infeasible')
+            if not m.SolCount:break
+            advised=np.asarray([dv.X for dv in d],float)
+            proposed={sd:tuple(map(int,_assignment(c,leaders[sd])))
+                      for sd in seeds}
+            if limit()<=.1:
+                history.append(dict(iteration=it,status='TIME_LIMIT'));break
+            follower=solve_week(c,advised,seconds=limit(),threads=1,tie=False)
             if not follower.complete or follower.assignment is None:
-                history.append(dict(iteration=it,status='PRIMARY_UNCERTIFIED'))
-                break
-            true_v=float(follower.value-CAP*c.k+reviewed.sum()+TURN*c.n)
+                history.append(dict(iteration=it,status='PRIMARY_UNCERTIFIED'));break
+            true_v=float(follower.value-CAP*c.k+advised.sum()+TURN*c.n)
             claimed=float(v.X)
-            tol=_objective_tolerance(follower.value)
-            if claimed < true_v-1e-4:
-                raise AssertionError('Feasible primary witness understates optimum')
+            if claimed<true_v-1e-4:
+                raise AssertionError('Primary witness is feasible and cannot understate optimum')
             if claimed>true_v+1e-5:
-                competitor=tuple(map(int,follower.assignment))
-                if competitor in installed_primary:
-                    history.append(dict(iteration=it,status='DUPLICATE_PRIMARY_CUT'))
-                    break
-                # Fixed-expression cache is NOT the set of installed
-                # follower-optimality cuts. Hash separation can create the
-                # same expression earlier without adding v <= phi_z.
-                fix=fixed_cache.get(competitor)
-                if fix is None:
-                    fix=_fixed_phi(m,c,competitor,d,zero,f'primary_cut_{it}')
-                    fixed_cache[competitor]=fix
-                m.addConstr(v<=fix)
-                installed_primary.add(competitor)
-                history.append(dict(iteration=it,status='PRIMARY_CUT'))
-                continue
-            if limit()<=0:
-                history.append(dict(iteration=it,status='TIME_LIMIT'))
+                z=tuple(map(int,follower.assignment))
+                if z in installed_primary:
+                    history.append(dict(iteration=it,status='DUPLICATE_PRIMARY_CUT'));break
+                expression=fixed_cache.get(z)
+                if expression is None:
+                    expression=_fixed_phi(m,c,z,d,zero,f'primary_cut_{it}')
+                    fixed_cache[z]=expression
+                m.addConstr(v<=expression);installed_primary.add(z)
+                history.append(dict(iteration=it,status='PRIMARY_CUT'));continue
+            tol=_objective_tolerance(follower.value)
+            deployed={}
+            for sd in seeds:
+                if limit()<=.1:break
+                ans=solve_week(c,advised,seconds=limit(),threads=1,
+                               tie=True,hash_seed=sd)
+                if not ans.complete or ans.assignment is None:break
+                deployed[sd]=tuple(map(int,ans.assignment))
+            if len(deployed)!=len(seeds):
+                history.append(dict(iteration=it,status='HASH_UNCERTIFIED'));break
+            # A common duration recommendation must make ALL requested
+            # hash-selected assignments feasible simultaneously.
+            val=float(np.mean([expected_reduced(c,z,bank) for z in deployed.values()])
+                      +lam/2*np.square(advised-d0).sum())
+            if val<best:
+                best,bestd,bestz=val,advised.copy(),dict(deployed)
+            incorrect=[sd for sd in seeds if proposed[sd]!=deployed[sd]]
+            if not incorrect:
+                history.append(dict(iteration=it,status='ALL_HASHES_VERIFIED',
+                                    primal=val,dual=last_lb))
+                if m.Status==GRB.OPTIMAL and best-last_lb<=gap_abs:break
                 break
-            deployed=solve_week(c,reviewed,seconds=limit(),threads=1,
-                                tie=True,hash_seed=seed)
-            if not deployed.complete or deployed.assignment is None:
-                history.append(dict(iteration=it,status='HASH_UNCERTIFIED'))
-                break
-            winner=tuple(map(int,deployed.assignment))
-            if winner==proposed:
-                val=expected_reduced(c,winner,bank)+lam/2*np.square(reviewed-d0).sum()
-                if val<best:best,bestd,bestz=float(val),reviewed.copy(),winner
-                history.append(dict(iteration=it,status='VERIFIED_DEPLOYMENT',
-                                    primal=float(val),dual=last_lb))
-                if m.Status==GRB.OPTIMAL and best-last_lb<=gap_abs:
-                    break
-                # When the master optimum is verified but has a gap, this is a
-                # solver-time/numerical gap; do not falsely add a disjunctive cut.
-                break
-            # If target is outside the actual near-optimum, a missing primary
-            # cut must account for it. If it is eligible but loses to a better
-            # hash score, exclude that competitor *conditionally* on proposed.
-            targetpred=float(evaluate(c,proposed,reviewed)['cost'])
-            if targetpred>follower.value+tol+1e-5:
-                # Value-function conditions should already enforce target
-                # near-optimality: this indicates missing/invalid dual cuts.
-                history.append(dict(iteration=it,status='LEADER_NOT_NEAR_OPTIMAL'))
-                break
-            if _hash_rank(c,winner,seed)>=_hash_rank(c,proposed,seed):
-                history.append(dict(iteration=it,status='HASH_ORDER_INCONSISTENT'))
-                break
-            pair=(proposed,winner)
-            if pair in hash_cache:
-                # Necessary non-strict hash cut may be active at equality;
-                # terminating with the best valid lower bound is correct.
-                history.append(dict(iteration=it,status='HASH_CUT_BOUNDARY'))
-                break
-            competitor_phi=fixed_cache.get(winner)
-            if competitor_phi is None:
-                competitor_phi=_fixed_phi(m,c,winner,d,zero,f'hash_competitor_{it}')
-                fixed_cache[winner]=competitor_phi
-            matching=m.addVar(vtype=GRB.BINARY,name=f'matches_target_{it}')
-            for i in range(c.n):m.addConstr(matching<=x[i,int(proposed[i])])
-            m.addConstr(matching>=gp.quicksum(x[i,int(proposed[i])]
-                               for i in range(c.n))-c.n+1)
-            # Exact necessary condition: a hash-earlier competitor cannot be
-            # INSIDE the target's near-optimum set. Strict > is relaxed to >=
-            # so all genuine deployed policies remain feasible in the master.
-            m.addGenConstrIndicator(matching,True,competitor_phi>=v+epsilon)
-            hash_cache.add(pair)
-            history.append(dict(iteration=it,status='NECESSARY_HASH_CUT'))
+            cut_added=False
+            for sd in incorrect:
+                proposal,winner=proposed[sd],deployed[sd]
+                pred=float(evaluate(c,proposal,advised)['cost'])
+                if pred>follower.value+tol+1e-5:
+                    raise AssertionError('Leader schedule violates true near-optimal eligibility')
+                if _hash_rank(c,winner,sd)>=_hash_rank(c,proposal,sd):
+                    raise AssertionError('Verified deployment must rank ahead of rejected leader')
+                pair=(sd,proposal,winner)
+                if pair in hash_cuts:continue
+                expression=fixed_cache.get(winner)
+                if expression is None:
+                    expression=_fixed_phi(m,c,winner,d,zero,f'hash_comp_{sd}_{it}')
+                    fixed_cache[winner]=expression
+                matching=m.addVar(vtype=GRB.BINARY,name=f'leader_{sd}_matches_{it}')
+                leader=leaders[sd]
+                for i in range(c.n):
+                    m.addConstr(matching<=leader[i,int(proposal[i])])
+                m.addConstr(matching>=gp.quicksum(
+                   leader[i,int(proposal[i])] for i in range(c.n))-c.n+1)
+                # The exact selection exclusion is STRICT. >= is a valid
+                # nonstrict outer relaxation preserving its primal/dual bound.
+                m.addGenConstrIndicator(matching,True,expression>=v+epsilon)
+                hash_cuts.add(pair)
+                cut_added=True
+            history.append(dict(iteration=it,
+                   status='NECESSARY_HASH_CUTS' if cut_added else 'HASH_CUT_BOUNDARY',
+                   affected_seeds=incorrect))
+            if not cut_added:break
     finally:
         m.dispose()
     if np.isfinite(best) and last_lb>best+1e-4:
-        raise AssertionError('Bilevel dual bound exceeds verified deployable incumbent')
-    return dict(lower=float(last_lb),upper=None if not np.isfinite(best) else best,
-                reviewed=None if bestd is None else bestd.tolist(),
-                assignment=None if bestz is None else list(bestz),
-                complete=(np.isfinite(best) and best-last_lb<=gap_abs),
-                status=('GAP_CERTIFIED' if np.isfinite(best) and best-last_lb<=gap_abs
-                        else 'BOUNDED_UNRESOLVED'),
-                cuts=history,saa=saa.to_json(),seconds=time.monotonic()-tic)
+        raise AssertionError('Value-function dual exceeds verified three-hash incumbent')
+    return dict(lower=float(last_lb),
+       upper=None if not np.isfinite(best) else float(best),
+       reviewed=None if bestd is None else bestd.tolist(),
+       assignments=None if bestz is None else {str(k):list(z) for k,z in bestz.items()},
+       complete=bool(np.isfinite(best) and best-last_lb<=gap_abs),
+       status=('GAP_CERTIFIED' if np.isfinite(best) and best-last_lb<=gap_abs
+               else 'BOUNDED_UNRESOLVED'),
+       hash_seeds=list(seeds),cuts=history,saa=saa.to_json(),
+       seconds=time.monotonic()-tic)
