@@ -26,8 +26,8 @@ os.environ["SURGERY_HASH_SEEDS"]="0"
 for v in ("OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","NUMEXPR_NUM_THREADS"):
     os.environ[v]="1"
 
-from surgery.advice_comparison import ALPHA, H, KAPPA, display, scenarios, reviewed
-from surgery.theory_exact import reduced, expected_reduced, stop_loss
+from surgery.advice_comparison import ALPHA, H, display, scenarios, reviewed
+from surgery.theory_exact import KAPPA, reduced, expected_reduced, stop_loss
 from surgery.weekly_planner import evaluate
 from surgery.objective_selection import train_objective
 
@@ -168,7 +168,16 @@ def _response_task(job):
 
 def run_tasks(items,fn,dst,cores):
     dst=Path(dst);dst.mkdir(parents=True,exist_ok=True)
-    todo=[(name,item) for name,item in items if not (dst/(name+".json")).exists()]
+    def completed(name):
+        path=dst/(name+".json")
+        if not path.exists():return False
+        old=load(path)
+        if "method" in old and isinstance(old["method"],dict):
+            return all(x.get("status")=="COMPLETE" for x in old["method"].values())
+        if "entries" in old:
+            return all(x.get("status")=="CERTIFIED" for x in old["entries"].values())
+        return old.get("status")=="COMPLETE"
+    todo=[(name,item) for name,item in items if not completed(name)]
     if not todo:return
     with ProcessPoolExecutor(max_workers=min(cores,len(todo)),
                              mp_context=get_context("spawn")) as pool:
