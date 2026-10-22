@@ -39,7 +39,7 @@ POLICIES=("CASE","STAT","VF","SHARED")
 RESPONSE_SCENARIOS=(
     ("nominal",.8,30.),("weak",.4,30.),("very_weak",.25,15.),
     ("moderate",.6,30.),("full_adoption",1.,30.),
-    ("wide_display",.8,60.),("heterogeneous",None,None))
+    ("tight_cap",.8,12.),("heterogeneous",None,None))
 VARIANTS={
     "congestion_only":dict(active_features=(2,),coefficient_radius=16.),
     "without_congestion":dict(active_features=(0,1),coefficient_radius=16.),
