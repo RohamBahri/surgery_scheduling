@@ -34,6 +34,17 @@ def test_matched_methods_and_global_wall_budget():
     assert dict(run.STAGES)['evaluate']>=2.5*3600
 
 
+def test_frozen_2013_arms_are_admissible_without_solver():
+    """Regression: previously a valid VF frozen policy aborted evaluation."""
+    from pilot import run_objective_selection as selection
+    from pilot.run_theory_full import validate_evaluation_arms
+    validate_evaluation_arms(list(selection.ARMS))
+    with pytest.raises(ValueError,match='Duplicate or unsupported'):
+        validate_evaluation_arms(['CASE','VF','VF'])
+    with pytest.raises(ValueError,match='CASE must'):
+        validate_evaluation_arms(['VF','SHARED'])
+
+
 def test_objective_library_matches_independent_EG_and_target_formula(monkeypatch):
     from pilot import run_theory_full as runner
     from surgery.weekly_planner import evaluate,_objective_tolerance
