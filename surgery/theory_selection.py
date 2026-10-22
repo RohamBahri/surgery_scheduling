@@ -149,7 +149,7 @@ def _gap_one(task):
     ans=expected_gap_mip(c,d,bank,seconds=seconds,gamma=1.)
     penalty=LAM/2*np.square(d-d0).sum()
     lb=(None if ans.value is None else float(ans.value+penalty))
-    ub=(None if ans.bound is None else float(ans.bound+penalty))
+    ub=(None if ans.upper is None else float(ans.upper+penalty))
     return lb,ub,bool(ans.complete)
 
 
@@ -182,7 +182,8 @@ def gap_proposal(ctx,start,vf,output,*,seconds=1800.,cores=15):
         d0=runner.reviewed(c.booked,base[rows])
         bank=runner.scenarios(c,d0,ctx['pools'],20261020,count=50)
         banked.append((c,rows,d0,bank))
-    score=[dict(lower=0.,upper=0.,resolved=0,unresolved=0) for _ in proposals]
+    score=[dict(lower=0.,upper=0.,bounded=0,resolved=0,unresolved=0)
+           for _ in proposals]
     tasks=[]
     for j,co in enumerate(proposals):
         for c,rows,d0,bank in banked:
@@ -209,13 +210,17 @@ def gap_proposal(ctx,start,vf,output,*,seconds=1800.,cores=15):
                     lb,ub,cert=future.result()
                     if lb is not None:score[j]['lower']+=lb
                     if ub is not None:score[j]['upper']+=ub
-                    if lb is None or ub is None:score[j]['unresolved']+=1
+                    if lb is None or ub is None:
+                        score[j]['unresolved']+=1
+                    else:
+                        score[j]['bounded']+=1
+                        if ub+1e-5<lb:raise AssertionError('Invalid EG dual interval')
                     if cert:score[j]['resolved']+=1
                 except Exception:score[j]['unresolved']+=1
                 send()
         for future in active:future.cancel()
     eligible=[j for j,v in enumerate(score) if v['unresolved']==0 and
-              v['resolved']+v['unresolved']==len(banked)]
+              v['bounded']==len(banked)]
     # A finite EG upper bound is a valid *pessimistic* comparison. Using it
     # to propose does not imply a full-cohort EG optimum.
     chosen=min(eligible,key=lambda j:score[j]['upper'],default=0)
