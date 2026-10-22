@@ -661,6 +661,7 @@ def _eval_arm_task(task):
 
 def evaluate_all(args,ctx,models):
     """One method per component per task, with independent wall limits."""
+    evaluation_start=time.monotonic()
     root=ctx['root']/'full_evaluation'
     root.mkdir(exist_ok=True)
     shard_root=root/'per_arm';shard_root.mkdir(exist_ok=True)
@@ -737,13 +738,47 @@ def evaluate_all(args,ctx,models):
                 model_C_per_case=None if len(records)!=len(rows) else
                 sum(r['methods'][arm]['model']['C'] for r in records)/sum(r['cases'] for r in records),
                  deployment_evaluation_wall_hours=sum(
-                     float(r['methods'][arm].get('evaluation_seconds',0.))
-                     for r in records)/3600.,
+                     float(r['methods'][arm].get('verification_seconds',0.))
+                     for r in rows)/3600.,
                  method_total_wall_hours=sum(
-                     float(r['methods'][arm].get(
-                         'method_wall_seconds',
-                         r['methods'][arm].get('evaluation_seconds',0.)))
-                     for r in records)/3600.)
+                     float(r['methods'].get(arm,{}).get('method_wall_seconds',0.))
+                     for r in rows)/3600.,
+                 timeout_components=sum('LIMIT' in str(r['methods'].get(arm,{}).get(
+                     'error','')) or 'LIMIT' in str(r['methods'].get(arm,{}).get('status',''))
+                     for r in rows),
+                 internal_error_components=sum(r['methods'].get(arm,{}).get('status')
+                    =='INTERNAL_ERROR' for r in rows))
+    # Full-case operational fallback is a DISTINCT policy, not an
+    # exact-result substitution: missing method deployments use CASE.
+    output['fallback_CASE']={}
+    case_ok=all(r['methods'].get('CASE',{}).get('status')=='COMPLETE' for r in rows)
+    for arm in arms:
+        unavailable=[r for r in rows if r['methods'].get(arm,{}).get('status')!='COMPLETE']
+        report=dict(fallback_components=len(unavailable),
+                    fallback_cases=sum(r['cases'] for r in unavailable))
+        if case_ok:
+            def cost_record(row):
+                own=row['methods'].get(arm,{})
+                if own.get('status')=='COMPLETE':return own
+                return row['methods']['CASE']
+            report['all_case_mean_realized_per_case']=sum(
+                 np.mean(list(cost_record(r)['realized'].values()))
+                 for r in rows)/sum(r['cases'] for r in rows)
+            report['all_case_model_C_per_case']=sum(
+                 cost_record(r)['model']['C'] for r in rows)/sum(r['cases'] for r in rows)
+        output['fallback_CASE'][arm]=report
+    output['audit_failed']=any(
+       rec.get('status')=='INTERNAL_ERROR'
+       for row in rows for rec in list(row['methods'].values())+
+         [row.get('saa_reference',{}),row.get('hindsight',{})])
+    output['evaluation_elapsed_wall_hours']=(time.monotonic()-evaluation_start)/3600.
+    output['worker_hours_all_attempts']=sum(
+        float(rec.get('method_wall_seconds',0.))
+        for row in rows for rec in list(row['methods'].values())+
+             [row.get('saa_reference',{}),row.get('hindsight',{})])/3600.
+    output['audit_status']='INVALID_INTERNAL_ERRORS' if output['audit_failed'] else (
+          'COMPLETE' if all(not r['unresolved'] for r in output['arms'].values())
+          else 'PARTIAL_WITH_EXPLICIT_UNRESOLVED')
     # Model-dependence stress preserves each case's 200-sample marginal.
     output['dependence_stress']={}
     n_all=sum(r['cases'] for r in rows)
