@@ -1,152 +1,102 @@
-# Paper method selection — one 12-hour workstation window
+# Paper-selection experiment — four objectives, 12-hour workstation limit
 
-Run **only** `bash run_selection_12h.sh` on the `paper-selection-12h`
-branch. Do not run the older `run_theory_full.sh` simultaneously.
+Run **only** `bash run_selection_12h.sh` on branch `paper-selection-12h`.
+This invokes `pilot/run_objective_selection.py`, not the older
+proposal-only `pilot/run_selection_12h.py`. Do not run the other full
+paper experiment concurrently.
 
-This is a **new**, deliberately focused experiment. It is not the old
-15-arm experiment with shorter solve limits.
+## What is being compared
 
-## Question and scope
+Train on 24,506 pre-2013 cases; evaluate frozen policies once on
+8,774 2013 cases. The comparison uses one fixed deterministic planner
+hash (seed 0), five shared policy features and nominal behavioral
+response assumptions (alpha=0.8, h=30). The 2013 cohort was used in
+earlier research and is retrospective, not pristine external validation.
 
-* Train once on **24,506** pre-2013 UHN cases; evaluate the frozen policies
-  on the **8,774** 2013 cases.
-* Compare BOOKED, CASE, STAT_PLUS, SHARED_BASE, SHARED_PLUS, VF_PLUS,
-  GAP_PLUS, and ANCHORED_PLUS.
-* All methods use the **same response law** (alpha 0.8, h 30) and
-  **one fixed deterministic primary hash seed (0)**. This intentionally
-  differs from previous three-seed model averages. Do not compare
-  the new absolute numerical results to earlier three-seed results
-  without noting the estimand change.
-* The 2013 cohort has been examined in previous project iterations.
-  The resulting comparison is retrospective, **not pristine external
-  validation**.
-* The statistical outcome is **realized modeled operating-room cost per
-  case**, paired by calendar Monday. Simulated Bank A/B scenarios and
-  historical realized costs are not conflated.
+The four separately fitted objectives begin at the same statistical
+coefficients and use identical six-round coordinate-search directions
+and steps 16, 8, 4, 2, 1, 0.5:
 
-## Interpretation of the learned policies
+- **SHARED:** expected scenario scheduling cost following the deployed
+  exact recommendation.
+- **VF:** primary scheduling value plus scenario stop-loss surrogate.
+  The global MIQP is optional diagnosis, not the training optimizer.
+- **EG_LIB:** a bounded finite-library hinge-form Expected-GAP
+  approximation. Its score is
+  `max_z[g(z)-max(phi(z,d)-Q(d)-eps,0)]`, **without** an extra `Q(d)`.
+  The current primary-optimal assignment is always included in the
+  candidate maximum, even if it is absent from the precomputed library.
+- **ANCHORED_T:** finite-library target-anchored surrogate.
+  It is continuous piecewise linear in advice coefficients, not
+  a hash-selected discrete objective.
 
-| Arm | What is actually fitted |
-|---|---|
-| SHARED_BASE | Bounded lightweight directional direct-cost search |
-| SHARED_PLUS | Expanded direct-cost search initialized from SHARED_BASE; optionally compares VF coefficients as a warm start |
-| VF_PLUS | Existing globally bounded single-level VF MIQP, returning a feasible coefficient incumbent and a bound whenever available |
-| GAP_PLUS | Short EG-adversarial **interval-based candidate screen** followed by a direct-cost check against SHARED |
-| ANCHORED_PLUS | Actual schedule-specific **anchored tangent surrogate**, optimized in the same five-coefficient class and directly confirmed against SHARED |
-| STAT_PLUS | Bounded multistart asymmetric-duration-loss fit on the same five features |
+The benchmark arms are BOOKED, CASE and STAT. All policies are frozen
+before 2013 evaluation. Both full Bank A and Bank B must be exactly
+scored over every fitting component for an update to be accepted;
+partial-sample updates never count as training success. Exact
+unresolved-component counts are logged after each screen and
+confirmation round.
 
-**Important:** GAP_PLUS and ANCHORED_PLUS are bounded *proposal/refinement
-implementations*, **not** fully optimized full-cohort EG or original 74-feature
-anchored pDCA. They are a computationally affordable way to test whether
-their mathematical mechanisms produce better SHARED-type advice. An
-unsuccessful proposal cannot prove the original mathematical objective
-is inferior.
+EG_LIB and ANCHORED_T are restricted finite-schedule approximations,
+not unrestricted EG/Anchored optimization certificates. The libraries
+start with recorded feasible assignments and attempt to incorporate
+CASE, primary, and SAA schedules. Report library diversity and
+coverage. An original-only one-schedule component may provide no
+directional signal to Anchored. The original exact EG is evaluated on a
+training-only sample to contextualize the finite-library approximation.
 
-Where a full training confirmation is incomplete, the algorithm may accept
-a proposal using only a **paired, exactly evaluated training subset of at
-least 98% of cases**, if its gain clears the explicit per-case threshold.
-That is a **heuristic training decision**, recorded as
-`PAIRED_TRAINING_HEURISTIC`, never a full-cohort optimization certificate.
-These decisions use training outcomes only.
+## Time budget
 
-## Hard supervised time budget
+The stage ceilings total **10 h 36 min**, beneath the global
+**11 h 30 min** Unix process-group supervisor (and the user's 12 h
+limit). A hard kill retains previously checkpointed policies and
+component results, but does not guarantee full optimization completion.
 
-The coordinator starts each phase in its own Unix process group, retains
-completed artifacts, and terminates the process group at its **stage wall
-deadline**. Total allocated stage ceilings sum to **11 h 16 min**, leaving
-14 minutes before the global **11 h 30 min** controller ceiling (and 30
-minutes before the user's 12-hour limit). The watchdog terminates
-Gurobi and model-build subprocesses, not just cooperative loops.
-
-| Phase | Maximum |
+| Stage | Maximum |
 |---|---:|
-| Data preparation and frozen feature context | 120 min |
-| STAT_PLUS | 15 min |
-| SHARED_BASE | 45 min |
-| VF_PLUS | 75 min |
-| SHARED_PLUS | 75 min |
-| GAP_PLUS candidate generation | 45 min |
-| ANCHORED_PLUS refinement | 75 min |
-| Freeze policies | 1 min |
-| Complete 2013 evaluation | 210 min |
-| Report | 15 min |
-| **Total** | **676 min** |
+| Setup / features | 120 min |
+| Library construction | 30 min |
+| Training objective landscape scan | 30 min |
+| SHARED | 75 min |
+| VF | 45 min |
+| EG_LIB | 45 min |
+| ANCHORED_T | 30 min |
+| Full-training own/deployed 2x2 and certificates | 100 min |
+| Freeze | 1 min |
+| Frozen 2013 evaluation | 150 min |
+| Final report | 10 min |
+| **Total** | **636 min (10 h 36 min)** |
 
-The exact solver time and number of optimizations completed **cannot** be
-guaranteed. The global ceiling is guaranteed only under normal process
-supervision on a Unix-like machine; power loss, SIGKILL of the supervisor,
-filesystem failures, or resource-manager shutdowns can prevent a final
-report. Avoid another CPU-intensive workload competing for the 15 cores.
+Training components with >=25 cases are already scored one candidate
+per shard for **all** methods. They now receive at least 120 seconds
+for each primary/deployment solve and up to 240 seconds for the
+bounded shard. Smaller components retain the default 45-second
+solve allowance. A complete Bank A/B training comparison is required
+even if this leads to an explicit unresolved status.
 
-## Performance and checkpoints
+The training 2x2 reserves up to **1,200 s per method**, for both
+its own and deployed-cost comparisons. The optional VF MIQP may use
+only remaining certificate time. Test component-arm jobs each receive
+an independent **300-second budget**, with a 120-second solver
+allowance for components with at least 25 cases.
 
-* Feature construction is executed **once**, and a prepared context is
-  saved to `selection/context.pkl` for reuse by all later stages.
-* A single SQLite exact-deployment cache is shared by candidate
-  screening and direct-cost confirmation. Completed scoring shards,
-  training state, per-component test results, and policy files are saved
-  independently.
-* Directional SHARED screening uses five coordinate directions,
-  a smaller 32-component shortlist, and at most two full-cohort
-  candidates per round. Unfinished solver tasks can receive longer
-  retries. A single uncertified component no longer automatically
-  converts every 98%-covered improvement into a nominal no-update.
-* Main test arms use separate task budgets and a **90-second** initial
-  solver allowance, and share certified identical advice deployments.
-  Unresolved tasks remain explicitly unresolved.
-* When an exact deployed recommendation is missing, a separate **all-case
-  fallback replay** uses CASE if certified; otherwise it uses the
-  workbook's recorded feasible original assignment. That performed
-  assignment is **retrospective**, not available as an assumed prospective
-  room plan. It is not represented as the advice method's exact
-  selected plan or claimed to be an implementable operational fallback.
-* A high-cost or unfinished solver does not stop subsequent policy
-  families. A fatal mathematical inconsistency is logged and never
-  converted to a certified plan.
+## Interpretation and files
 
-### File locations
+The final report distinguishes certified-only method costs,
+training objective vs deployed objective, exact case-weighted
+coverage, solver failures, and retrospective fallback replay
+(CASE, then the originally performed room assignment). Recorded
+original assignments are **not** a deployable prospective fallback.
 
-`artifacts/paper_selection_12h/selection/run_status.json`
-: stage status, elapsed seconds and logs
+Calendar-week paired uncertainty summarizes retrospective comparisons;
+neither a numerical winner nor a source of null results proves causal
+improvement. If methods cannot be trained/evaluated credibly, report
+the outcome as computationally unresolved.
 
-`artifacts/paper_selection_12h/selection/policies/*.json`
-: coefficient vector, optimization/provenance status and candidates
-
-`artifacts/paper_selection_12h/selection/frozen.json`
-: final pre-test policy freeze
-
-`artifacts/paper_selection_12h/single_split_2013/full_evaluation/per_arm/`
-: individual component-policy exact test records
-
-`artifacts/paper_selection_12h/selection/selection_summary.json`
-: final case-weighted result, coverage, operational fallback,
-  simultaneous week-clustered bootstrap comparisons, and a provisional
-  method-selection outcome.
-
-The preliminary training libraries and fitted policies are never
-overwritten because a later **evaluation-only** diagnostic is added.
-For a new scientifically different training campaign use a **new**
-`OUT` directory.
-
-## Before claiming a winner
-
-1. Report **exact case-weighted deployment coverage** for every learned
-   arm. A candidate needs at least 98% exact coverage to be selected.
-2. Confirm that SHARED_PLUS also has at least 98% exact coverage.
-3. Use **simultaneous Bonferroni week-clustered bootstrap intervals**
-   for seven predeclared comparisons against SHARED_PLUS. Nominate a
-   challenger only if its upper interval is below **-0.5 modeled cost
-   units per case**, with acceptable optimizer provenance.
-4. Treat a `PAIRED_TRAINING_HEURISTIC` as conditional evidence, not
-   a fully optimized method. If intervals overlap, select the simpler
-   direct SHARED approach, or report that no unique winner was
-   established. Never interpret an untrained GAP/VF/ANCHORED arm as
-   proof against its objective.
-5. If exact coverage is low, report the **fallback operational policy**
-   separately and do not claim strong evidence about the original
-   optimizer.
-
-## Launch
+Artifacts are written below `artifacts/objective_selection_12h/` by
+default, including `objective_selection_2013/selection_summary.json`,
+`objective_selection_2013/run_status.json`, frozen policy records,
+training-round coverage, library diagnostics and per-arm test results.
 
 ```bash
 git fetch origin
@@ -155,10 +105,6 @@ git pull --ff-only origin paper-selection-12h
 bash run_selection_12h.sh
 ```
 
-Override before starting only if necessary:
-`CORES=12 OUT=artifacts/paper_selection_12h_custom bash run_selection_12h.sh`.
-
-All scientific module fingerprints, workbook fingerprint, and time budgets
-are stored in `selection/run_contract.json`; incompatible resumes are
-rejected. Do not open 2013 results and then modify the training methods
-within the same selection claim.
+Change the `OUT` directory whenever scientific source, time limits
+or input data change. The run contract hashes the study's source and
+workbook to prevent incompatible checkpoint reuse.
