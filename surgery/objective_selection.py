@@ -180,8 +180,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                     solve_seconds=45.,task_seconds=150.,rounds=6):
     """Same STAT start, steps and screening for all four method objectives.
 
-    No partial acceptance, no cross-method chaining. Each full-bank result
-    is exactly the sum across ALL components, or it is unresolved.
+    No partial acceptance or cross-method chaining. Bank-A AND Bank-B
+    must each cover ALL training components for a certified update.
     """
     from pilot import run_theory_full as full
     method=str(method)
