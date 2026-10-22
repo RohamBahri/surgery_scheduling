@@ -738,6 +738,32 @@ def evaluate_all(args,ctx,models):
     arms=sorted({m for row in rows for m in row['methods']})
     output=dict(fold=ctx['root'].name,n_cases=sum(r['cases'] for r in rows),
                 components=len(rows),n_mondays=len(set(r['monday'] for r in rows)),arms={})
+    # A feasible starting policy is not evidence of successful training.
+    # These records prevent a zero-round EG/SHARED fit from appearing to be
+    # an equally optimized candidate in the final paper comparison.
+    training_paths={'VF_SHARED':ctx['root']/'vf_global.json',
+                    'STAT_PLUS':ctx['root']/'stat_plus.json',
+                    'STAT':ctx['root']/'stat.json'}
+    for name in ('SHARED','OBS','EG','ROBUST'):
+        training_paths[name]=ctx['root']/name.lower()/'trained.json'
+    output['training_status']={}
+    for name,path in training_paths.items():
+        if path.exists():
+            saved=json.loads(path.read_text())
+            output['training_status'][name]=dict(
+                status=saved.get('status',
+                       'SURROGATE_SOLVER_RESULT' if name=='VF_SHARED'
+                       else 'FITTED_CONTROL'),
+                completed_rounds=saved.get('completed_rounds'),
+                requested_rounds=saved.get('requested_rounds'),
+                feasible=bool(name not in models or models.get(name) is not None),
+                solver_bound=saved.get('lower'),
+                solver_incumbent=saved.get('upper'))
+        else:
+            output['training_status'][name]=dict(
+                status='NOT_TRAINED_OR_UNRESOLVED',
+                feasible=bool(models.get(name) is not None))
+
     for arm in arms:
         records=[r for r in rows if r['methods'].get(arm,{}).get('status')=='COMPLETE']
         # Never compare methods on different selected cohorts without disclosure.
