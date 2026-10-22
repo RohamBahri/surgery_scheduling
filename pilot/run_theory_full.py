@@ -756,7 +756,7 @@ def evaluate_all(args,ctx,models):
                        else 'FITTED_CONTROL'),
                 completed_rounds=saved.get('completed_rounds'),
                 requested_rounds=saved.get('requested_rounds'),
-                feasible=bool(name not in models or models.get(name) is not None),
+                feasible=bool(models.get(name) is not None),
                 solver_bound=saved.get('lower'),
                 solver_incumbent=saved.get('upper'))
         else:
