@@ -163,25 +163,63 @@ def build_problems(items,data,H,beta,pools,output,*,seconds=90.,
     return problems
 
 
-def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2),deadline=None):
-    total=0.; n=0
-    for p in problems:
-        c=p.week
-        lo,hi=reachable(c.booked,.8,30.)
-        d=np.clip(p.d0+p.H@(beta+theta),lo,hi)
-        zs=[]
-        for seed in seeds:
-            budget=seconds if deadline is None else min(seconds,max(0.,deadline-time.monotonic()))
-            if budget<=0:return None
-            sol=solve_week(c,d,seconds=budget,tie=True,hash_seed=seed)
-            if not sol.complete:return None
-            zs.append(tuple(map(int,sol.assignment)))
-        if p.targets is not None and any(z not in p.targets[i]
-                                          for i,z in enumerate(zs)):
-            return None
-        total+=float(np.mean([expected_reduced(c,z,p.bank) for z in zs])
-                     +lam/2*np.square(d-p.d0).sum())
-        n+=c.n
+def _evaluate_one(job):
+    p,theta,beta,seconds,lam,seeds,deadline=job
+    c=p.week
+    lo,hi=reachable(c.booked,.8,30.)
+    d=np.clip(p.d0+p.H@(beta+theta),lo,hi)
+    zs=[]
+    for seed in seeds:
+        budget=seconds if deadline is None else min(seconds,max(0.,deadline-time.monotonic()))
+        if budget<=.1:return None
+        sol=solve_week(c,d,seconds=budget,threads=1,tie=True,hash_seed=seed)
+        if not sol.complete or sol.assignment is None:return None
+        zs.append(tuple(map(int,sol.assignment)))
+    if p.targets is not None and any(z not in p.targets[i]
+                                      for i,z in enumerate(zs)):
+        return None
+    value=float(np.mean([expected_reduced(c,z,p.bank) for z in zs])
+                +lam/2*np.square(d-p.d0).sum())
+    return value,c.n
+
+
+def _evaluate(problems,theta,beta,seconds,lam=.001,seeds=(0,1,2),
+              deadline=None,pool=None):
+    """Sum VERIFIED component deployments; parallelism changes no objective."""
+    total=0.;n=0
+    jobs=((p,theta,beta,seconds,lam,seeds,deadline) for p in problems)
+    if pool is None:
+        for job in jobs:
+            result=_evaluate_one(job)
+            if result is None:return None
+            value,cases=result;total+=value;n+=cases
+    else:
+        from concurrent.futures import wait,FIRST_COMPLETED
+        active={};source=iter(jobs)
+        capacity=max(1,2*getattr(pool,"_max_workers",1))
+        def launch():
+            if deadline is not None and time.monotonic()>=deadline:return False
+            try:job=next(source)
+            except StopIteration:return False
+            future=pool.submit(_evaluate_one,job)
+            active[future]=True
+            return True
+        for _ in range(min(len(problems),capacity)):
+            if not launch():break
+        while active:
+            done,_=wait(active,return_when=FIRST_COMPLETED)
+            for future in done:
+                active.pop(future)
+                result=future.result()
+                if result is None:
+                    # The returned score must be from ALL components.
+                    # We do not use incomplete partial totals as upper bounds.
+                    for pending in active:pending.cancel()
+                    return None
+                value,cases=result;total+=value;n+=cases
+                launch()
+    if n!=sum(p.week.n for p in problems):
+        return None
     return total/n
 
 
