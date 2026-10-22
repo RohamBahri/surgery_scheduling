@@ -361,12 +361,42 @@ def summarize(args):
         file=folder/'certificates'/(method+'.json')
         diagnostics[method]=(json.loads(file.read_text()) if file.exists() else
                               dict(status='CERTIFICATES_NOT_FINISHED'))
+    landscape_file=folder/'landscape'/'landscape.json'
+    landscape=(json.loads(landscape_file.read_text()) if landscape_file.exists() else {})
+    mechanism={}
+    for method in METHODS:
+        certificate=diagnostics[method]
+        own=certificate.get('own_objective_improved')
+        deployed=certificate.get('deployed_objective_improved')
+        scan=landscape.get(method,{})
+        vals=scan.get('scores',[])
+        possible_descent=(None if not vals or vals[0] is None else any(
+             v is not None and v<vals[0]-1e-7 for v in vals[1:]))
+        scan_closed=bool(vals and all(v is not None for v in vals))
+        if own is True and deployed is True:
+            reading='OBJECTIVE_AND_DEPLOYED_COST_IMPROVED'
+        elif own is True and deployed is False:
+            reading='SURROGATE_DEPLOYMENT_MISALIGNMENT'
+        elif own is False and possible_descent is True:
+            reading='SEARCH_DID_NOT_REALIZE_SCANNED_DESCENT'
+        elif own is False and scan_closed and possible_descent is False:
+            reading='NO_DESCENT_ON_TESTED_AXES_ONLY'
+        elif own is False and method in ('SHARED','ANCHORED_T'):
+            reading='POSSIBLE_DISCRETE_PLATEAU'
+        else:reading='UNRESOLVED_OPTIMIZATION_OR_COMPARISON'
+        mechanism[method]=dict(interpretation=reading,
+              own_improved=own,deployed_improved=deployed,
+              descent_seen_on_axes=possible_descent,
+              axis_scan_fully_certified=scan_closed)
     output=dict(status='FALLBACK_COMPLETE' if total_valid else 'PARTIAL_TEST',
           cases=N,calendar_weeks=len(weekdata),method_coverage=coverage,
           fallback_replay=fallback,contrasts=contrasts,
           training=summaries,training_objective_vs_deployed=diagnostics,
-          landscape=(json.loads((folder/'landscape'/'landscape.json').read_text())
-                     if (folder/'landscape'/'landscape.json').exists() else {}),
+          mechanism_classification=mechanism,landscape=landscape,
+          eg_exact_sample=(json.loads((folder/'certificates'/'eg_exact_sample.json').read_text())
+             if (folder/'certificates'/'eg_exact_sample.json').exists() else None),
+          vf_global_bound=(json.loads((folder/'certificates'/'vf_global_bound.json').read_text())
+             if (folder/'certificates'/'vf_global_bound.json').exists() else None),
           caveats=['EG_LIB is a finite-schedule lower approximation to EG',
                    'ANCHORED_T uses library targets and is not exact inducibility',
                    'Axis scans do not certify global or unrestricted local minima',
