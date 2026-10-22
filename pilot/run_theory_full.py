@@ -622,12 +622,12 @@ def _eval_component(task):
         ans=value_function_exact(c,banks['A'],d0,
                   seconds=require_budget(pw_seconds),
                   separation_seconds=min(seconds,remaining(pw_seconds)),
-                  seed=0,saa_reference=saa)
+                  seeds=SEEDS,saa_reference=saa)
         if ans['reviewed'] is None:
             cases['PW_VFCG']=dict(status='UNRESOLVED',global_certificate=ans)
         else:
             add('PW_VFCG',ans['reviewed'],dict(global_certificate=ans,
-                 optimization_hash_seed=0))
+                 optimization_hash_seeds=list(SEEDS)))
     attempt('PW_VFCG',vfcg)
     return ck,dict(site=c.group,monday=c.monday,cases=c.n,
                    methods=cases,hindsight=hindsight,saa_reference=reference,
