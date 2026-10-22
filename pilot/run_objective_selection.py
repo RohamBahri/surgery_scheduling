@@ -117,11 +117,71 @@ def _score_pair(ctx,method,coeff,out,deadline,cores):
         return estimates
 
 
+def _eg_certificate_one(task):
+    """Exact or bounded EG value on a fixed real training component."""
+    from surgery.theory_exact import expected_gap_mip
+    from surgery.anchored_weekly_solver import solve_week
+    from surgery.planner import reachable
+    c,d,d0,bank,label,seconds=task
+    t0=time.monotonic()
+    try:
+        primary=solve_week(c,d,seconds=min(seconds/3,18.),
+                           threads=1,tie=False)
+        if not primary.complete:
+            return dict(status='PRIMARY_UNCERTIFIED',label=label,site=c.group,
+                        monday=c.monday,n=c.n)
+        q=float(primary.value-480*c.k+np.sum(d)+30*c.n)
+        remaining=max(.1,seconds-(time.monotonic()-t0))
+        ans=expected_gap_mip(c,d,bank,seconds=remaining,threads=1)
+        penalty=.001/2*np.square(d-d0).sum()
+        return dict(status=ans.status,label=label,site=c.group,
+            monday=c.monday,n=c.n,globally_closed=bool(ans.complete),
+            lower=None if ans.lower is None else q+ans.lower+penalty,
+            upper=None if ans.upper is None else q+ans.upper+penalty,
+            lower_is_adversary_primal=ans.lower is not None,
+            upper_is_adversary_dual=ans.upper is not None,
+            seconds=time.monotonic()-t0)
+    except Exception as exc:
+        return dict(status='UNRESOLVED',error=repr(exc),label=label,
+                    site=c.group,monday=c.monday,n=c.n)
+
+
+def eg_final_certificates(ctx,coeff,output,*,cores=15,seconds=420.):
+    """Ground exact EG intervals on a mixed-size TRAINING subset only."""
+    from concurrent.futures import ProcessPoolExecutor,as_completed
+    from multiprocessing import get_context
+    from surgery.objective_selection import _sample
+    start=time.monotonic()
+    base=ctx['fit']['X']@ctx['fit']['case_w']
+    subset=_sample(ctx['train'],n=12)
+    tasks=[]
+    for ck,c,rows in subset:
+        d0=full.reviewed(c.booked,base[rows])
+        bank=full.scenarios(c,d0,ctx['pools'],20261020,count=50)
+        for label,w in (('STAT',ctx['beta']),('EG_LIB',coeff)):
+            d=full.reviewed_policy(c,rows,ctx['H'],d0,w)
+            tasks.append((c,d,d0,bank,label,65.))
+    result=[]
+    with ProcessPoolExecutor(max_workers=min(cores,len(tasks)),
+         mp_context=get_context('spawn')) as pool:
+        pending=[pool.submit(_eg_certificate_one,t) for t in tasks]
+        for future in as_completed(pending):
+            result.append(future.result())
+            save(output,dict(entries=result,total_targets=len(tasks),
+                 certified=sum(r.get('globally_closed',False) for r in result),
+                 elapsed=time.monotonic()-start,
+                 interpretation='sampled original EG, not EG_LIB training objective'))
+    return result
+
+
 def certify(args):
     """Training-only 2x2: optimize own objective vs deployed objective."""
     ctx=load_context(args)
     end=time.monotonic()+3500.
     out=root(args)/'certificates';out.mkdir(parents=True,exist_ok=True)
+    if policy(args,'EG_LIB') is not None and not (out/'eg_exact_sample.json').exists():
+        eg_final_certificates(ctx,policy(args,'EG_LIB'),out/'eg_exact_sample.json',
+                              cores=args.cores,seconds=420.)
     for method in METHODS:
         destination=out/(method+'.json')
         if destination.exists():continue
