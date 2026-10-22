@@ -167,6 +167,27 @@ def scores(c,d,d0,bank,method,seconds,seed=0,deadline=None):
         if not ans.complete:
             raise RuntimeError('EG adversary incomplete: '+ans.status)
         return float(ans.value)+LAM/2*np.square(d-d0).sum()
+    if method in ('EG_LIB','ANCHORED_T'):
+        library=(_SCORE_STATE or {}).get('libraries',{}).get(key(c))
+        if library is None or not library.get('schedules'):
+            raise RuntimeError('SCHEDULE_LIBRARY_UNRESOLVED')
+        from surgery.theory_exact import reduced as phi
+        schedules=library['schedules']
+        g=[expected_reduced(c,z,bank) for z in schedules]
+        f=[phi(c,z,d) for z in schedules]
+        if method=='EG_LIB':
+            from surgery.anchored_weekly_solver import solve_week
+            from surgery.weekly_planner import _objective_tolerance
+            ans=solve_week(c,d,seconds=limit(),threads=1,tie=False)
+            if not ans.complete or ans.value is None:
+                raise RuntimeError('EG_LIBRARY_PRIMARY_UNCERTIFIED: '+ans.status)
+            Q=float(ans.value-480*c.k+np.sum(d)+30*c.n)
+            eps=_objective_tolerance(ans.value)
+            value=Q+max(gz-max(fz-Q-eps,0.) for gz,fz in zip(g,f))
+        else:
+            target=int(np.argmin(g))
+            value=f[target]+max(gz-fz for gz,fz in zip(g,f))
+        return float(value+LAM/2*np.square(d-d0).sum())
     if method in ('SHARED','SHARED_BASE','SHARED_PLUS','SHARED_LEGACY','OBS','ROBUST'):
         if method=='ROBUST':
             u=display(c.booked,d)
@@ -223,8 +244,10 @@ def _train_component(task):
     deadline=min(started+task_seconds,
                  float('inf') if parent_deadline is None else parent_deadline)
     d0=reviewed(c.booked,base[rows])
-    bank=scenarios(c,d0,pools,(20261020 if round_id>=0
-                        else 20261021+1009*(-round_id-1)),count=50)
+    seed=(20261020 if round_id>=0 else
+          20261021 if (_SCORE_STATE or {}).get('fixed_banks') else
+          20261021+1009*(-round_id-1))
+    bank=scenarios(c,d0,pools,seed,count=50)
     results=[]
     for j in indices:
         stats=(_SCORE_STATE or {}).get('planner_stats',{})
