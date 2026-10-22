@@ -38,12 +38,12 @@ simulations and linear-algebra libraries use one thread inside each worker.
 
 | Budget | Default | Scope |
 | --- | ---: | --- |
-| `SOLVE_SECONDS` | 90 s | One individual planner or MILP call |
-| `TASK_SECONDS` | 600 s | One coefficient/case-component candidate shard |
+| `SOLVE_SECONDS` | 120 s | One individual planner or MILP call |
+| `TASK_SECONDS` | 1,500 s | One coefficient/case-component candidate shard |
 | `ROUND_SECONDS` | 7,200 s | One directional search round, soft bound |
-| `SEARCH_SECONDS` | 21,600 s | One directional learning method, soft bound |
-| `PREPROCESS_SECONDS` | 7,200 s | Training SAA/target preprocessing pass |
-| `GLOBAL_SECONDS` | 7,200 s | Each coefficient-region global search |
+| `SEARCH_SECONDS` | 14,400 s | One directional learning method, soft bound |
+| `PREPROCESS_SECONDS` | 14,400 s | Training SAA/target preprocessing pass |
+| `GLOBAL_SECONDS` | 14,400 s | Each coefficient-region global search |
 | `SHARED_SECONDS` | 14,400 s | Entire coupled VF model build and solve |
 | `PW_SECONDS` | 480 s | Each per-instance optimization method |
 | `EVAL_COMPONENT_SECONDS` | 4,200 s | Every tested component, all arms combined |
