@@ -56,62 +56,95 @@ def _target_task(job):
     return key,selected
 
 
-def build_problems(items,data,H,beta,pools,output,*,seconds=120.,
-                   seeds=(0,1,2),target_restricted=False,cores=1):
-    """Full-component SAA bounds and restricted target plans, saved on completion.
+def _parallel_preprocess(work, worker, folder, seconds, cores, deadline):
+    """Checkpoint finished solver tasks and stop launching new jobs at deadline."""
+    from concurrent.futures import wait,FIRST_COMPLETED
+    submitted=0;completed=0;failed=0
+    if not work:
+        return dict(submitted=0,completed=0,failed=0)
+    with ProcessPoolExecutor(max_workers=min(cores,len(work)),
+                             mp_context=get_context('spawn')) as pool:
+        source=iter(work);active={}
+        def launch():
+            nonlocal submitted
+            if time.monotonic()>=deadline:return False
+            try:item=next(source)
+            except StopIteration:return False
+            future=pool.submit(worker,item)
+            active[future]=item
+            submitted+=1
+            return True
+        for _ in range(min(2*cores,len(work))):
+            if not launch():break
+        while active:
+            done,_=wait(active,return_when=FIRST_COMPLETED)
+            for future in done:
+                item=active.pop(future)
+                ck=item[0]
+                try:
+                    name,result=future.result()
+                    if name!=ck:raise AssertionError('Preprocessing key mismatch')
+                    _save(folder/(ck+'.json'),result)
+                    completed+=1
+                except (RuntimeError,ValueError) as exc:
+                    # A failed target is not silently declared inducible.
+                    _save(folder/(ck+'.json'),dict(
+                           status='UNRESOLVED',error=str(exc)))
+                    failed+=1
+                if completed%100==0 and completed:
+                    print('Preprocessing completed:',completed,'/',len(work),flush=True)
+                launch()
+    return dict(submitted=submitted,completed=completed,failed=failed)
 
-    The optimization is NOT restricted to a schedule library. Every SAA dual
-    bound is a valid relaxation; timeouts preserve their bound and status.
+
+def build_problems(items,data,H,beta,pools,output,*,seconds=90.,
+                   seeds=(0,1,2),target_restricted=False,cores=1,
+                   stage_seconds=7200.):
+    """Certified SAA dual preprocessing under a finite shared wall budget.
+
+    Unfinished SAA tasks contribute zero, always a VALID (weak) lower bound
+    because the reduced cost is nonnegative. No missing target schedule is
+    misrepresented as a feasible inductive alternative.
     """
     from surgery.planner import reachable
-    from time import monotonic
-    clock=monotonic()
+    start=time.monotonic();deadline=start+stage_seconds
     root=Path(output);folder=root/'saa_bounds'
     folder.mkdir(parents=True,exist_ok=True)
     prepared=[];missing=[]
+    base=data['X']@data['case_w']
     for ck,c,rows in items:
-        d0=reviewed(c.booked,data['X'][rows]@data['case_w'])
+        d0=reviewed(c.booked,base[rows])
         bank=scenarios(c,d0,pools,20261020,count=50)
-        path=folder/(ck+'.json')
-        prepared.append((ck,c,rows,d0,bank,path))
-        if not path.exists():
-            missing.append((ck,c,bank,seconds))
-    if missing:
-        with ProcessPoolExecutor(max_workers=min(cores,len(missing)),
-                                 mp_context=get_context('spawn')) as executor:
-            futures=[executor.submit(_saa_task,job) for job in missing]
-            for idx,future in enumerate(as_completed(futures)):
-                ck,record=future.result()
-                _save(folder/(ck+'.json'),record)
-                if (idx+1)%100==0:
-                    print(f'SAA bounds: saved {idx+1}/{len(missing)}',flush=True)
-    missing_targets=[]
-    targets_folder=root/'target_plans'
+        file=folder/(ck+'.json')
+        prepared.append((ck,c,rows,d0,bank,file))
+        if not file.exists():missing.append((ck,c,bank,seconds))
+    stats=_parallel_preprocess(missing,_saa_task,folder,seconds,cores,deadline)
+    target_stats=dict(submitted=0,completed=0,failed=0)
+    target_folder=root/'target_plans'
     if target_restricted:
-        targets_folder.mkdir(parents=True,exist_ok=True)
-        for ck,c,rows,d0,bank,path in prepared:
-            dest=targets_folder/(ck+'.json')
+        target_folder.mkdir(parents=True,exist_ok=True)
+        missing_targets=[]
+        for ck,c,rows,d0,bank,file in prepared:
+            dest=target_folder/(ck+'.json')
             if dest.exists():continue
-            starting=np.clip(d0+H[rows]@beta,*reachable(c.booked,.8,30.))
-            missing_targets.append((ck,c,starting,seeds,seconds))
-        if missing_targets:
-            with ProcessPoolExecutor(max_workers=min(cores,len(missing_targets)),
-                                     mp_context=get_context('spawn')) as executor:
-                futures=[executor.submit(_target_task,job) for job in missing_targets]
-                for idx,future in enumerate(as_completed(futures)):
-                    ck,record=future.result()
-                    _save(targets_folder/(ck+'.json'),record)
-                    if (idx+1)%100==0:
-                        print(f'Target plans: saved {idx+1}/{len(missing_targets)}',flush=True)
-    problems=[]
-    for ck,c,rows,d0,bank,path in prepared:
-        rec=json.loads(path.read_text())
-        lb=max(0.,float(rec['lower'] if rec['lower'] is not None else 0.))
+            start_d=np.clip(d0+H[rows]@beta,*reachable(c.booked,.8,30.))
+            missing_targets.append((ck,c,start_d,seeds,seconds))
+        target_stats=_parallel_preprocess(missing_targets,_target_task,
+                                          target_folder,seconds,cores,deadline)
+    problems=[];unresolved_saa=0;unresolved_targets=0
+    for ck,c,rows,d0,bank,file in prepared:
+        rec=json.loads(file.read_text()) if file.exists() else dict(
+             status='PREPROCESS_WALL_LIMIT',lower=None,assignment=None)
+        if rec.get('lower') is None:unresolved_saa+=1
+        lb=max(0.,float(rec['lower'] or 0.))
         targets=None
         if target_restricted:
-            own=json.loads((targets_folder/(ck+'.json')).read_text())
-            if len(own)!=len(seeds):
-                raise RuntimeError('Incomplete saved target schedule record')
+            targetfile=target_folder/(ck+'.json')
+            own=json.loads(targetfile.read_text()) if targetfile.exists() else dict(
+                status='PREPROCESS_WALL_LIMIT')
+            if not isinstance(own,list) or len(own)!=len(seeds):
+                unresolved_targets+=1
+                continue
             candidate=(tuple(map(int,rec['assignment'])) if rec.get('assignment') else None)
             targets=tuple(set([tuple(map(int,z))]+([candidate] if candidate else []))
                           for z in own)
@@ -119,10 +152,14 @@ def build_problems(items,data,H,beta,pools,output,*,seconds=120.,
                               for group in targets]))
         problems.append(Problem(ck,c,d0,H[rows],bank,lb,targets))
     _save(root/('target_preprocessing.json' if target_restricted else 'saa_preprocessing.json'),
-          dict(components=len(problems),new_saa=len(missing),
-               new_target_plans=len(missing_targets),
-               elapsed_seconds=monotonic()-clock,
+          dict(components=len(items),ready_components=len(problems),
+               unresolved_saa=unresolved_saa,unresolved_targets=unresolved_targets,
+               saa_tasks=stats,target_tasks=target_stats,
+               elapsed_seconds=time.monotonic()-start,wall_budget=stage_seconds,
                threads_per_solve=1,parallel_workers=min(cores,len(items))))
+    if target_restricted and unresolved_targets:
+        raise RuntimeError(f'{unresolved_targets} restricted target sets were uncertified; '
+                           'do not claim an ANCHORED_TARGET optimum')
     return problems
 
 
