@@ -201,7 +201,9 @@ def _sample(items,n=150):
 
 
 def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
-                    solve_seconds=45.,task_seconds=150.,rounds=6):
+                    solve_seconds=45.,task_seconds=150.,rounds=6,
+                    active_features=None,coefficient_radius=16.,
+                    initial_step=None,library_enrichment=True):
     """Same STAT start, steps and screening for all four method objectives.
 
     No partial acceptance or cross-method chaining. Bank-A AND Bank-B
@@ -211,6 +213,13 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
     method=str(method)
     if method not in ('SHARED','VF','EG_LIB','ANCHORED_T'):
         raise ValueError('Unknown training objective')
+    active_features=(tuple(range(5)) if active_features is None
+                     else tuple(int(i) for i in active_features))
+    if not active_features or len(set(active_features))!=len(active_features) or any(j not in range(5) for j in active_features):
+        raise ValueError('Invalid selected coefficient coordinates')
+    coefficient_radius=float(coefficient_radius)
+    if coefficient_radius<=0:raise ValueError('Invalid coefficient radius')
+    initial_step=coefficient_radius if initial_step is None else float(initial_step)
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     start=time.monotonic();deadline=start+seconds
     path=out/'progress.json'
@@ -219,6 +228,10 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
         state=json.loads(path.read_text())
         theta=np.asarray(state['theta'],float)
         history=state['history']
+        if (state.get('active_features',list(range(5)))!=list(active_features) or
+            float(state.get('coefficient_radius',16.))!=coefficient_radius or
+            float(state.get('initial_step',16.))!=initial_step):
+            raise RuntimeError('Incompatible VF checkpoint: change output directory')
     else:
         theta=np.zeros(5);history=[]
     if theta.shape!=(5,):raise AssertionError('Invalid five-feature checkpoint')
@@ -240,11 +253,12 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
     for round_id in range(len(history),rounds):
         if deadline-time.monotonic()<10:
             stopped='STAGE_DEADLINE';break
-        step=16./2**round_id
+        step=initial_step/2**round_id
         starts=[beta+theta]
-        for j in range(5):
+        for j in active_features:
             for direction in (-1.,1.):
-                trial=np.clip(theta+direction*step*np.eye(5)[j],-16.,16.)
+                trial=np.clip(theta+direction*step*np.eye(5)[j],
+                              -coefficient_radius,coefficient_radius)
                 starts.append(beta+trial)
         rounddir=out/f'round_{round_id:02d}'
         with ProcessPoolExecutor(max_workers=cores,mp_context=get_context('spawn'),
@@ -259,7 +273,10 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                 history.append(dict(round=round_id,status='NO_CERTIFIED_SCREEN_DIRECTION',
                                     step=step,screen_certified=int(eligible.sum()),
                                     screen_coverage=batch_coverage(rounddir/'screen')))
-                _save(path,dict(theta=theta.tolist(),history=history,method=method))
+                _save(path,dict(theta=theta.tolist(),history=history,method=method,
+                                active_features=list(active_features),
+                                coefficient_radius=coefficient_radius,
+                                initial_step=initial_step))
                 continue
             candidates=[starts[i].tolist() for i in indices]
             A,goodA=full.parallel_score(ctx['train'],ctx['fit'],ctx['H'],
@@ -295,8 +312,11 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                         decision['candidate_index']=indices[chosen]
             else:decision['status']='NO_FULL_CERTIFIED_IMPROVEMENT'
             history.append(decision)
-            _save(path,dict(theta=theta.tolist(),history=history,method=method))
-        if decision['accepted']:
+            _save(path,dict(theta=theta.tolist(),history=history,method=method,
+                                active_features=list(active_features),
+                                coefficient_radius=coefficient_radius,
+                                initial_step=initial_step))
+        if decision['accepted'] and library_enrichment:
             enrich_library(ctx,libraries,beta+theta,
                            ctx['root']/'training_library')
     status=('ACCEPTED_FULL_A_B' if any(v.get('accepted') for v in history)
@@ -307,7 +327,9 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                 rounds_requested=rounds,history=history,
                 library_coverage=len(libraries)/len(ctx['train']),
                 seconds=time.monotonic()-start,
-                optimizer='common_coordinate_16_8_4_2_1_0.5',
+                active_features=list(active_features),
+                coefficient_radius=coefficient_radius,
+                optimizer=f'coordinate_{initial_step:g}_six_rounds',
                 caveat='No partial acceptance; unfinished evaluation is not a loss')
     _save(out/'trained.json',answer)
     return answer
