@@ -1,14 +1,30 @@
+# Research datasets and generated experiment outputs
 /results/
 /data/
 /artifacts/
+/presentation_figures/
+
+# Archives and large binary exports
 *.xlsx
 *.pkl
 *.sqlite*
 *.log
 *.zip
+*.tgz
+*.tar.gz
+
+# Python, macOS, and local development state
+.DS_Store
+.AppleDouble
+__MACOSX/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 *.egg-info/
 .venv/
 .env
+.env.*
+gurobi.env
+
+# Optional personal scratch area (move untracked prototypes here deliberately)
+/local/
