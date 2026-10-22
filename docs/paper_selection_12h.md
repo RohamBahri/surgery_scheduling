@@ -1,6 +1,6 @@
 # Paper-selection experiment — four objectives, 12-hour workstation limit
 
-Run **only** `bash run_selection_12h.sh` on branch `paper-selection-12h`.
+Historical reproduction only: `bash run_selection_12h.sh` from `main` (the October 2026 comparison has completed).
 This invokes `pilot/run_objective_selection.py`, not the older
 proposal-only `pilot/run_selection_12h.py`. Do not run the other full
 paper experiment concurrently.
@@ -100,7 +100,7 @@ training-round coverage, library diagnostics and per-arm test results.
 
 ```bash
 git fetch origin
-git switch paper-selection-12h
+git switch main
 git pull --ff-only origin paper-selection-12h
 bash run_selection_12h.sh
 ```
