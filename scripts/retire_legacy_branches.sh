@@ -2,8 +2,10 @@
 # One-time VF branch cleanup, preserving both frozen VF and divergent w2b history.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: Commit or stash changes before pruning." >&2
+# Untracked files are permitted: they may contain valuable local research.
+# Git itself will refuse a checkout if one of them conflicts with a tracked file.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "ERROR: Commit or stash changes to tracked files before pruning." >&2
   exit 2
 fi
 if [[ "${1:-}" != "" && "${1:-}" != "--dry-run" ]]; then
@@ -13,7 +15,12 @@ fi
 dry=0
 [[ "${1:-}" == "--dry-run" ]] && dry=1
 git fetch --prune origin
-git switch main
+if ! git switch main; then
+  echo "ERROR: Checkout blocked, possibly by an untracked filename collision." >&2
+  echo "Move the specific conflicting untracked files aside, then rerun." >&2
+  echo "For a .DS_Store collision, 'rm -f .DS_Store' is safe Finder-metadata cleanup." >&2
+  exit 2
+fi
 git pull --ff-only origin main
 vf_sha="36ba5c62e561527c0bb67547dd7d5e72e9a86372"
 w2b_sha="05c2fbee93c4042436489912425c99ae934c5a34"
