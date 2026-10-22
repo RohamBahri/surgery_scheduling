@@ -27,7 +27,8 @@ def _sample(items, limit=28):
     # Preserve large cases; small cases alone conceal all tie/complexity issues.
     ordered=sorted(source,key=lambda x:-x[1].n)
     large=ordered[:min(6,limit//3)]
-    remaining=[x for x in source if x not in large]
+    chosen={x[0] for x in large}
+    remaining=[x for x in source if x[0] not in chosen]
     idx=rng.choice(len(remaining),size=limit-len(large),replace=False)
     return large+[remaining[int(j)] for j in idx]
 
