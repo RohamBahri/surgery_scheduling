@@ -49,7 +49,7 @@ def _library_one(task):
     solutions=[tuple(map(int,c.original))]
     statuses={'ORIGINAL':'FEASIBLE'}
     try:
-        result=solve_week(c,d0,seconds=min(seconds,35.),threads=1,
+        result=solve_week(c,d0,seconds=min(8.,seconds),threads=1,
                           tie=True,hash_seed=0)
         if result.complete and result.assignment is not None:
             solutions.append(tuple(map(int,result.assignment)))
@@ -59,7 +59,7 @@ def _library_one(task):
         statuses['CASE']='UNRESOLVED:'+type(exc).__name__
     try:
         left=max(.01,seconds-(time.monotonic()-tic))
-        result=solve_week(c,d0,seconds=min(6.,left),threads=1,tie=False)
+        result=solve_week(c,d0,seconds=min(4.,left),threads=1,tie=False)
         if result.complete and result.assignment is not None:
             solutions.append(tuple(map(int,result.assignment)))
             statuses['PRIMARY']='CERTIFIED'
