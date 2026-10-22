@@ -62,7 +62,8 @@ def secure_manifest(root,args):
     from pilot.run_advice_comparison import SOURCE_DEPENDENCIES
     files=sorted(set(SOURCE_DEPENDENCIES) | {'pilot/run_theory_full.py',
           'surgery/theory_exact.py','surgery/theory_regions.py','surgery/theory_bilevel.py',
-          'surgery/theory_reporting.py','surgery/theory_cache.py'})
+          'surgery/theory_reporting.py','surgery/theory_cache.py',
+          'surgery/theory_stat.py'})
     config=dict(workbook=digest(args.workbook),source={f:digest(p/f) for f in files},
                 folds=args.fold,final_acknowledged=args.acknowledge_final,seconds=args.seconds,pw_seconds=args.pw_seconds,
                 shared_seconds=args.shared_seconds,rounds=args.rounds,search_seconds=args.search_seconds,
@@ -72,7 +73,8 @@ def secure_manifest(root,args):
                 mechanism_seconds=args.mechanism_seconds,
                 preprocess_seconds=args.preprocess_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
-                pw_nodes=args.pw_nodes,
+                pw_nodes=args.pw_nodes,stat_seconds=args.stat_seconds,
+                eval_arms=args.eval_arms,
                 scenario_seed=20261020,scenarios=dict(A=50,B=50,C=200),
                 response_grid=SWEEP,hash_seeds=SEEDS,
                 note='Only full verified deployments count as completed; no silent fallback')
@@ -941,6 +943,7 @@ def main():
     ap.add_argument('--pw-seconds',type=float,default=480)
     ap.add_argument('--pw-nodes',type=int,default=100)
     ap.add_argument('--shared-seconds',type=float,default=14400)
+    ap.add_argument('--stat-seconds',type=float,default=1800.)
     ap.add_argument('--radius',type=float,default=32.)
     ap.add_argument('--rounds',type=int,default=10)
     ap.add_argument('--search-seconds',type=float,default=14400.,
@@ -953,7 +956,7 @@ def main():
                     help='Frozen design: all 24,506 pre-2013 cases train; 8,774 2013 cases test')
     ap.add_argument('--acknowledge-final',action='store_true',
                     help='Explicitly acknowledge that the 2013 test is being opened once')
-    ap.add_argument('--methods',default='VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED')
+    ap.add_argument('--methods',default='STAT_PLUS,VF,SHARED,EG,OBS,ROBUST')
     ap.add_argument('--global-nodes',type=int,default=40)
     ap.add_argument('--global-seconds',type=float,default=14400.)
     ap.add_argument('--mechanism-seconds',type=float,default=600.,
@@ -964,10 +967,11 @@ def main():
                     help='Whole wall budget for training SAA preprocessing stage')
     args=ap.parse_args()
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
-    if not set(args.methods)<=set(['VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
+    if not set(args.methods)<=set(['STAT_PLUS','VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
-                                         args.eval_component_seconds,args.preprocess_seconds,args.mechanism_seconds)<=0:
+                                         args.eval_component_seconds,args.preprocess_seconds,args.mechanism_seconds,
+                                         args.stat_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
         ap.error('Opening the 2013 test requires --acknowledge-final')
@@ -980,6 +984,14 @@ def main():
         ctx=make_context(args,fold,cohort)
         models={'STAT':ctx['beta']}
         failures={}
+        if 'STAT_PLUS' in args.methods:
+            from surgery.theory_stat import fit_stat_plus
+            try:
+                models['STAT_PLUS']=fit_stat_plus(ctx['fit'],ctx['H'],ctx['beta'],
+                    radius=args.radius,seconds=args.stat_seconds,
+                    out=ctx['root']/'stat_plus.json')
+            except RuntimeError as exc:
+                failures['STAT_PLUS']=str(exc);models['STAT_PLUS']=None
         if 'VF' in args.methods:
             try:
                 vf=train_vf(args,ctx)
@@ -1037,7 +1049,7 @@ def main():
                 except RuntimeError as exc:
                     failures['ANCHORED_TARGET']=str(exc);models['ANCHORED_TARGET']=None
         for method in args.methods:
-            if method in ('SHARED','SHARED_LEGACY','GLOBAL','ANCHORED','VF'):continue
+            if method in ('SHARED','SHARED_LEGACY','GLOBAL','ANCHORED','VF','STAT_PLUS'):continue
             try:
                 models[method]=train_search(args,ctx,method,
                                       warm_start=models.get('VF_SHARED'))
