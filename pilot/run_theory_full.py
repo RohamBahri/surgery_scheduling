@@ -242,6 +242,15 @@ def _train_component(task):
                     planner_solver_calls=stats.get('solves',0)-before[1])
         except RuntimeError as exc:
             record=dict(value=None,complete=False,status=str(exc))
+            extended=(_SCORE_STATE or {}).get('retry_seconds',0.)
+            if extended and deadline-time.monotonic()>5.:
+                try:
+                    value=scores(c,d,d0,bank,method,
+                         min(extended,deadline-time.monotonic()),deadline=deadline)
+                    record=dict(value=float(value),complete=True,
+                                retried_after=str(exc))
+                except RuntimeError as second:
+                    record['retry_status']=str(second)
         results.append((int(j),record))
     if legacy:
         return ck,c.n,[record for _,record in results]
@@ -277,9 +286,11 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
                 if record.get('identity')!=identity or record.get('indices')!=indices:
                     raise RuntimeError(f'Stale candidate shard for {ck}, {start}')
                 values=record['results']
-                if len(values)==len(indices):
+                if len(values)==len(indices) and all(v.get('complete') for v in values):
                     gathered[ck].update({j:v for j,v in zip(indices,values)})
                     continue
+                # An unfinished task must be eligible for a fresh retry.
+                # Its incomplete record is not a frozen certified score.
             tasks.append((ck,c,rows,coefficients,round_id,indices,task_seconds,path))
     def collect(executor):
         # Bounded in-flight work limits memory, and avoids launching the entire
@@ -336,6 +347,39 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
     return score,valid
 
 
+def _selection_paired_candidate(folder,items,indices,min_case_coverage=.98):
+    """Heuristic paired *training-only* decision from finished exact shards.
+
+    A missing score is NOT replaced with zero or a fake bound. The update
+    is explicitly uncertified over the missing components.
+    """
+    sums=[0.]*len(indices)
+    coverage=[0]*len(indices)
+    total=sum(c.n for _,c,_ in items)
+    for ck,c,_ in items:
+        records={}
+        for file in folder.glob(ck+'_shard_*.json'):
+            entry=json.loads(file.read_text())
+            for j,result in zip(entry['indices'],entry['results']):
+                records[j]=result
+        incumbent=records.get(0)
+        if incumbent is None or not incumbent.get('complete'):continue
+        for j in range(1,len(indices)):
+            candidate=records.get(j)
+            if candidate is not None and candidate.get('complete'):
+                sums[j]+=float(candidate['value']-incumbent['value'])
+                coverage[j]+=c.n
+    viable=[j for j in range(1,len(indices))
+            if coverage[j]>=min_case_coverage*total and
+            sums[j] < -.10*coverage[j]]
+    if not viable:return None
+    j=min(viable,key=lambda j:sums[j]/coverage[j])
+    return dict(j=j,paired_cases=coverage[j],total_cases=total,
+                paired_case_fraction=coverage[j]/total,
+                observed_training_difference=sums[j],
+                warning='Paired exact subset ONLY; not a full-cohort guarantee')
+
+
 def train_search(args,ctx,method,*,warm_start=None):
     """Exact candidate scoring + reproducible full-training directional search.
 
@@ -373,6 +417,8 @@ def train_search(args,ctx,method,*,warm_start=None):
     exhausted_reason=None
     score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
                      pools=ctx['pools'],seconds=args.seconds,
+                     retry_seconds=(min(360.,args.task_seconds)
+                         if getattr(args,'selection_fast',False) else 0.),
                      cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
     # Initialize SQLite once before worker startup; all workers then share
     # the same WAL-enabled table safely under its database locks.
@@ -436,6 +482,18 @@ def train_search(args,ctx,method,*,warm_start=None):
                                root/f'round_{round_id:02d}'/'all',pool=score_pool,
                                task_seconds=args.task_seconds,deadline=round_deadline)
             if not valid[0]:
+                if getattr(args,'selection_fast',False):
+                    partial=_selection_paired_candidate(
+                          root/f'round_{round_id:02d}'/'all',items,indices)
+                    if partial is not None:
+                        theta=proposed[indices[partial['j']]]-beta
+                        history.append(dict(round=round_id,accepted=True,
+                            accepted_partial_training_only=True,
+                            paired_subset=partial,bank_B=None,
+                            complete_candidates=int(valid.sum())))
+                        atomic_json(root/'progress.json',
+                                    dict(history=history,theta=theta.tolist()))
+                        continue
                 exhausted_reason='INCOMPLETE_FULL_BANK_A_SCORE'
                 break
             alternatives=[j for j in range(1,len(indices)) if valid[j]
@@ -477,11 +535,13 @@ def train_search(args,ctx,method,*,warm_start=None):
                         (exhausted_reason or 'BUDGET_EXHAUSTED'),
                  wall_seconds_this_session=time.monotonic()-search_start,
                  warm_start=warm_start_status,
-                 guarantee=('OBS: full observed-fit objective only; no independent Bank B'
+                 guarantee=('Training-only partially paired updates are heuristic '
+                     'and NOT full-cohort guarantees.'
+                     if any(x.get('accepted_partial_training_only') for x in history)
+                     else 'OBS: historical fitting outcomes (not independent Bank B)'
                      if method=='OBS' else
-                     'full-Bank-A candidate search with independent per-round Bank-B '
-                     'confirmation, not a statistical acceptance guarantee; '
-                     'outer search not globally optimal')))
+                     'Full-bank comparisons when certified; independent Bank B '
+                     'does not establish population significance. Not globally optimal.')))
     return coeff
 
 
