@@ -302,6 +302,12 @@ def vf_per_week_milp(c, bank, *, seconds, threads=1, d0=None, lam=.001):
     if d0 is not None:
         penalty=lam/2*gp.quicksum((d[i]-float(d0[i]))**2 for i in range(c.n))
     m.setObjective(TURN*used.sum()+KAPPA*gp.quicksum(ot)+KAPPA*stop+penalty,GRB.MINIMIZE)
+    remaining=float(seconds)-(time.monotonic()-start)
+    if remaining<=.1:
+        m.dispose()
+        return Certificate(None,None,None,False,"VF_PW_BUILD_WALL_LIMIT",
+                           time.monotonic()-start)
+    m.Params.TimeLimit=remaining
     m.optimize()
     rec=_safe_certificate(m,start,"per-week VF",c,x)
     if m.SolCount:
@@ -323,7 +329,7 @@ def vf_fixed_plan_lp(c, z, bank, *, seconds, d0=None, lam=0.):
     from surgery.weekly_planner import loads
     start=time.monotonic()
     m=gp.Model("quantile_fill_fixed_plan")
-    m.Params.OutputFlag=0;m.Params.TimeLimit=float(seconds)
+    m.Params.OutputFlag=0;m.Params.TimeLimit=float(seconds);m.Params.Threads=1
     lo,hi=reachable(c.booked,.8,30.)
     d=[m.addVar(lb=float(lo[i]),ub=float(hi[i]),name=f"d{i}") for i in range(c.n)]
     z=np.asarray(z,int);used=set(map(int,z));ot=[]
@@ -335,6 +341,12 @@ def vf_fixed_plan_lp(c, z, bank, *, seconds, d0=None, lam=0.):
     sl=_stoploss(m,d,bank,"fixed")
     penalty=0. if d0 is None else lam/2*gp.quicksum((d[i]-float(d0[i]))**2 for i in range(c.n))
     m.setObjective(TURN*len(used)+KAPPA*gp.quicksum(ot)+KAPPA*sl+penalty,GRB.MINIMIZE)
+    remaining=float(seconds)-(time.monotonic()-start)
+    if remaining<=.1:
+        m.dispose()
+        return Certificate(None,None,None,False,"QFILL_BUILD_WALL_LIMIT",
+                           time.monotonic()-start)
+    m.Params.TimeLimit=remaining
     m.optimize()
     rec=_safe_certificate(m,start,"quantile fill")
     if m.SolCount:rec.reviewed=[float(x.X) for x in d]
@@ -424,6 +436,12 @@ def saa_mip(c, bank, *, seconds, threads=1):
             m.addConstr(ot>=excess)
             obj+=(KAPPA/len(bank))*ot
     m.setObjective(obj,GRB.MINIMIZE)
+    remaining=float(seconds)-(time.monotonic()-start)
+    if remaining<=.1:
+        m.dispose()
+        return Certificate(None,None,None,False,"SAA_BUILD_WALL_LIMIT",
+                           time.monotonic()-start)
+    m.Params.TimeLimit=remaining
     m.optimize()
     cert=_safe_certificate(m,start,"SAA",c,x)
     if m.SolCount:
