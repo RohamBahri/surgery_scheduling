@@ -205,7 +205,7 @@ def _vf_component(m, c, base, d0, H, coeff, bank, lam, *, index):
 
 def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
                     coefficient_radius=32., lam=.001, bank_seed=20261020,
-                    restart_dir=None):
+                    restart_dir=None,start_coeff=None):
     """Single globally bounded MIP/MIQP on ALL training components.
 
     This has 5 coefficient variables and no schedule-library restriction.
@@ -224,7 +224,8 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
     model.Params.TimeLimit=float(seconds)
     model.Params.MIPGap=0
     model.Params.MIPGapAbs=0
-    model.Params.NonConvex=2
+    # The MIQP objective is convex; no nonconvex quadratic flag is required.
+    model.Params.MIPFocus=1
     # Nodefile spill is disk-backed memory management, NOT B&B-tree restart.
     model.Params.NodefileStart=0.5
     if restart_dir is not None:
@@ -233,6 +234,12 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
         model.Params.NodefileDir=str(Path(restart_dir).resolve())
     # base/coefficients are exactly the same five-feature representation as STAT.
     coef=model.addVars(5,lb=-float(coefficient_radius),ub=float(coefficient_radius),name="theta")
+    start_theta=None
+    if start_coeff is not None:
+        start_theta=np.asarray(start_coeff,float)-np.asarray(beta,float)
+        if start_theta.shape!=(5,) or np.max(abs(start_theta))>coefficient_radius+1e-8:
+            raise ValueError('VF initial coefficients outside optimization box')
+        for j in range(5):coef[j].Start=float(start_theta[j])
     objective=gp.QuadExpr(); used_cases=0
     details=[]
     for t,(ck,c,rows) in enumerate(items):
@@ -244,6 +251,15 @@ def vf_shared_miqp(items, data, H, beta, pools, *, seconds, threads=8,
         bank=scenarios(c,d0,pools,bank_seed,count=50)
         off=d0+H[rows]@np.asarray(beta,float)
         local, vars_=_vf_component(model,c,off,d0,H[rows],coef,bank,lam,index=t)
+        if start_theta is not None:
+            from surgery.planner import reachable
+            component,xv,dvars=vars_
+            lo,hi=reachable(c.booked,.8,30.)
+            guess=np.clip(off+H[rows]@start_theta,lo,hi)
+            for i in range(c.n):
+                dvars[i].Start=float(guess[i])
+                for j in c.allowed[int(c.surgeon[i])]:
+                    xv[i,j].Start=1. if int(c.original[i])==j else 0.
         objective+=local
         details.append((ck,vars_,bank,d0,H[rows]))
         used_cases+=c.n
