@@ -459,7 +459,53 @@ def stage(args):
     elif args.stage=="report":summarize(args)
     else:raise ValueError(args.stage)
 
+def preflight(args):
+    ctx=context(args)
+    policies=frozen(args,ctx)
+    for label,coeff in policies.items():
+        if coeff.shape!=(5,) or not np.isfinite(coeff).all():
+            raise RuntimeError("Invalid frozen policy "+label)
+    for ck,c,rows in ctx["eval"]:
+        for arm in ("CASE","STAT","VF"):
+            path=Path(ctx["root"])/"full_evaluation"/"per_arm"/(ck+"__"+arm+".json")
+            if not path.exists() or load(path).get("status")!="COMPLETE":
+                raise RuntimeError("Missing certified original evaluation: "+ck+" "+arm)
+    return ctx
+
+def stage_completeness(name,args):
+    """Count saved tasks rather than interpreting a zero-exit stage as exact."""
+    p=folder(args)/name
+    if name in ("diagnose","response","tie","evaluate_variants"):
+        records=[load(x) for x in p.glob("*.json")
+                 if x.name not in ("status.json","selection.json","summary.json")]
+        if not records:return False
+        if name=="response":
+            return len(records)==1125*len(RESPONSE_SCENARIOS) and all(
+                all(v.get("status")=="COMPLETE" for v in r.get("method",{}).values())
+                and len(r.get("method",{}))==2 for r in records)
+        if name=="diagnose":return len(records)==1125
+        if name=="tie":
+            target=load(p/"selection.json")["tasks"] if (p/"selection.json").exists() else 0
+            return target>0 and len(records)==target and all(
+                len(r.get("entries",{}))==2 and
+                all(v.get("status")=="CERTIFIED" for v in r["entries"].values())
+                for r in records)
+        # Variant task count depends on which policies finished training.
+        trained=[k for k in VARIANTS if
+                 (folder(args)/"train"/k/"trained.json").exists()]
+        ctx=context(args)
+        target=sum(len(ctx["eval"]) if not k.startswith("leave_out_")
+                   else sum(c.group==SITES[k.removeprefix("leave_out_")]
+                            for _,c,_ in ctx["eval"]) for k in trained)
+        return target>0 and len(records)==target and all(
+            r.get("status")=="COMPLETE" for r in records)
+    if name=="train":
+        return all((p/k/"trained.json").exists() for k in VARIANTS)
+    if name=="duration":return (p/"summary.json").exists()
+    return True
+
 def supervisor(args):
+    preflight(args)
     dst=folder(args);dst.mkdir(parents=True,exist_ok=True)
     src=Path(__file__).resolve().parents[1]
     scientific=["pilot/run_vf_followups.py","surgery/objective_selection.py",
@@ -476,7 +522,8 @@ def supervisor(args):
     begun=time.monotonic()
     status=load(dst/"run_status.json") if (dst/"run_status.json").exists() else {}
     for name,budget in STAGES:
-        if status.get(name,{}).get("status")=="COMPLETE":continue
+        if status.get(name,{}).get("status")=="COMPLETE" and stage_completeness(name,args):
+            continue
         remaining=11.5*3600-(time.monotonic()-begun)
         if remaining<30:break
         cmd=[sys.executable,str(Path(__file__).resolve()),"--stage",name,
@@ -487,7 +534,8 @@ def supervisor(args):
             proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             try:
                 proc.wait(timeout=min(budget,remaining-15))
-                state="COMPLETE" if proc.returncode==0 else "FAILED"
+                state=("COMPLETE" if stage_completeness(name,args) else "PARTIAL"
+                       ) if proc.returncode==0 else "FAILED"
             except subprocess.TimeoutExpired:
                 state="WALL_LIMIT"
                 try:os.killpg(proc.pid,signal.SIGTERM)
