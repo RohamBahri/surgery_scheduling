@@ -399,7 +399,13 @@ def summarize(args):
         results={}
         for key in variants:
             pairs=[]
+            target_site=(SITES[key.removeprefix("leave_out_")]
+                         if stage=="evaluate_variants" and key.startswith("leave_out_")
+                         else None)
+            target_cases=sum(c.n for _,c,_ in ctx["eval"]
+                             if target_site is None or c.group==target_site)
             for ck,c,_ in ctx["eval"]:
+                if target_site is not None and c.group!=target_site:continue
                 if stage=="response":
                     p=dst/stage/(ck+"__"+key+".json")
                     if not p.exists():continue
@@ -417,10 +423,11 @@ def summarize(args):
                     diff=float(data["cost"])-float(baseline["realized"]["0"])
                 pairs.append((c.monday,int(c.n),float(diff)))
             n=sum(a for _,a,_ in pairs)
-            result=dict(certified_cases=n,coverage=n/denom,
+            result=dict(certified_cases=n,target_cases=target_cases,
+                        coverage=n/target_cases if target_cases else 0.,
                         paired_change_per_case=None if not n else
                           sum(v for _,_,v in pairs)/n,
-                        status="COMPLETE" if n==denom else "INCOMPLETE")
+                        status="COMPLETE" if n==target_cases else "INCOMPLETE")
             if n and len(set(m for m,_,_ in pairs))>=8:
                 weeks=sorted({m for m,_,_ in pairs})
                 indexed={w:[a for a in pairs if a[0]==w] for w in weeks}
