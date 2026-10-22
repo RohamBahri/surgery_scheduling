@@ -18,7 +18,12 @@ os.environ['SURGERY_HASH_SEEDS']='0'
 for v in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS'):
     os.environ[v]='1'
 
+# The older full runner sets SURGERY_RESEARCH_LINK on import. Restore the
+# caller's value so importing this module cannot alter unrelated legacy code.
+_previous_link=os.environ.get('SURGERY_RESEARCH_LINK')
 from pilot import run_theory_full as full
+if _previous_link is None:os.environ.pop('SURGERY_RESEARCH_LINK',None)
+else:os.environ['SURGERY_RESEARCH_LINK']=_previous_link
 from surgery.objective_selection import build_library,load_library,train_objective,probe_landscape
 
 # 10h16m stage limits, plus unused reserve until the 11h30m supervisor ceiling.
@@ -385,6 +390,8 @@ def supervisor(args):
 
 
 def main():
+    # Only an actual experiment process requests the inverse-response link.
+    os.environ['SURGERY_RESEARCH_LINK']='inverse'
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stage',choices=[n for n,_ in STAGES])
     parser.add_argument('--workbook',type=Path,default=Path(
