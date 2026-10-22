@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full UHN development study of direct, VF, EG, and prescription methods.
+"""Single-split UHN study: fit on all 24,506 pre-2013 cases, evaluate 8,774 later cases.
 
 Run from the surgery_scheduling repository root after copying this file to
 pilot/ and theory_exact.py to surgery/.  Requires a licensed Gurobi install.
@@ -79,7 +79,7 @@ def secure_manifest(root,args):
 
 
 def make_context(args,fold,cohort):
-    root=args.out/f'fold_{fold}'
+    root=args.out/'single_split_2013'
     root.mkdir(parents=True,exist_ok=True)
     if fold=='2013':
         fit,held,tw,ew,tidx,eidx,names=final_data(args.workbook)
@@ -651,9 +651,10 @@ def main():
     ap.add_argument('--rounds',type=int,default=10)
     ap.add_argument('--search-seconds',type=float,default=86400.,
                     help='Soft per-method directional training budget; stops between rounds')
-    ap.add_argument('--fold',choices=['0','1','both','2013'],default='both')
+    ap.add_argument('--fold',choices=['2013'],default='2013',
+                    help='Frozen design: all 24,506 pre-2013 cases train; 8,774 2013 cases test')
     ap.add_argument('--acknowledge-final',action='store_true',
-                    help='Use once only after freezing methods; no result-based retuning')
+                    help='Explicitly acknowledge that the 2013 test is being opened once')
     ap.add_argument('--methods',default='VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED')
     ap.add_argument('--global-nodes',type=int,default=40)
     ap.add_argument('--global-seconds',type=float,default=14400.)
@@ -663,14 +664,14 @@ def main():
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
-    if args.fold=='2013' and not args.acknowledge_final:
-        ap.error('2013 holdout requires explicit --acknowledge-final after all choices are frozen')
+    if not args.acknowledge_final:
+        ap.error('Opening the 2013 test requires --acknowledge-final')
     args.out.mkdir(parents=True,exist_ok=True)
     secure_manifest(args.out,args)
     from run_weekly_rich import read_cohort
     raw,cohort=read_cohort(args.workbook)
     summaries=[]
-    for fold in ([0,1] if args.fold=='both' else ([args.fold] if args.fold=='2013' else [int(args.fold)])):
+    for fold in ('2013',):
         ctx=make_context(args,fold,cohort)
         models={'STAT':ctx['beta']}
         failures={}
@@ -735,11 +736,10 @@ def main():
         summary=evaluate_all(args,ctx,models)
         summaries.append(summary)
         print(json.dumps(summary,indent=2),flush=True)
-    atomic_json(args.out/'summary.json',dict(folds=summaries))
-    if args.fold=='both':
-        from surgery.theory_reporting import pooled_development
-        pooled=pooled_development(args.out)
-        print('Pooled development comparison:',pooled['n_cases'],'cases,',
-              pooled['n_mondays'],'calendar Mondays',flush=True)
+    atomic_json(args.out/'summary.json',dict(
+        design='single chronological split',training_cases=24506,test_cases=8774,
+        training_period='pre-2013',test_period='2013',
+        outcome_evaluations=summaries,
+        warning='Test outcomes must not be used to tune subsequent choices'))
 
 if __name__=='__main__':main()
