@@ -40,11 +40,15 @@ Experiments:
    25-scenario modeled cost inside the predicted-optimal tolerance set.
    Incomplete Gurobi solves retain their incomplete status. The headline
    fixed hash rule remains unchanged.
-4. **VF ablations:** train congestion-only, no-congestion,
-   no-interactions, and observed-duration instead of scenario-trained VF
-   with the same STAT start and limited search; also rerun VF with
-   the coefficient box expanded to +/-32. The observed-duration learner
-   has no independent Bank B and is an overfitting diagnostic.
+4. **VF ablations:** learn an incremental congestion-only correction,
+   incremental no-congestion correction, and no-interactions correction
+   relative to the SAME already-fitted STAT baseline. All retain the
+   baseline's original feature coefficients; "no congestion" therefore
+   excludes extra VF congestion learning, not all congestion information
+   already present in STAT. Also train using each week's observed
+   durations instead of simulated scenarios, and test the coefficient
+   box +/-32. The observed-duration learner has no independent Bank B
+   and is an overfitting diagnostic.
 5. **Cross-site transfer:** retrain only the VF coefficient increments
    excluding TGH, TWH-main, or TWH-day, evaluate on the corresponding
    site's 2013 weeks. Original pooled CASE, STAT, feature normalization
