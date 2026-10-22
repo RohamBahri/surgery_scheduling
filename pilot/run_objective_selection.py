@@ -29,7 +29,7 @@ from surgery.objective_selection import build_library,load_library,train_objecti
 # 10h16m stage limits, plus unused reserve until the 11h30m supervisor ceiling.
 STAGES=(('setup',7200),('library',1800),('scan',1800),
         ('shared',4500),('vf',2700),('eg',2700),('anchored',1800),
-        ('certificates',3600),('freeze',60),('evaluate',9000),('report',600))
+        ('certificates',6000),('freeze',60),('evaluate',9000),('report',600))
 METHODS=('SHARED','VF','EG_LIB','ANCHORED_T')
 ARMS=('BOOKED','CASE','STAT','SHARED','VF','EG_LIB','ANCHORED_T')
 ROOT_NAME='objective_selection_2013'
@@ -120,24 +120,17 @@ def _score_pair(ctx,method,coeff,out,deadline,cores):
 def _eg_certificate_one(task):
     """Exact or bounded EG value on a fixed real training component."""
     from surgery.theory_exact import expected_gap_mip
-    from surgery.anchored_weekly_solver import solve_week
-    from surgery.planner import reachable
     c,d,d0,bank,label,seconds=task
     t0=time.monotonic()
     try:
-        primary=solve_week(c,d,seconds=min(seconds/3,18.),
-                           threads=1,tie=False)
-        if not primary.complete:
-            return dict(status='PRIMARY_UNCERTIFIED',label=label,site=c.group,
-                        monday=c.monday,n=c.n)
-        q=float(primary.value-480*c.k+np.sum(d)+30*c.n)
-        remaining=max(.1,seconds-(time.monotonic()-t0))
-        ans=expected_gap_mip(c,d,bank,seconds=remaining,threads=1)
+        # The EG oracle already solves the primary problem internally;
+        # its primal and dual bounds are B_1, not Q+B_1.
+        ans=expected_gap_mip(c,d,bank,seconds=seconds,threads=1)
         penalty=.001/2*np.square(d-d0).sum()
         return dict(status=ans.status,label=label,site=c.group,
             monday=c.monday,n=c.n,globally_closed=bool(ans.complete),
-            lower=None if ans.lower is None else q+ans.lower+penalty,
-            upper=None if ans.upper is None else q+ans.upper+penalty,
+            lower=None if ans.lower is None else ans.lower+penalty,
+            upper=None if ans.upper is None else ans.upper+penalty,
             lower_is_adversary_primal=ans.lower is not None,
             upper_is_adversary_dual=ans.upper is not None,
             seconds=time.monotonic()-t0)
@@ -177,7 +170,7 @@ def eg_final_certificates(ctx,coeff,output,*,cores=15,seconds=420.):
 def certify(args):
     """Training-only 2x2: optimize own objective vs deployed objective."""
     ctx=load_context(args)
-    end=time.monotonic()+3500.
+    end=time.monotonic()+5900.
     out=root(args)/'certificates';out.mkdir(parents=True,exist_ok=True)
     if policy(args,'EG_LIB') is not None and not (out/'eg_exact_sample.json').exists():
         eg_final_certificates(ctx,policy(args,'EG_LIB'),out/'eg_exact_sample.json',
@@ -190,7 +183,7 @@ def certify(args):
             save(destination,dict(status='NO_TRAINED_POLICY'));continue
         remaining=end-time.monotonic()
         if remaining<10:break
-        budget=min(680.,remaining)
+        budget=min(1200.,remaining)
         own=_score_pair(ctx,method,coeff,out/method/'own',
                         time.monotonic()+budget/2,args.cores)
         remaining=end-time.monotonic()
@@ -285,7 +278,8 @@ def stage(args):
             models[method]=None if record.get('coeff') is None else np.asarray(record['coeff'],float)
         from types import SimpleNamespace
         settings=SimpleNamespace(eval_arms=list(ARMS),
-                   eval_arm_seconds=100.,seconds=args.eval_solve_seconds,
+                   eval_arm_seconds=300.,seconds=args.eval_solve_seconds,
+                   large_eval_solver_seconds=120.,
                    pw_seconds=1.,pw_nodes=1,cores=args.cores)
         full.evaluate_all(settings,ctx,models)
     elif name=='report':summarize(args)
@@ -390,7 +384,7 @@ def summarize(args):
             reading='SEARCH_DID_NOT_REALIZE_SCANNED_DESCENT'
         elif own is False and scan_closed and possible_descent is False:
             reading='NO_DESCENT_ON_TESTED_AXES_ONLY'
-        elif own is False and method in ('SHARED','ANCHORED_T'):
+        elif own is False and method=='SHARED':
             reading='POSSIBLE_DISCRETE_PLATEAU'
         else:reading='UNRESOLVED_OPTIMIZATION_OR_COMPARISON'
         mechanism[method]=dict(interpretation=reading,
