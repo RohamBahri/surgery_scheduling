@@ -97,3 +97,54 @@ def test_paper_default_keeps_distinct_methods_and_separate_jobs():
     assert "PER_WEEK_ROBUST,QFILL,VF_PW,SAA,HINDSIGHT" in src
     assert "pool.submit(_eval_arm_task,job)" in src
     assert "if arm=='SAA'" in src
+
+
+def test_full_evaluation_schedules_independent_arms_and_fallback(tmp_path,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pilot import run_theory_full as runner
+
+    class FakePool:
+        def __init__(self,max_workers,**kw):
+            self.pool=ThreadPoolExecutor(max_workers=max_workers)
+        def __enter__(self):return self
+        def __exit__(self,*a):self.pool.shutdown(wait=True)
+        def submit(self,fn,*args):return self.pool.submit(fn,*args)
+
+    monkeypatch.setattr(runner,'ProcessPoolExecutor',FakePool)
+    def fake_eval(job):
+        ck,c,rows,arm,limit=job
+        if arm=='HINDSIGHT':
+            return ck,arm,dict(complete=True,cost=5.,lower=5.,
+                               status='OPTIMAL',method_wall_seconds=.1)
+        if arm=='SAA':
+            return ck,arm,dict(certified=True,lower=6.,upper=6.,seconds=.1,
+                               assignment=[0],realized=6.,
+                               model={'A':6.,'C':6.},method_wall_seconds=.1)
+        if arm=='BOOKED' and ck=='late':
+            return ck,arm,dict(status='UNRESOLVED',error='TIME_LIMIT',
+                               method_wall_seconds=.2)
+        return ck,arm,dict(status='COMPLETE',
+              realized={'0':10.,'1':10.,'2':10.},
+              model={'A':10.,'C':10.,'C_comonotone':10.},
+              regime={'0':'LIGHT_UNIFORM'},hash_assignment_disagreement=0,
+              hash_cost_disagreement=0,verification_seconds=.1,
+              method_wall_seconds=.3)
+    monkeypatch.setattr(runner,'_eval_arm_task',fake_eval)
+    class C:pass
+    components=[]
+    for key,day in [('early','2013-01-07'),('late','2013-01-14')]:
+        c=C();c.n=1;c.group='TGH';c.monday=day
+        components.append((key,c,np.array([0 if key=='early' else 1])))
+    data=dict(X=np.zeros((2,1)),case_w=np.zeros(1))
+    ctx=dict(root=tmp_path,held=data,H_eval=np.zeros((2,5)),pools={},
+             eval=components)
+    args=SimpleNamespace(eval_arms=['CASE','BOOKED','SAA','HINDSIGHT'],
+              eval_component_seconds=30.,seconds=2.,pw_seconds=2.,
+              pw_nodes=10,cores=2)
+    result=runner.evaluate_all(args,ctx,models={})
+    assert result['n_cases']==2
+    assert result['arms']['BOOKED']['unresolved']==1
+    assert result['fallback_CASE']['BOOKED']['fallback_components']==1
+    assert result['fallback_CASE']['BOOKED']['all_case_mean_realized_per_case']==10.
+    assert result['arms']['CASE']['unresolved']==0
+    assert len(list((tmp_path/'full_evaluation'/'per_arm').glob('*.json')))==8
