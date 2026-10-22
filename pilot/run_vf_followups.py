@@ -218,7 +218,8 @@ def response(args):
 
 def tie_bracket(job):
     """Min/max expected feasible schedule cost inside the fixed predicted-cost tie set."""
-    ck,c,d,bank,seconds=job
+    ck,c,d,bank,seconds,*optional=job
+    deployed=optional[0] if optional else None
     from surgery.anchored_weekly_solver import _model,solve_week
     from surgery.weekly_planner import _cost,_objective_tolerance,_assignment
     from surgery.theory_exact import TURN,KAPPA,CAP
@@ -242,8 +243,12 @@ def tie_bracket(job):
                 overtime=m.addVar(lb=0.,name=f"tie_ot_{s}_{j}")
                 m.addGenConstrMax(overtime,[excess,zero])
                 value+=(KAPPA/len(bank))*overtime
+        eta=(None if deployed is None else
+             float(evaluate(c,deployed,d)["cost"]-Q))
+        if eta is not None and eta < -1e-4:
+            raise AssertionError("Selected hash plan beat certified primary optimum")
         output=dict(status="COMPLETE",component=ck,site=c.group,n=c.n,
-                    primary=Q,entries={})
+                    primary=Q,planner_tolerance_eta=eta,entries={})
         for mode in ("best","worst"):
             time_left=seconds-(time.monotonic()-t0)
             if time_left<1:
@@ -282,7 +287,8 @@ def tie(args):
             rec=record(ctx,ck,arm)
             if rec.get("status")!="COMPLETE":continue
             d=np.asarray(rec["duration"],float)
-            tasks.append((ck+"__"+arm,(ck,c,d,bank,160.)))
+            tasks.append((ck+"__"+arm,(ck,c,d,bank,160.,
+                          list(map(int,rec["assignments"]["0"])))))
     run_tasks(tasks,tie_bracket,dst,args.cores)
     save(dst/"selection.json",dict(components=len(chosen),tasks=len(tasks),
                 rule="16 largest and 48 random changed-plan components; no outcome selection",
@@ -459,8 +465,12 @@ def summarize(args):
         if len(short)!=2:continue
         arm=short[1]
         q=brackets.setdefault(arm,dict(attempted=0,certified=0,
-                                       spread_sum=0.,cases_certified=0))
+                                       spread_sum=0.,cases_certified=0,
+                                       eta_sum=0.,eta_cases=0))
         q["attempted"]+=1
+        if rec.get("planner_tolerance_eta") is not None:
+            q["eta_sum"]+=float(rec["planner_tolerance_eta"])
+            q["eta_cases"]+=rec["n"]
         lo=rec["entries"].get("best",{})
         hi=rec["entries"].get("worst",{})
         if lo.get("status")=="CERTIFIED" and hi.get("status")=="CERTIFIED":
@@ -470,7 +480,10 @@ def summarize(args):
     for q in brackets.values():
         q["mean_bracket_per_case"]=(q["spread_sum"]/q["cases_certified"]
                                    if q["cases_certified"] else None)
+        q["mean_eta_per_case"]=(q["eta_sum"]/q["eta_cases"]
+                                if q["eta_cases"] else None)
         del q["spread_sum"]
+        del q["eta_sum"]
     output["tie_bracket_sample"]=brackets
     output["tie_bracket_caveat"]="Selected 25-scenario component subset, not full-cohort primary-optimal interval"
     # Read per-site response results on the same completed components.
