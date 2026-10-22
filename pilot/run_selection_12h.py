@@ -234,8 +234,12 @@ def summarize(args):
     for arm in ARMS:
         valid=[(c,rs[arm]) for c,rs in allrows
                if rs[arm].get('status')=='COMPLETE']
-        totals[arm]=dict(certified_cases=sum(c.n for c,_ in valid),
-             exact_coverage=sum(c.n for c,_ in valid)/N,
+        certified_cases=sum(c.n for c,_ in valid)
+        totals[arm]=dict(certified_cases=certified_cases,
+             certified_only_cost_per_case=(sum(float(np.mean(list(
+                  rec['realized'].values()))) for _,rec in valid)/certified_cases
+                  if certified_cases else None),
+             exact_coverage=certified_cases/N,
              certified_components=len(valid),
              attempted_components=sum(rs[arm]['status']!='NOT_EVALUATED'
                                       for _,rs in allrows),
@@ -260,6 +264,14 @@ def summarize(args):
             return float(np.mean(list(rs['CASE']['realized'].values()))),'CASE'
         recorded=originals.get((c.group,c.monday,int(min(c.case_ids))))
         return recorded,'RECORDED_ORIGINAL' if recorded is not None else 'UNAVAILABLE'
+    common=[(c,rs) for c,rs in allrows
+            if all(rs[a].get('status')=='COMPLETE' for a in ARMS)]
+    common_n=sum(c.n for c,_ in common)
+    common_exact=dict(cases=common_n,components=len(common),
+          mean_cost_per_case={
+              a:(sum(float(np.mean(list(rs[a]['realized'].values())))
+                     for _,rs in common)/common_n if common_n else None)
+              for a in ARMS})
     missing_case=sum(c.n for c,rs in allrows
                      if rs['CASE'].get('status')!='COMPLETE')
     fallback={}
@@ -324,7 +336,7 @@ def summarize(args):
             else 'PARTIAL')
     output=dict(status=status,cases=N,calendar_weeks=len(byweek),
          case_missing=missing_case,original_fallback_errors=original_invalid,
-         arms=totals,
+         arms=totals,common_certified=common_exact,
          case_fallback=fallback,contrasts_vs_SHARED_PLUS=comparisons,
          provisional_main_method=recommended,selection_reason=selection_reason,
          training=policies,
