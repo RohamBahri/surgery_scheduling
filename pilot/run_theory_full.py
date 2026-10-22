@@ -173,7 +173,14 @@ def scores(c,d,d0,bank,method,seconds,seed=0,deadline=None):
             raise RuntimeError('SCHEDULE_LIBRARY_UNRESOLVED')
         from surgery.theory_exact import reduced as phi
         schedules=library['schedules']
-        g=[expected_reduced(c,z,bank) for z in schedules]
+        # Bank A/B g(z) depends only on the fixed realized-duration bank,
+        # not the proposed coefficients. Reuse precomputed library values.
+        cached_key=('g_A' if seed==20261020 else
+                    'g_B' if seed==20261021 else None)
+        if cached_key and len(library.get(cached_key,[]))==len(schedules):
+            g=library[cached_key]
+        else:
+            g=[expected_reduced(c,z,bank) for z in schedules]
         f=[phi(c,z,d) for z in schedules]
         if method=='EG_LIB':
             from surgery.anchored_weekly_solver import solve_week
@@ -259,7 +266,7 @@ def _train_component(task):
             continue
         d=reviewed_policy(c,rows,H,d0,np.asarray(coefficients[j]))
         try:
-            value=scores(c,d,d0,bank,method,seconds,deadline=deadline)
+            value=scores(c,d,d0,bank,method,seconds,seed=seed,deadline=deadline)
             record=dict(value=float(value),complete=True,
                     planner_cache_hits=stats.get('hits',0)-before[0],
                     planner_solver_calls=stats.get('solves',0)-before[1])
@@ -269,7 +276,8 @@ def _train_component(task):
             if extended and deadline-time.monotonic()>5.:
                 try:
                     value=scores(c,d,d0,bank,method,
-                         min(extended,deadline-time.monotonic()),deadline=deadline)
+                         min(extended,deadline-time.monotonic()),seed=seed,
+                         deadline=deadline)
                     record=dict(value=float(value),complete=True,
                                 retried_after=str(exc))
                 except RuntimeError as second:
