@@ -139,7 +139,7 @@ def test_full_evaluation_schedules_independent_arms_and_fallback(tmp_path,monkey
     ctx=dict(root=tmp_path,held=data,H_eval=np.zeros((2,5)),pools={},
              eval=components)
     args=SimpleNamespace(eval_arms=['CASE','BOOKED','SAA','HINDSIGHT'],
-              eval_component_seconds=30.,seconds=2.,pw_seconds=2.,
+              eval_arm_seconds=30.,seconds=2.,pw_seconds=2.,
               pw_nodes=10,cores=2)
     result=runner.evaluate_all(args,ctx,models={})
     assert result['n_cases']==2
