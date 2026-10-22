@@ -71,3 +71,46 @@ def test_direct_training_uses_one_declared_primary_hash(monkeypatch):
     # The launcher chooses the environment before importing the planner.
     from pilot import run_selection_12h as runner
     assert runner.full.SEEDS==(0,)
+
+
+def test_eg_time_limited_dual_interval_is_not_discarded(monkeypatch):
+    from surgery import theory_selection as selection
+    from surgery.theory_exact import Certificate
+    from surgery import theory_exact
+    monkeypatch.setattr(theory_exact,'expected_gap_mip',lambda *a,**kw:
+                        Certificate(8.,8.,11.,False,'TIME_LIMIT',1.))
+    lb,ub,complete=selection._gap_one((
+         SimpleNamespace(n=1),np.array([120.]),np.array([100.]),
+         np.array([[130.]]),10.))
+    from surgery.advice_comparison import LAM
+    penalty=LAM/2*(20.**2)
+    assert lb==8.+penalty
+    assert ub==11.+penalty
+    assert not complete
+
+
+def test_training_paired_subset_never_counts_missing_as_zero(tmp_path):
+    from pilot import run_theory_full as full
+    folder=tmp_path/'scores';folder.mkdir()
+    items=[]
+    for i in range(50):
+        ck=f'component_{i}'
+        c=SimpleNamespace(n=2)
+        items.append((ck,c,np.array([2*i,2*i+1])))
+        # Last component is deliberately unresolved: exactly 98% coverage.
+        sample=[dict(complete=True,value=10.) if i<49 else
+                dict(complete=False,value=None),
+                dict(complete=True,value=8.) if i<49 else
+                dict(complete=False,value=None)]
+        (folder/(ck+'_shard_0000.json')).write_text(json.dumps(
+           dict(indices=[0,1],results=sample)))
+    accepted=full._selection_paired_candidate(folder,items,[0,1])
+    assert accepted is not None
+    assert accepted['paired_cases']==98
+    assert accepted['total_cases']==100
+    assert accepted['observed_training_difference']==-98.
+    # An additional unresolved component must make the gate fail.
+    file=folder/'component_48_shard_0000.json'
+    file.write_text(json.dumps(dict(indices=[0,1],
+       results=[dict(complete=False,value=None)]*2)))
+    assert full._selection_paired_candidate(folder,items,[0,1]) is None
