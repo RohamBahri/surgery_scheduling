@@ -531,13 +531,17 @@ def _eval_component(task):
         rec['evaluation_seconds']=time.monotonic()-tick
         cases[name]=rec
     def attempt(name,fun):
+        started_method=time.monotonic()
         if remaining(.5)<=.1:
-            cases[name]=dict(status='COMPONENT_WALL_LIMIT')
+            cases[name]=dict(status='COMPONENT_WALL_LIMIT',
+                             method_wall_seconds=0.)
             return
         try:
             fun()
         except (RuntimeError,GurobiError) as exc:
             cases[name]=dict(status='UNRESOLVED',error=str(exc))
+        cases.setdefault(name,dict(status='UNRESOLVED'))
+        cases[name]['method_wall_seconds']=time.monotonic()-started_method
     # Test outcomes are not read into the training stage. Hindsight is a
     # reporting-only oracle; do not permit it to influence the advice policy.
     try:
