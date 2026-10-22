@@ -203,7 +203,8 @@ def _sample(items,n=150):
 def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                     solve_seconds=45.,task_seconds=150.,rounds=6,
                     active_features=None,coefficient_radius=16.,
-                    initial_step=None,library_enrichment=True):
+                    initial_step=None,library_enrichment=True,
+                    scenario_mode='residual'):
     """Same STAT start, steps and screening for all four method objectives.
 
     No partial acceptance or cross-method chaining. Bank-A AND Bank-B
@@ -211,6 +212,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
     """
     from pilot import run_theory_full as full
     method=str(method)
+    if scenario_mode not in ('residual','observed'):
+        raise ValueError('Unknown scenario mode')
     if method not in ('SHARED','VF','EG_LIB','ANCHORED_T'):
         raise ValueError('Unknown training objective')
     active_features=(tuple(range(5)) if active_features is None
@@ -230,7 +233,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
         history=state['history']
         if (state.get('active_features',list(range(5)))!=list(active_features) or
             float(state.get('coefficient_radius',16.))!=coefficient_radius or
-            float(state.get('initial_step',16.))!=initial_step):
+            float(state.get('initial_step',16.))!=initial_step or
+            state.get('scenario_mode','residual')!=scenario_mode):
             raise RuntimeError('Incompatible VF checkpoint: change output directory')
     else:
         theta=np.zeros(5);history=[]
@@ -239,6 +243,7 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                H=ctx['H'],pools=ctx['pools'],method=method,
                libraries=libraries,seconds=solve_seconds,
                fixed_banks=True,retry_seconds=min(task_seconds,180.),
+               scenario_mode=scenario_mode,
                cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
     connect(state['cache_path']).close()
     screen=_sample(ctx['train'])
@@ -276,7 +281,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                 _save(path,dict(theta=theta.tolist(),history=history,method=method,
                                 active_features=list(active_features),
                                 coefficient_radius=coefficient_radius,
-                                initial_step=initial_step))
+                                initial_step=initial_step,
+                                scenario_mode=scenario_mode))
                 continue
             candidates=[starts[i].tolist() for i in indices]
             A,goodA=full.parallel_score(ctx['train'],ctx['fit'],ctx['H'],
@@ -315,7 +321,8 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
             _save(path,dict(theta=theta.tolist(),history=history,method=method,
                                 active_features=list(active_features),
                                 coefficient_radius=coefficient_radius,
-                                initial_step=initial_step))
+                                initial_step=initial_step,
+                                scenario_mode=scenario_mode))
         if decision['accepted'] and library_enrichment:
             enrich_library(ctx,libraries,beta+theta,
                            ctx['root']/'training_library')
@@ -329,6 +336,7 @@ def train_objective(ctx,method,libraries,out,*,cores=15,seconds=2700.,
                 seconds=time.monotonic()-start,
                 active_features=list(active_features),
                 coefficient_radius=coefficient_radius,
+                scenario_mode=scenario_mode,
                 optimizer=f'coordinate_{initial_step:g}_six_rounds',
                 caveat='No partial acceptance; unfinished evaluation is not a loss')
     _save(out/'trained.json',answer)
