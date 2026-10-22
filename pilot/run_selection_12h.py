@@ -286,7 +286,9 @@ def summarize(args):
         for arm in ARMS:
             cost,_=fallback_cost(c,rs,arm)
             if cost is not None:monday['cost'][arm]+=cost
-    comparisons={};recommended=None
+    comparisons={};recommended=None;selection_reason=None
+    frozen=args.out/'selection'/'frozen.json'
+    policies=(json.loads(frozen.read_text())['methods'] if frozen.exists() else {})
     if valid_test:
         weeks=sorted(byweek);den=np.array([byweek[m]['cases'] for m in weeks],float)
         for arm in ARMS:
@@ -296,13 +298,26 @@ def summarize(args):
             comparisons[arm]=_week_ci(difference,den,rng,alpha=.05/7.)
         # Do NOT select by numeric rank alone. A challenger must improve by
         # at least 0.5 per case with simultaneous intervals excluding zero.
-        eligible=[a for a in ('VF_PLUS','GAP_PLUS','ANCHORED_PLUS','SHARED_BASE')
-                  if totals[a]['exact_coverage']>=.98 and
-                  comparisons[a]['ci_familywise'][1]<-.5]
-        recommended=(min(eligible,key=lambda k:comparisons[k]['effect'])
-                     if eligible else 'SHARED_PLUS')
-    frozen=args.out/'selection'/'frozen.json'
-    policies=(json.loads(frozen.read_text())['methods'] if frozen.exists() else {})
+        admissible_statuses={
+            'VF_PLUS':{'FEASIBLE_GAP_OPEN','CERTIFIED'},
+            'GAP_PLUS':{'ACCEPTED','PAIRED_TRAINING_HEURISTIC'},
+            'ANCHORED_PLUS':{'ACCEPTED','PAIRED_TRAINING_HEURISTIC'},
+            'SHARED_BASE':{'TRAINED_WITH_ACCEPTED_UPDATES','PAIRED_TRAINING_HEURISTIC'},
+        }
+        if totals['SHARED_PLUS']['exact_coverage']<.98 or (
+              policies.get('SHARED_PLUS',{}).get('coeff') is None):
+            selection_reason='SHARED_PLUS_NOT_SUFFICIENTLY_EVALUATED'
+        else:
+            eligible=[a for a in admissible_statuses
+                    if totals[a]['exact_coverage']>=.98
+                    and policies.get(a,{}).get('status') in admissible_statuses[a]
+                    and comparisons[a]['ci_familywise'][1]<-.5]
+            recommended=(min(eligible,key=lambda k:comparisons[k]['effect'])
+                         if eligible else 'SHARED_PLUS')
+            selection_reason=('SUPERIOR_CHALLENGER' if eligible
+                              else 'NO_CREDIBLE_CHALLENGER_IMPROVEMENT')
+    else:
+        selection_reason='FALLBACK_COVERAGE_INCOMPLETE'
     status=('INSUFFICIENT_FALLBACK_COVERAGE' if not valid_test else
             'COMPLETE_COMPARISON_WITH_FALLBACK' if all(
               fallback[k]['mean_cost_per_case'] is not None for k in ARMS)
@@ -311,7 +326,8 @@ def summarize(args):
          case_missing=missing_case,original_fallback_errors=original_invalid,
          arms=totals,
          case_fallback=fallback,contrasts_vs_SHARED_PLUS=comparisons,
-         provisional_main_method=recommended,training=policies,
+         provisional_main_method=recommended,selection_reason=selection_reason,
+         training=policies,
          important_note=('Multiple-comparison-adjusted week-bootstrap intervals; '
           'select only challengers with >=98% exact case coverage and more '
           'than 0.5 cost units/case improvement. Fallback is CASE, then '
