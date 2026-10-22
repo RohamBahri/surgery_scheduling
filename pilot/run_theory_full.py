@@ -751,6 +751,56 @@ def evaluate_all(args,ctx,models):
                 sum(r['methods'][arm]['model']['C'] for r in records)/sum(r['cases'] for r in records),
                  evaluation_wall_hours=sum(float(r['methods'][arm].get('evaluation_seconds',0.))
                                             for r in records)/3600.)
+    # Model-dependence stress preserves each case's 200-sample marginal.
+    output['dependence_stress']={}
+    n_all=sum(r['cases'] for r in rows)
+    for arm in arms:
+        valid=[r for r in rows if r['methods'].get(arm,{}).get('status')=='COMPLETE'
+               and 'C_comonotone' in r['methods'][arm].get('model',{})]
+        result=dict(completed_components=len(valid),
+                    unresolved=len(rows)-len(valid))
+        if len(valid)==len(rows):
+            base=sum(r['methods'][arm]['model']['C'] for r in valid)/n_all
+            stressed=sum(r['methods'][arm]['model']['C_comonotone']
+                         for r in valid)/n_all
+            result.update(model_C_per_case=base,
+                          comonotone_C_per_case=stressed,
+                          dependence_increase=stressed-base)
+        output['dependence_stress'][arm]=result
+    # Separate sensitivity effects from the main deployed hash objective;
+    # incomplete mechanisms do not delete primary realized-cost observations.
+    output['mechanism_summary']={}
+    for arm in ('CASE','STAT','SHARED','OBS','EG','ROBUST','VF_SHARED'):
+        matched=[r for r in rows if arm in r.get('mechanism_diagnostics',{})]
+        summaries=dict(attempted_components=len(matched),
+                       missing_components=len(rows)-len(matched))
+        balance=[(r, r['mechanism_diagnostics'][arm].get('balanced_tie',{}))
+                 for r in matched]
+        completed=[(r,m) for r,m in balance if m.get('status')=='COMPLETE']
+        summaries['balanced_tie_completed']=len(completed)
+        if len(completed)==len(rows):
+            summaries['balanced_tie_realized_per_case']=sum(
+                m['realized'] for _,m in completed)/n_all
+            summaries['balanced_tie_model_C_per_case']=sum(
+                m['model_C'] for _,m in completed)/n_all
+        sensitivity={}
+        for alpha,h in SWEEP[1:]:
+            key=f'{alpha:g}_{h:g}'
+            selected=[(r,r['mechanism_diagnostics'][arm].get(
+                        'response_sweep',{}).get(key,{})) for r in matched]
+            good=[(r,m) for r,m in selected
+                  if m.get('status') in ('COMPLETE','REUSED_NOMINAL')]
+            response_rec=dict(completed_components=len(good),
+                              unresolved=len(rows)-len(good))
+            if len(good)==len(rows):
+                response_rec.update(cost_realized_per_case=sum(
+                    m['cost_realized'] for _,m in good)/n_all,
+                    cost_model_C_per_case=sum(
+                    m['cost_model_C'] for _,m in good)/n_all)
+            sensitivity[key]=response_rec
+        summaries['response_sweep']=sensitivity
+        output['mechanism_summary'][arm]=summaries
+
     hindsight_all=all(r.get('hindsight',{}).get('complete') for r in rows)
     if hindsight_all:
         output['hindsight_cost_per_case']=sum(float(r['hindsight']['cost']) for r in rows)/sum(r['cases'] for r in rows)
