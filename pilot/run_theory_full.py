@@ -71,6 +71,7 @@ def secure_manifest(root,args):
                 eval_component_seconds=args.eval_component_seconds,
                 preprocess_seconds=args.preprocess_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
+                pw_nodes=args.pw_nodes,
                 scenario_seed=20261020,scenarios=dict(A=50,B=50,C=200),
                 response_grid=SWEEP,hash_seeds=SEEDS,
                 note='Only full verified deployments count as completed; no silent fallback')
