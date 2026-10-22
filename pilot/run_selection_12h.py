@@ -134,6 +134,8 @@ def stage(args):
         rec=json.loads((ctx['root']/'shared_base'/'trained.json').read_text())
         trained=bool(any(x.get('accepted') for x in rec['history']))
         record_policy(args,'SHARED_BASE',coeff,
+             'PAIRED_TRAINING_HEURISTIC' if any(
+               x.get('accepted_partial_training_only') for x in rec['history']) else
              'TRAINED_WITH_ACCEPTED_UPDATES' if trained else 'NO_ACCEPTED_UPDATE',
              source='bounded-original-directional-shared-search',
              training=rec)
@@ -159,6 +161,8 @@ def stage(args):
         rec=json.loads((ctx['root']/'shared_plus'/'trained.json').read_text())
         improved=bool(any(x.get('accepted') for x in rec['history']))
         record_policy(args,'SHARED_PLUS',coeff,
+            'PAIRED_TRAINING_HEURISTIC' if any(
+              x.get('accepted_partial_training_only') for x in rec['history']) else
             'TRAINED_WITH_ACCEPTED_UPDATES' if improved else 'NO_ACCEPTED_UPDATE',
             source='VF-warm-started-direct-shared-with-smaller-search',
             training=rec,initial_policy='SHARED_BASE')
@@ -238,31 +242,50 @@ def summarize(args):
              total_components=len(allrows),
              solver_hours=sum(float(rs[arm].get('method_wall_seconds',0))
                               for _,rs in allrows)/3600.)
+    from surgery.weekly_planner import evaluate as evaluate_realized
+    originals={}
+    original_invalid=[]
+    for c,rs in allrows:
+        if rs['CASE'].get('status')!='COMPLETE':
+            try:
+                originals[(c.group,c.monday,int(min(c.case_ids)))]=float(
+                    evaluate_realized(c,c.original,c.actual)['cost'])
+            except (ValueError,AssertionError) as exc:
+                original_invalid.append(dict(site=c.group,monday=c.monday,error=str(exc)))
+    def fallback_cost(c,rs,arm):
+        own=rs[arm]
+        if own.get('status')=='COMPLETE':
+            return float(np.mean(list(own['realized'].values()))),'METHOD'
+        if rs['CASE'].get('status')=='COMPLETE':
+            return float(np.mean(list(rs['CASE']['realized'].values()))),'CASE'
+        recorded=originals.get((c.group,c.monday,int(min(c.case_ids))))
+        return recorded,'RECORDED_ORIGINAL' if recorded is not None else 'UNAVAILABLE'
     missing_case=sum(c.n for c,rs in allrows
                      if rs['CASE'].get('status')!='COMPLETE')
     fallback={}
     for arm in ARMS:
-        paired=[]
+        paired=[];original_cases=0
         for c,rs in allrows:
-            own=rs[arm]
-            if own.get('status')!='COMPLETE':own=rs['CASE']
-            if own.get('status')=='COMPLETE':
-                paired.append((c,float(np.mean(list(own['realized'].values())))))
-        fallback[arm]=dict(covered_cases=sum(c.n for c,_ in paired),
+            cost,source=fallback_cost(c,rs,arm)
+            if cost is not None:paired.append((c,cost))
+            if source=='RECORDED_ORIGINAL':original_cases+=c.n
+        covered=sum(c.n for c,_ in paired)
+        fallback[arm]=dict(covered_cases=covered,
             fallback_cases=sum(c.n for c,rs in allrows if
                                rs[arm].get('status')!='COMPLETE'),
-            mean_cost_per_case=(sum(cost for _,cost in paired)/N
-                 if sum(c.n for c,_ in paired)==N else None))
+            original_assignment_fallback_cases=original_cases,
+            mean_cost_per_case=(sum(cost for _,cost in paired)/N if covered==N
+                                else None))
     rng=np.random.default_rng(20261022)
     byweek={}
-    valid_test=not missing_case
+    valid_test=not original_invalid and all(x['covered_cases']==N
+                                            for x in fallback.values())
     for c,rs in allrows:
         monday=byweek.setdefault(c.monday,dict(cases=0,cost={k:0. for k in ARMS}))
         monday['cases']+=c.n
         for arm in ARMS:
-            selected=rs[arm] if rs[arm].get('status')=='COMPLETE' else rs['CASE']
-            if selected.get('status')=='COMPLETE':
-                monday['cost'][arm]+=float(np.mean(list(selected['realized'].values())))
+            cost,_=fallback_cost(c,rs,arm)
+            if cost is not None:monday['cost'][arm]+=cost
     comparisons={};recommended=None
     if valid_test:
         weeks=sorted(byweek);den=np.array([byweek[m]['cases'] for m in weeks],float)
@@ -280,17 +303,20 @@ def summarize(args):
                      if eligible else 'SHARED_PLUS')
     frozen=args.out/'selection'/'frozen.json'
     policies=(json.loads(frozen.read_text())['methods'] if frozen.exists() else {})
-    status=('INSUFFICIENT_CASE_COVERAGE' if not valid_test else
+    status=('INSUFFICIENT_FALLBACK_COVERAGE' if not valid_test else
             'COMPLETE_COMPARISON_WITH_FALLBACK' if all(
               fallback[k]['mean_cost_per_case'] is not None for k in ARMS)
             else 'PARTIAL')
     output=dict(status=status,cases=N,calendar_weeks=len(byweek),
-         case_missing=missing_case,arms=totals,
+         case_missing=missing_case,original_fallback_errors=original_invalid,
+         arms=totals,
          case_fallback=fallback,contrasts_vs_SHARED_PLUS=comparisons,
          provisional_main_method=recommended,training=policies,
          important_note=('Multiple-comparison-adjusted week-bootstrap intervals; '
           'select only challengers with >=98% exact case coverage and more '
-          'than 0.5 cost units/case improvement. Historical 2013 has been '
+          'than 0.5 cost units/case improvement. Fallback is CASE, then '
+          'feasible recorded original assignment; it is a distinct operational '
+          'policy, not exact deployment. Historical 2013 has been '
           'previously exposed. An incomplete learner is NOT evidence against '
           'its mathematical objective.'))
     atomic(args.out/'selection'/'selection_summary.json',output)
