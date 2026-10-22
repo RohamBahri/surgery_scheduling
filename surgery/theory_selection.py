@@ -6,6 +6,7 @@ These are bounded proposal engines, not exact optimization of the original
 full-population GAP or anchored DC objectives.
 """
 from __future__ import annotations
+import json
 import time
 import numpy as np
 from scipy.optimize import minimize
@@ -16,6 +17,15 @@ from surgery.weekly_planner import evaluate
 
 class Expired(Exception):
     pass
+
+
+def _candidate_checkpoint(folder,coeff,source):
+    """Atomic proposal snapshot; it is NOT a full direct-cost certificate."""
+    destination=folder/'proposal_checkpoint.json'
+    temp=destination.with_suffix('.tmp')
+    temp.write_text(json.dumps(dict(coeff=np.asarray(coeff,float).tolist(),
+                                    source=source,status='UNCONFIRMED_PROPOSAL')))
+    temp.replace(destination)
 
 
 def _sample(items, limit=28):
@@ -130,6 +140,7 @@ def anchored_proposal(ctx,start,output,*,seconds=1800.,cores=15):
         return start,dict(status='NO_CONFIRMED_IMPROVEMENT',
                           anchored_components=len(blocks),missing=missing,
                           surrogate=surrogate,confirmed=False)
+    _candidate_checkpoint(output,proposed,'anchored-tangent-majorizer')
     final,certificate=_confirm(ctx,start,proposed,output,left,cores)
     return final,dict(status=('PAIRED_TRAINING_HEURISTIC' if
                       certificate.get('accepted_partial_training_only') else
@@ -229,6 +240,7 @@ def gap_proposal(ctx,start,vf,output,*,seconds=1800.,cores=15):
     if chosen==0 or left<30:
         return start,dict(status='NO_EG_VERIFIED_PROPOSAL',EG_intervals=score,
                           screened_components=len(banked),confirmed=False)
+    _candidate_checkpoint(output,selected,'bounded-EG-adversarial-interval')
     final,confirmation=_confirm(ctx,start,selected,output,left,cores)
     return final,dict(status=('PAIRED_TRAINING_HEURISTIC' if
                       confirmation.get('accepted_partial_training_only') else
