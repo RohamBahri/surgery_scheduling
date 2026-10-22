@@ -150,7 +150,7 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
     saa=(saa_reference if saa_reference is not None else
          saa_mip(c,bank,seconds=max(.001,limit())))
     last_lb=max(0.,float(saa.lower or 0.))
-    history=[];fixed_cache={};hash_cache=set()
+    history=[];fixed_cache={};installed_primary=set();hash_cache=set()
     try:
         for it in range(cuts):
             remaining=seconds-(time.monotonic()-tic)
@@ -184,12 +184,18 @@ def value_function_exact(c,bank,d0,*,seconds=1800.,separation_seconds=120.,
                 raise AssertionError('Feasible primary witness understates optimum')
             if claimed>true_v+1e-5:
                 competitor=tuple(map(int,follower.assignment))
-                if competitor in fixed_cache:
+                if competitor in installed_primary:
                     history.append(dict(iteration=it,status='DUPLICATE_PRIMARY_CUT'))
                     break
-                fix=_fixed_phi(m,c,competitor,d,zero,f'primary_cut_{it}')
+                # Fixed-expression cache is NOT the set of installed
+                # follower-optimality cuts. Hash separation can create the
+                # same expression earlier without adding v <= phi_z.
+                fix=fixed_cache.get(competitor)
+                if fix is None:
+                    fix=_fixed_phi(m,c,competitor,d,zero,f'primary_cut_{it}')
+                    fixed_cache[competitor]=fix
                 m.addConstr(v<=fix)
-                fixed_cache[competitor]=fix
+                installed_primary.add(competitor)
                 history.append(dict(iteration=it,status='PRIMARY_CUT'))
                 continue
             if limit()<=0:
