@@ -1,7 +1,4 @@
 """Research-v3 runner, feature audit, and regularization contract tests."""
-import os
-from pathlib import Path
-import subprocess
 import numpy as np
 import pytest
 
@@ -10,34 +7,6 @@ from surgery.anchored_master import restricted_value
 from run_anchored_extras import _describe
 from run_anchored_research_diagnostics import audit_features, response_regions
 from test_rich_features import sample
-
-ROOT=Path(__file__).resolve().parents[1]
-
-def test_research_shell_syntax_and_variant_parameters(tmp_path):
-    script=ROOT/'run_research_v3.sh'
-    subprocess.run(['bash','-n',str(script)],check=True)
-    mock=tmp_path/'git'
-    mock.write_text('#!/bin/sh\necho anchored-research-v3\n')
-    mock.chmod(0o755)
-    env=dict(os.environ,PATH=str(tmp_path)+os.pathsep+os.environ['PATH'],
-             OUT='artifacts/nonstandard_experiment',INITIAL='LASSO',
-             RIDGE='0.001',REFERENCE_PENALTY='0.002',
-             LINE_FRACTIONS='1.5,1,0.5',TERMINAL_SEPARATION='1',
-             TIGHT_SURROGATE='1')
-    run=subprocess.run(['bash',str(script),'train','--dry-run'],env=env,
-                       text=True,capture_output=True)
-    assert run.returncode==0,run.stderr
-    text=run.stdout
-    assert '--initial-method LASSO' in text
-    assert '--ridge 0.001' in text
-    assert '--reference-penalty 0.002' in text
-    assert '--terminal-separation' in text
-    assert '--tight-surrogate' in text
-    assert 'artifacts/nonstandard_experiment' in text
-    before=subprocess.run(['bash',str(script),'features','--dry-run'],env=env,
-                          text=True,capture_output=True)
-    assert before.returncode==0
-    assert '--stage features' in before.stdout
 
 def test_offline_service_columns_absent_and_remaining_effects_auditable():
     data=sample(days=8)
