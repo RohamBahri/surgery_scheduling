@@ -121,3 +121,64 @@ def test_saa_reference_bounds_remain_separate_from_advice_policies():
     assert result["saa_reference"]["model_C_feasible_per_case"]==pytest.approx(2.5)
     assert result["inducibility_bounds"]["PER_WEEK_ROBUST"]["gap_lower"]==0
     assert result["inducibility_bounds"]["PER_WEEK_ROBUST"]["gap_upper"]==pytest.approx(1.)
+
+
+def test_parallel_candidate_shards_cover_every_score_without_gurobi(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pilot import run_theory_full as runner
+    c=SimpleNamespace(n=1,booked=np.array([100.]),case_ids=np.array([701]),
+                      group='TGH',monday='2012-02-06')
+    runner._SCORE_STATE=dict(base=np.array([110.]),H=np.zeros((1,5)),
+                       method='SHARED',pools={},seconds=1.,planner_stats={})
+    monkeypatch.setattr(runner,"scenarios",lambda *a,**kw:np.ones((50,1)))
+    monkeypatch.setattr(runner,"scores",lambda *a,**kw:7.)
+    coeff=[[float(k)]*5 for k in range(13)]
+    data=dict(X=np.ones((1,1)),case_w=np.array([110.]))
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        score,valid=runner.parallel_score(
+             [("TGH|2012-02-06|701",c,np.array([0]))],data,np.zeros((1,5)),
+             coeff,'SHARED',{},1.,3,0,tmp_path,pool=pool,task_seconds=30.)
+    assert valid.all() and list(score)==[7.]*len(coeff)
+    # Exact checkpoint restart needs no new solver calls.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        again,valid2=runner.parallel_score(
+             [("TGH|2012-02-06|701",c,np.array([0]))],data,np.zeros((1,5)),
+             coeff,'SHARED',{},1.,3,0,tmp_path,pool=pool,task_seconds=30.)
+    assert np.array_equal(score,again) and valid2.all()
+    assert len(list(tmp_path.glob("*_shard_*.json")))>1
+    runner._SCORE_STATE=None
+
+
+def test_expired_candidate_shard_is_unresolved_not_crash(monkeypatch):
+    from pilot import run_theory_full as runner
+    c=SimpleNamespace(n=1,booked=np.array([100.]))
+    runner._SCORE_STATE=dict(base=np.array([110.]),H=np.zeros((1,5)),
+                      method='SHARED',pools={},seconds=5.,planner_stats={})
+    monkeypatch.setattr(runner,"scenarios",lambda *a,**kw:np.ones((50,1)))
+    key,n,results=runner._train_component(
+        ('component',c,np.array([0]),[[0.]*5],0,[0],0.))
+    assert key=='component' and n==1
+    assert not results[0][1]['complete']
+    assert results[0][1]['status']=='TASK_WALL_LIMIT'
+    runner._SCORE_STATE=None
+
+
+def test_preprocessing_deadline_preserves_full_coverage_with_zero_dual(tmp_path,monkeypatch):
+    c=SimpleNamespace(n=1,booked=np.array([100.]))
+    monkeypatch.setattr(theory_regions,"scenarios",
+                        lambda *a,**kw:np.ones((50,1)))
+    data=dict(X=np.zeros((1,1)),case_w=np.zeros(1))
+    ans=theory_regions.build_problems(
+        [('one',c,np.array([0]))],data,np.zeros((1,5)),np.zeros(5),
+        {},tmp_path,seconds=5.,cores=1,stage_seconds=0.)
+    assert len(ans)==1 and ans[0].lower==0.
+    rec=__import__('json').loads((tmp_path/'saa_preprocessing.json').read_text())
+    assert rec['unresolved_saa']==1 and rec['ready_components']==1
+
+
+def test_single_split_run_has_explicit_train_test_design():
+    from pathlib import Path
+    src=(Path(__file__).resolve().parents[1]/'pilot'/'run_theory_full.py').read_text()
+    assert "for fold in ('2013',):" in src
+    assert 'training_cases=24506,test_cases=8774' in src
+    assert "choices=['2013']" in src
