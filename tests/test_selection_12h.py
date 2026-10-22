@@ -33,7 +33,11 @@ def test_anchor_sampler_preserves_large_components_and_no_array_comparisons():
 
 def test_frozen_reporting_no_case_outcomes_no_inference(tmp_path,monkeypatch):
     from pilot import run_selection_12h as runner
-    c=SimpleNamespace(group='TGH',monday='2013-02-04',n=1)
+    c=SimpleNamespace(group='TGH',monday='2013-02-04',n=1,
+        case_ids=np.array([42]),original=np.array([0]),
+        actual=np.array([100.]))
+    from surgery import weekly_planner
+    monkeypatch.setattr(weekly_planner,'evaluate',lambda *a,**k:dict(cost=10.))
     ctx=dict(root=tmp_path,eval=[('one',c,np.array([0]))])
     ctxfile=tmp_path/'selection'/'context.pkl'
     ctxfile.parent.mkdir(parents=True)
@@ -42,9 +46,11 @@ def test_frozen_reporting_no_case_outcomes_no_inference(tmp_path,monkeypatch):
     args=SimpleNamespace(out=tmp_path)
     runner.summarize(args)
     summary=json.loads((tmp_path/'selection'/'selection_summary.json').read_text())
-    assert summary['status']=='INSUFFICIENT_CASE_COVERAGE'
-    assert summary['provisional_main_method'] is None
-    assert summary['case_fallback']['SHARED_PLUS']['mean_cost_per_case'] is None
+    assert summary['status']=='COMPLETE_COMPARISON_WITH_FALLBACK'
+    assert summary['provisional_main_method']=='SHARED_PLUS'
+    assert summary['case_fallback']['SHARED_PLUS']['mean_cost_per_case']==10.
+    assert summary['case_fallback']['SHARED_PLUS']['original_assignment_fallback_cases']==1
+    assert summary['arms']['CASE']['exact_coverage']==0
 
 
 def test_policy_provenance_and_untrained_status(tmp_path):
