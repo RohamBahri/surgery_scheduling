@@ -203,6 +203,61 @@ def stage(args):
     else:raise ValueError('Unknown stage '+str(stage))
 
 
+def recover_stage(args,stage_name):
+    """Retain the latest DURABLE feasible policy when a process was killed.
+
+    A saved directional theta is a feasible advice vector, not proof of
+    full-cohort objective improvement. Preserve provenance honestly.
+    """
+    tags={'shared_base':'SHARED_BASE','shared_plus':'SHARED_PLUS',
+          'stat':'STAT_PLUS','vf':'VF_PLUS',
+          'gap':'GAP_PLUS','anchored':'ANCHORED_PLUS'}
+    name=tags.get(stage_name)
+    if name is None or (policies_dir(args)/(name+'.json')).exists():
+        return
+    ctxfile=args.out/'selection'/'context.pkl'
+    if not ctxfile.exists():return
+    ctx=context(args)
+    if stage_name in ('shared_base','shared_plus'):
+        search=ctx['root']/stage_name/'progress.json'
+        if not search.exists():return
+        doc=json.loads(search.read_text())
+        theta=np.asarray(doc.get('theta',[]),float)
+        if theta.shape!=(5,) or not np.isfinite(theta).all():return
+        history=doc.get('history',[])
+        accepted=any(x.get('accepted') for x in history)
+        status=('INTERRUPTED_WITH_ACCEPTED_UPDATES' if accepted else
+                'INTERRUPTED_NO_ACCEPTED_UPDATES')
+        record_policy(args,name,ctx['beta']+theta,status,
+                      checkpoint_rounds=len(history),
+                      source='last-durable-bounded-direct-search')
+    elif stage_name=='stat':
+        p=ctx['root']/'stat_plus.json'
+        if p.exists():
+            doc=json.loads(p.read_text())
+            record_policy(args,name,doc.get('coeff'),
+                    'INTERRUPTED_WITH_FEASIBLE_INCUMBENT',
+                    source='last-checkpointed-statistical-coefficients')
+    elif stage_name=='vf':
+        p=ctx['root']/'vf_global.json'
+        if p.exists():
+            doc=json.loads(p.read_text())
+            theta=doc.get('reviewed')
+            coeff=(None if theta is None else
+                   ctx['beta']+np.asarray(theta,float))
+            record_policy(args,name,coeff,
+                'FEASIBLE_GAP_OPEN' if coeff is not None else 'NO_FEASIBLE_VF',
+                lower=doc.get('lower'),upper=doc.get('upper'),
+                source='bounded-VF-solver-after-interruption')
+    elif stage_name in ('gap','anchored'):
+        path=args.out/'selection'/stage_name/'proposal_checkpoint.json'
+        if path.exists():
+            doc=json.loads(path.read_text())
+            record_policy(args,name,doc.get('coeff'),
+                   'UNCONFIRMED_PROPOSAL',source=doc.get('source'),
+                   provenance=doc)
+
+
 def _week_ci(diff,den,rng,draws=5000,alpha=.01):
     N=len(diff)
     boots=rng.integers(0,N,size=(draws,N))
@@ -315,11 +370,15 @@ def summarize(args):
             'VF_PLUS':{'FEASIBLE_GAP_OPEN','CERTIFIED'},
             'GAP_PLUS':{'ACCEPTED','PAIRED_TRAINING_HEURISTIC'},
             'ANCHORED_PLUS':{'ACCEPTED','PAIRED_TRAINING_HEURISTIC'},
-            'SHARED_BASE':{'TRAINED_WITH_ACCEPTED_UPDATES','PAIRED_TRAINING_HEURISTIC'},
+            'SHARED_BASE':{'TRAINED_WITH_ACCEPTED_UPDATES',
+                           'PAIRED_TRAINING_HEURISTIC',
+                           'INTERRUPTED_WITH_ACCEPTED_UPDATES'},
         }
         base_status=policies.get('SHARED_BASE',{}).get('status')
         plus_status=policies.get('SHARED_PLUS',{}).get('status')
-        allowed_shared={'TRAINED_WITH_ACCEPTED_UPDATES','PAIRED_TRAINING_HEURISTIC'}
+        allowed_shared={'TRAINED_WITH_ACCEPTED_UPDATES',
+                        'PAIRED_TRAINING_HEURISTIC',
+                        'INTERRUPTED_WITH_ACCEPTED_UPDATES'}
         if totals['SHARED_PLUS']['exact_coverage']<.98 or (
               policies.get('SHARED_PLUS',{}).get('coeff') is None):
             selection_reason='SHARED_PLUS_NOT_SUFFICIENTLY_EVALUATED'
@@ -426,6 +485,10 @@ def supervise(args):
                     process.wait()
         events[name]=dict(status=status,seconds=time.monotonic()-t,
                           exit_code=process.returncode,log=str(log))
+        if status!='COMPLETE':
+            try:recover_stage(args,name)
+            except Exception as exc:
+                events[name]['recovery_error']=repr(exc)
         atomic(root/'run_status.json',dict(events=events,wall_seconds=time.monotonic()-elapsed_start))
         print(name,status,round(time.monotonic()-elapsed_start),flush=True)
     # Always attempt a partial final report without touching training or test
