@@ -755,7 +755,7 @@ def evaluate_all(args,ctx,models):
     admissible=set(('BOOKED','CASE','RISK','STAT','STAT_PLUS','SHARED',
                     'VF_SHARED','EG','OBS','ROBUST','SHARED_GLOBAL',
                     'ANCHORED_TARGET','SHARED_BASE','SHARED_PLUS','VF_PLUS',
-                    'GAP_PLUS','ANCHORED_PLUS','PER_WEEK','PER_WEEK_ROBUST','QFILL',
+                    'GAP_PLUS','ANCHORED_PLUS','EG_LIB','ANCHORED_T','PER_WEEK','PER_WEEK_ROBUST','QFILL',
                     'VF_PW','PW_VFCG','PW_BOUNDED','PW_ANCHORED','SAA','HINDSIGHT'))
     if len(chosen)!=len(set(chosen)) or not set(chosen)<=admissible:
         raise ValueError('Duplicate or unsupported evaluation method')
