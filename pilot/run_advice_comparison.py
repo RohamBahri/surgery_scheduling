@@ -8,12 +8,13 @@ for k in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR
     os.environ[k] = "1"
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from multiprocessing import get_context
 import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
@@ -143,51 +144,94 @@ def shared_control(data, H):
 
 
 
-def collect_features(items, data, names, seconds, cores, checkpoint):
-    """Resume costly exact CASE feature schedules at component granularity."""
-    n = len(data["booked"])
-    H, seen = np.zeros((n, 5), float), np.zeros(n, bool)
+def collect_features(items,data,names,seconds,cores,checkpoint,stage_seconds=None):
+    """Complete, deadline-aware CASE-feature census with durable partial progress.
+
+    A missing CASE schedule never becomes an invented feature. The caller gets
+    a structured setup failure after independent components have been attempted.
+    """
+    n=len(data["booked"])
+    H=np.zeros((n,5),float);seen=np.zeros(n,bool)
     if checkpoint is not None and checkpoint.exists():
-        with np.load(checkpoint) as saved:
-            H, seen = saved["H"].copy(), saved["seen"].copy()
-        if H.shape != (n, 5) or seen.shape != (n,):
-            raise RuntimeError("Stale feature-solve checkpoint")
-    pending = []
+        with np.load(checkpoint) as old:
+            H,seen=old['H'].copy(),old['seen'].copy()
+        if H.shape!=(n,5) or seen.shape!=(n,):
+            raise RuntimeError('Stale CASE feature checkpoint')
+    pending=[]
     for item in items:
-        rows = item[2]
-        if seen[rows].all():
-            continue
+        rows=item[2]
+        if seen[rows].all():continue
         if seen[rows].any():
-            raise RuntimeError("Partial CASE component in feature checkpoint")
+            raise RuntimeError('Partially completed CASE component')
         pending.append(item)
-    state = dict(data=data, names=names, seconds=seconds)
-    try:
-        for j, (_, rows, features) in enumerate(
-                parallel(baseline_job, pending, state, cores)):
-            if seen[rows].any():
-                raise AssertionError("Repeated case in the decomposition")
-            H[rows], seen[rows] = features, True
-            if (j+1) % 50 == 0 and checkpoint is not None:
-                np.savez_compressed(checkpoint, H=H, seen=seen)
-                print(f"CASE features: {j+1}/{len(pending)} pending components", flush=True)
-    except BaseException:
+    failures={}
+    deadline=(float('inf') if stage_seconds is None else
+              time.monotonic()+float(stage_seconds))
+    def save():
         if checkpoint is not None:
-            np.savez_compressed(checkpoint, H=H, seen=seen)
-        raise
+            temp=checkpoint.with_name(checkpoint.stem+'.tmp.npz')
+            np.savez_compressed(temp,H=H,seen=seen)
+            temp.replace(checkpoint)
+            report=checkpoint.with_name('case_feature_unresolved.json')
+            report.write_text(json.dumps(dict(
+                completed_cases=int(seen.sum()),total_cases=n,
+                failures=failures,deadline_exhausted=time.monotonic()>=deadline),
+                sort_keys=True,indent=2))
+    if pending:
+        workers=min(cores,len(pending))
+        state=dict(data=data,names=names,seconds=seconds,threads=1)
+        with ProcessPoolExecutor(max_workers=workers,
+             mp_context=get_context('spawn'),initializer=init_worker,
+             initargs=(state,)) as executor:
+            source=iter(pending);active={}
+            def launch():
+                if time.monotonic()>=deadline:return False
+                try:item=next(source)
+                except StopIteration:return False
+                future=executor.submit(baseline_job,item)
+                active[future]=(item[0],item[2])
+                return True
+            for _ in range(workers):
+                if not launch():break
+            completed=0
+            while active:
+                finished,_=wait(active,return_when=FIRST_COMPLETED)
+                for future in finished:
+                    ck,expected_rows=active.pop(future)
+                    try:
+                        returned,rows,features=future.result()
+                        if returned!=ck or not np.array_equal(rows,expected_rows):
+                            raise AssertionError('CASE feature task identity mismatch')
+                        if isinstance(features,dict):
+                            failures[ck]=features.get('error','Uncertified CASE plan')
+                        else:
+                            H[rows]=features
+                            seen[rows]=True
+                    except Exception as exc:
+                        failures[ck]=repr(exc)
+                    completed+=1
+                    save()
+                    if completed%100==0:
+                        print('CASE feature components processed',completed,'/',len(pending),
+                              'complete cases',int(seen.sum()),flush=True)
+                    launch()
+    save()
     if not seen.all():
-        raise AssertionError("Incomplete feature cohort")
+        raise RuntimeError(
+             f'FEATURE_SETUP_INCOMPLETE: {int(seen.sum())}/{n} cases; '
+             f'{len(failures)} failed components. Details saved next to checkpoint.')
     if checkpoint is not None:
         checkpoint.unlink(missing_ok=True)
     return H
 
 
-def fit_features(folder, items, data, names, seconds, cores):
+def fit_features(folder, items, data, names, seconds, cores,stage_seconds=None):
     path = folder/"five_features.npz"
     if path.exists():
         with np.load(path) as old:
             return old["H"], old["mean"], old["scale"]
     H = collect_features(items, data, names, seconds, cores,
-                         folder/"five_features_progress.npz")
+                         folder/"five_features_progress.npz",stage_seconds=stage_seconds)
     mu, sd = H.mean(axis=0), H.std(axis=0)
     sd = np.where(sd < 1e-8, 1., sd)
     H = (H-mu)/sd
@@ -195,14 +239,16 @@ def fit_features(folder, items, data, names, seconds, cores):
     return H, mu, sd
 
 
-def test_features(items, data, names, mean, scale, seconds, cores, folder=None):
+def test_features(items, data, names, mean, scale, seconds, cores, folder=None,
+                  stage_seconds=None):
     path = folder/"held_features.npz" if folder is not None else None
     if path is not None and path.exists():
         with np.load(path) as saved:
             return saved["H"].copy()
     checkpoint = (folder/"held_features_progress.npz"
                   if folder is not None else None)
-    raw = collect_features(items, data, names, seconds, cores, checkpoint)
+    raw = collect_features(items, data, names, seconds, cores, checkpoint,
+                           stage_seconds=stage_seconds)
     H = (raw-mean)/scale
     if path is not None:
         np.savez_compressed(path, H=H)
