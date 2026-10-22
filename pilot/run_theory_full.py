@@ -927,12 +927,17 @@ def main():
     ap.add_argument('--global-seconds',type=float,default=14400.)
     ap.add_argument('--mechanism-seconds',type=float,default=600.,
                     help='Final optional per-component sensitivity budget')
-    ap.add_argument('--eval-component-seconds',type=float,default=4200.,
-                    help='Whole wall budget for one test component, all methods combined')
+    ap.add_argument('--eval-component-seconds',type=float,default=1500.,
+                    help='Independent per component-METHOD wall budget, never shared')
+    ap.add_argument('--eval-arms',default=(
+        'BOOKED,CASE,RISK,STAT,STAT_PLUS,SHARED,VF_SHARED,EG,OBS,ROBUST,'
+        'PER_WEEK_ROBUST,QFILL,VF_PW,SAA,HINDSIGHT'),
+        help='Full-test methods; optional expensive solvers are opt-in')
     ap.add_argument('--preprocess-seconds',type=float,default=14400.,
                     help='Whole wall budget for training SAA preprocessing stage')
     args=ap.parse_args()
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
+    args.eval_arms=[s.strip().upper() for s in args.eval_arms.split(',')]
     if not set(args.methods)<=set(['STAT_PLUS','VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
