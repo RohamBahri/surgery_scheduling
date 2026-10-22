@@ -121,24 +121,32 @@ def reviewed_policy(c,rows,H,base,coeff):
     return reviewed(c.booked,base-c.booked+H[rows]@coeff)
 
 
-def deploy(c,d,seconds,bank=None):
+def deploy(c,d,seconds,bank=None,deadline=None):
     from surgery.theory_cache import cached_deploy
     state=_SCORE_STATE if _SCORE_STATE is not None else {}
-    return cached_deploy(c,d,SEEDS,
-           lambda component,durations,seed:certified(component,durations,seed,seconds),
+    def exact_solve(component,durations,seed):
+        remaining=seconds if deadline is None else min(seconds,deadline-time.monotonic())
+        if remaining<=.1:
+            raise RuntimeError('DEPLOY_WALL_LIMIT')
+        return certified(component,durations,seed,remaining)
+    return cached_deploy(c,d,SEEDS,exact_solve,
            conn=state.get("planner_conn"),stats=state.get("planner_stats"))
 
 
-def scores(c,d,d0,bank,method,seconds,seed=0):
-    """Return fitted scenario objective. Every solver is complete or rejected."""
+def scores(c,d,d0,bank,method,seconds,seed=0,deadline=None):
+    """Score with an exact deployed planner and a shared candidate deadline."""
+    def limit():
+        remaining=seconds if deadline is None else min(seconds,deadline-time.monotonic())
+        if remaining<=.1:raise RuntimeError('CANDIDATE_WALL_LIMIT')
+        return remaining
     if method=='VF':
         from surgery.anchored_weekly_solver import solve_week
-        ans=solve_week(c,d,seconds=seconds,tie=False,threads=1)
+        ans=solve_week(c,d,seconds=limit(),tie=False,threads=1)
         if not ans.complete or ans.assignment is None:
             raise RuntimeError('VF primary planner incomplete: '+ans.status)
         return vf_objective(c,ans.assignment,d,bank,d0,LAM)
     if method=='EG':
-        ans=expected_gap_mip(c,d,bank,seconds=seconds,gamma=1.)
+        ans=expected_gap_mip(c,d,bank,seconds=limit(),gamma=1.)
         if not ans.complete:
             raise RuntimeError('EG adversary incomplete: '+ans.status)
         return float(ans.value)+LAM/2*np.square(d-d0).sum()
@@ -148,10 +156,10 @@ def scores(c,d,d0,bank,method,seconds,seed=0):
             cost=[]
             for alpha,h in SWEEP:
                 altered=np.maximum(1.,c.booked+response(u,alpha,h))
-                z=deploy(c,altered,seconds)
+                z=deploy(c,altered,limit(),deadline=deadline)
                 cost.append(np.mean([expected_reduced(c,zi,bank) for zi in z.values()]))
             return float(np.mean(cost)+LAM/2*np.square(d-d0).sum())
-        z=deploy(c,d,seconds)
+        z=deploy(c,d,limit(),deadline=deadline)
         if method=='OBS':
             # Realized outcomes are allowed in FITTING ONLY, not evaluation.
             bank=np.asarray(c.actual,float)[None,:]
