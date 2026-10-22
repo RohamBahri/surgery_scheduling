@@ -90,11 +90,20 @@ def cost(c, z, bank):
     return mean_cost(c, z, bank)
 
 
-def score(c, durations, banks, seeds, seconds, cached=None):
-    plans = (cached if cached is not None
-             else {r: certified(c, durations, r, seconds) for r in seeds})
-    return plans, {b: float(np.mean([cost(c, plans[r], draws) for r in seeds]))
-                   for b, draws in banks.items()}
+def score(c, durations, banks, seeds, seconds, cached=None, deadline=None):
+    """All hash deployments share the caller's remaining wall time."""
+    if cached is not None:
+        plans=cached
+    else:
+        plans={}
+        for r in seeds:
+            limit=(seconds if deadline is None else
+                   min(seconds,max(0.,deadline-time.monotonic())))
+            if limit<=.1:
+                raise RuntimeError('SCORE_WALL_LIMIT')
+            plans[r]=certified(c,durations,r,limit)
+    return plans,{b:float(np.mean([cost(c,plans[r],draws) for r in seeds]))
+                  for b,draws in banks.items()}
 
 
 def objective(c, d, d0, plans, scenarios_A, seeds):
@@ -144,7 +153,7 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
     if remaining<=.1:
         return d0,None,False,"BUDGET_EXHAUSTED",{}
     try:
-        baseline, bc = score(c, d0, banks, seeds, min(seconds,remaining))
+        baseline, bc = score(c,d0,banks,seeds,min(seconds,remaining),deadline=deadline)
     except RuntimeError as exc:
         return d0,None,False,"BASELINE_UNCERTIFIED: "+str(exc),{}
     if all(len(c.allowed[int(s)]) == 1 for s in c.surgeon):
@@ -166,7 +175,13 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
         fingerprint = tuple(np.round(candidate, 6))
         if fingerprint not in cache:
             try:
-                cache[fingerprint] = {r: certified(c, candidate, r, available) for r in seeds}
+                selected={}
+                for r in seeds:
+                    limit=min(seconds,deadline-time.monotonic())
+                    if limit<=.1:
+                        raise RuntimeError('PER_WEEK_WALL_LIMIT')
+                    selected[r]=certified(c,candidate,r,limit)
+                cache[fingerprint]=selected
             except RuntimeError:
                 return False
         found = cache[fingerprint]
