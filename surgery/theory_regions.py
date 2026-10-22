@@ -254,7 +254,7 @@ def _node_lower(problems,boxlo,boxhi,beta,seconds,lam,seeds,
 def global_shared_search(problems,beta,*,out,seconds=7200.,
                          solve_seconds=120.,max_nodes=40,radius=32.,
                          start_theta=None,lam=.001,seeds=(0,1,2),
-                         gap_tolerance=1e-3):
+                         gap_tolerance=1e-3,cores=1):
     """Certified continuous coefficient-space branch-and-bound.
 
     Lower bound: independent SAA MIP + exact boxwise regularizer lower bound;
@@ -262,115 +262,121 @@ def global_shared_search(problems,beta,*,out,seconds=7200.,
     every component deployed using the full two-hash exact planner.  No
     global-optimality claim is made unless the reported absolute gap closes.
     """
-    output=Path(out);output.mkdir(parents=True,exist_ok=True)
-    final_result=output/'result.json'
-    if final_result.exists():
-        # A completed time-budgeted search is a frozen fitted method.
-        # Continuing it silently would invalidate cached evaluation records.
-        return json.loads(final_result.read_text())
-    start=time.monotonic();deadline=start+seconds
-    checkpoint=output/'search_state.json'
-    signature=hashlib.sha256(json.dumps(dict(
-        components=[(p.key,p.week.n,p.targets is not None) for p in problems],
-        beta=np.asarray(beta).tolist(),radius=radius,lam=lam,
-        seeds=list(seeds),gap_tolerance=gap_tolerance),
-        sort_keys=True).encode()).hexdigest()
-
-    def save_state():
-        # The popped node is written out only after being fully processed.
-        # A forced interruption during work replays the previous checkpoint.
-        _save(checkpoint,dict(signature=signature,incumbent=best,
-              best_theta=best_theta.tolist(),processed=processed,
-              serial=serial,retired_lb=None if np.isinf(retired_lb) else retired_lb,
-              queue=[dict(lower=q[0],serial=q[1],
-                          a=q[2].tolist(),b=q[3].tolist()) for q in queue],
-              history=progress))
-
-    if checkpoint.exists():
-        saved=json.loads(checkpoint.read_text())
-        if saved.get('signature')!=signature:
-            raise RuntimeError('Global-search checkpoint incompatible with model')
-        best=float(saved['incumbent'])
-        best_theta=np.asarray(saved['best_theta'],float)
-        processed=int(saved['processed']);serial=int(saved['serial'])
-        retired_lb=float('inf') if saved['retired_lb'] is None else float(saved['retired_lb'])
-        progress=saved['history']
-        queue=[(float(q['lower']),int(q['serial']),
-                np.asarray(q['a'],float),np.asarray(q['b'],float))
-               for q in saved['queue']]
-        heapify(queue)
-    else:
-        theta=np.zeros(len(beta))
-        if start_theta is not None:
-            theta=np.clip(np.asarray(start_theta,float),-radius,radius)
-        midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
-        baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
-        if baseline is None:
-            raise RuntimeError('Cannot certify baseline for global search')
-        if midpoint is None or midpoint>=baseline:
-            theta=np.zeros_like(theta);best=baseline
-        else:best=midpoint
-        best_theta=theta.copy()
-        lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
-        global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
-                                lam,seeds,screen_stability=False,deadline=deadline)
-        if global_lb>baseline+1e-5:
-            raise AssertionError('SAA global lower bound exceeds certified CASE objective')
-        queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
-        progress=[];processed=0;retired_lb=float('inf')
+    def _run(pool):
+        output=Path(out);output.mkdir(parents=True,exist_ok=True)
+        final_result=output/'result.json'
+        if final_result.exists():
+            # A completed time-budgeted search is a frozen fitted method.
+            # Continuing it silently would invalidate cached evaluation records.
+            return json.loads(final_result.read_text())
+        start=time.monotonic();deadline=start+seconds
+        checkpoint=output/'search_state.json'
+        signature=hashlib.sha256(json.dumps(dict(
+            components=[(p.key,p.week.n,p.targets is not None) for p in problems],
+            beta=np.asarray(beta).tolist(),radius=radius,lam=lam,
+            seeds=list(seeds),gap_tolerance=gap_tolerance),
+            sort_keys=True).encode()).hexdigest()
+    
+        def save_state():
+            # The popped node is written out only after being fully processed.
+            # A forced interruption during work replays the previous checkpoint.
+            _save(checkpoint,dict(signature=signature,incumbent=best,
+                  best_theta=best_theta.tolist(),processed=processed,
+                  serial=serial,retired_lb=None if np.isinf(retired_lb) else retired_lb,
+                  queue=[dict(lower=q[0],serial=q[1],
+                              a=q[2].tolist(),b=q[3].tolist()) for q in queue],
+                  history=progress))
+    
+        if checkpoint.exists():
+            saved=json.loads(checkpoint.read_text())
+            if saved.get('signature')!=signature:
+                raise RuntimeError('Global-search checkpoint incompatible with model')
+            best=float(saved['incumbent'])
+            best_theta=np.asarray(saved['best_theta'],float)
+            processed=int(saved['processed']);serial=int(saved['serial'])
+            retired_lb=float('inf') if saved['retired_lb'] is None else float(saved['retired_lb'])
+            progress=saved['history']
+            queue=[(float(q['lower']),int(q['serial']),
+                    np.asarray(q['a'],float),np.asarray(q['b'],float))
+                   for q in saved['queue']]
+            heapify(queue)
+        else:
+            theta=np.zeros(len(beta))
+            if start_theta is not None:
+                theta=np.clip(np.asarray(start_theta,float),-radius,radius)
+            midpoint=_evaluate(problems,theta,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline,pool=pool)
+            baseline=_evaluate(problems,np.zeros_like(theta),np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline,pool=pool)
+            if baseline is None:
+                raise RuntimeError('Cannot certify baseline for global search')
+            if midpoint is None or midpoint>=baseline:
+                theta=np.zeros_like(theta);best=baseline
+            else:best=midpoint
+            best_theta=theta.copy()
+            lower=np.full(len(beta),-float(radius));upper=np.full(len(beta),float(radius))
+            global_lb,_=_node_lower(problems,lower,upper,np.asarray(beta),solve_seconds,
+                                    lam,seeds,screen_stability=False,deadline=deadline)
+            if global_lb>baseline+1e-5:
+                raise AssertionError('SAA global lower bound exceeds certified CASE objective')
+            queue=[];serial=0;heappush(queue,(global_lb,serial,lower,upper))
+            progress=[];processed=0;retired_lb=float('inf')
+            save_state()
+        session_processed=0
+        while queue and session_processed<max_nodes and time.monotonic()-start<seconds:
+            lb,_,a,b=heappop(queue)
+            if lb>=best-gap_tolerance:
+                retired_lb=min(retired_lb,lb)
+                continue
+            processed+=1;session_processed+=1
+            # The expensive stability oracle is only used on promising tight boxes.
+            width=float(np.max(b-a))
+            use_stability=width<max(1.,radius/2)
+            tighter,stable=_node_lower(problems,a,b,np.asarray(beta),solve_seconds,
+                                lam,seeds,screen_stability=use_stability,deadline=deadline)
+            if tighter>=best-gap_tolerance:
+                retired_lb=min(retired_lb,tighter)
+                continue
+            center=(a+b)/2
+            val=_evaluate(problems,center,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline,pool=pool)
+            if val is not None and val<best:
+                best=val;best_theta=center.copy()
+            impact=np.zeros(len(beta))
+            for p in problems:impact+=np.abs(p.H).sum(axis=0)
+            split=int(np.argmax((b-a)*impact))
+            if b[split]-a[split]<=1e-7:
+                serial+=1;heappush(queue,(tighter,serial,a,b));break
+            for side in (0,1):
+                aa,bb=a.copy(),b.copy()
+                if side==0:bb[split]=center[split]
+                else:aa[split]=center[split]
+                sub,_=_node_lower(problems,aa,bb,np.asarray(beta),solve_seconds,
+                                  lam,seeds,screen_stability=False)
+                if sub<best-gap_tolerance:
+                    serial+=1;heappush(queue,(sub,serial,aa,bb))
+                else:
+                    retired_lb=min(retired_lb,sub)
+            current_lb=min([q[0] for q in queue]+[retired_lb,best])
+            progress.append(dict(node=processed,lower=current_lb,upper=best,
+                                 stable_on_node=stable,remaining=len(queue),
+                                 elapsed=time.monotonic()-start))
+            save_state()
+            _save(output/'progress.json',dict(history=progress,theta=best_theta.tolist()))
         save_state()
-    session_processed=0
-    while queue and session_processed<max_nodes and time.monotonic()-start<seconds:
-        lb,_,a,b=heappop(queue)
-        if lb>=best-gap_tolerance:
-            retired_lb=min(retired_lb,lb)
-            continue
-        processed+=1;session_processed+=1
-        # The expensive stability oracle is only used on promising tight boxes.
-        width=float(np.max(b-a))
-        use_stability=width<max(1.,radius/2)
-        tighter,stable=_node_lower(problems,a,b,np.asarray(beta),solve_seconds,
-                            lam,seeds,screen_stability=use_stability,deadline=deadline)
-        if tighter>=best-gap_tolerance:
-            retired_lb=min(retired_lb,tighter)
-            continue
-        center=(a+b)/2
-        val=_evaluate(problems,center,np.asarray(beta),solve_seconds,lam,seeds,deadline=deadline)
-        if val is not None and val<best:
-            best=val;best_theta=center.copy()
-        impact=np.zeros(len(beta))
-        for p in problems:impact+=np.abs(p.H).sum(axis=0)
-        split=int(np.argmax((b-a)*impact))
-        if b[split]-a[split]<=1e-7:
-            serial+=1;heappush(queue,(tighter,serial,a,b));break
-        for side in (0,1):
-            aa,bb=a.copy(),b.copy()
-            if side==0:bb[split]=center[split]
-            else:aa[split]=center[split]
-            sub,_=_node_lower(problems,aa,bb,np.asarray(beta),solve_seconds,
-                              lam,seeds,screen_stability=False)
-            if sub<best-gap_tolerance:
-                serial+=1;heappush(queue,(sub,serial,aa,bb))
-            else:
-                retired_lb=min(retired_lb,sub)
-        current_lb=min([q[0] for q in queue]+[retired_lb,best])
-        progress.append(dict(node=processed,lower=current_lb,upper=best,
-                             stable_on_node=stable,remaining=len(queue),
-                             elapsed=time.monotonic()-start))
-        save_state()
-        _save(output/'progress.json',dict(history=progress,theta=best_theta.tolist()))
-    save_state()
-    final_lb=min([q[0] for q in queue]+[retired_lb,best])
-    # Tolerance-fathomed regions are NOT exact: keep their dual bounds.
-    result=dict(theta=best_theta.tolist(),lower=float(final_lb),upper=float(best),
-                gap=float(max(0.,best-final_lb)),nodes=processed,
-                session_nodes=session_processed,resumable_checkpoint=str(checkpoint),
-                seconds=time.monotonic()-start,
-                status=('OPTIMAL_CERTIFIED' if best-final_lb<=1e-8
-                         else 'GAP_CERTIFIED' if best-final_lb<=gap_tolerance+1e-10
-                         else 'BOUNDED_UNRESOLVED'),
-                 tolerance_fathomed_lower=None if not np.isfinite(retired_lb) else float(retired_lb),
-                allowed_schedules='incumbent + SAA target per seed' if problems[0].targets is not None else 'all feasible',
-                guarantee='finite-sample scenario objective only; all components included')
-    _save(output/'result.json',result)
-    return result
+        final_lb=min([q[0] for q in queue]+[retired_lb,best])
+        # Tolerance-fathomed regions are NOT exact: keep their dual bounds.
+        result=dict(theta=best_theta.tolist(),lower=float(final_lb),upper=float(best),
+                    gap=float(max(0.,best-final_lb)),nodes=processed,
+                    session_nodes=session_processed,resumable_checkpoint=str(checkpoint),
+                    seconds=time.monotonic()-start,
+                    status=('OPTIMAL_CERTIFIED' if best-final_lb<=1e-8
+                             else 'GAP_CERTIFIED' if best-final_lb<=gap_tolerance+1e-10
+                             else 'BOUNDED_UNRESOLVED'),
+                     tolerance_fathomed_lower=None if not np.isfinite(retired_lb) else float(retired_lb),
+                    allowed_schedules='incumbent + SAA target per seed' if problems[0].targets is not None else 'all feasible',
+                    guarantee='finite-sample scenario objective only; all components included')
+        _save(output/'result.json',result)
+        return result
+    if cores>1 and len(problems)>1:
+        with ProcessPoolExecutor(max_workers=min(cores,len(problems)),
+             mp_context=get_context('spawn')) as pool:
+            return _run(pool)
+    return _run(None)
