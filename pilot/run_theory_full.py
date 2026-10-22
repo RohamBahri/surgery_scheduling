@@ -959,7 +959,29 @@ def evaluate_all(args,ctx,models):
         for rank,(p,arm) in enumerate(sorted(rawp)):
             adjusted=max(p2*(len(rawp)-r) for r,(p2,_) in enumerate(sorted(rawp)[:rank+1]))
             output['paired_vs_CASE'][arm]['p_holm']=float(min(1.,adjusted))
-        output['inference_note']='Exploratory all-arm Holm; cluster calendar Mondays, hashes averaged within cluster'
+        # Directly compare with the matched five-feature statistical policy
+        # and with SHARED, using identical Monday resamples and complete cases.
+        for reference in ('STAT_PLUS','SHARED'):
+            if output['arms'].get(reference,{}).get('unresolved',1):
+                continue
+            contrasts={}
+            for arm in arms:
+                if arm==reference or output['arms'][arm]['unresolved']:
+                    continue
+                diff=np.asarray([by_week[m][arm]-by_week[m][reference]
+                                 for m in mondays],float)
+                estimate=float(diff.sum()/total.sum())
+                draws=diff[boot].sum(axis=1)/total[boot].sum(axis=1)
+                p=float((1+np.count_nonzero(
+                    np.abs(draws-estimate)>=abs(estimate)))/(len(draws)+1))
+                contrasts[arm]=dict(difference=estimate,
+                    ci95=np.quantile(draws,[.025,.975]).tolist(),
+                    p_exploratory_uncorrected=p)
+            output['paired_vs_'+reference]=contrasts
+        output['inference_note']=(
+            'Exploratory week-clustered bootstrap; same Monday resamples and '
+            'same hash rules for every arm. Holm applies to CASE contrasts only; '
+            'STAT_PLUS and SHARED contrasts are unadjusted exploratory comparisons.')
     else:output['inference_note']='CASE not fully certified; no inferential contrasts'
     atomic_json(ctx['root']/'theory_summary.json',output)
     return output
