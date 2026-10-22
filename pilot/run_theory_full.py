@@ -458,7 +458,7 @@ def train_search(args,ctx,method,*,warm_start=None):
                      if method=='OBS' else
                      'full-Bank-A candidate search with independent per-round Bank-B '
                      'confirmation, not a statistical acceptance guarantee; '
-                     'outer search not globally optimal'))
+                     'outer search not globally optimal')))
     return coeff
 
 
