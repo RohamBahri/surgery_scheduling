@@ -175,58 +175,103 @@ def _score_initializer(state):
 
 
 def _train_component(task):
-    if len(task)==5:
-        ck,c,rows,coefficients,round_id=task
+    """Bounded coefficient shard. Unfinished scores are missing, not approximate."""
+    if len(task)==7:
+        ck,c,rows,coefficients,round_id,indices,task_seconds=task
         state=_SCORE_STATE
         base,H,method,pools,seconds=(state["base"],state["H"],
                                       state["method"],state["pools"],state["seconds"])
+        legacy=False
     else:
-        # Allows direct unit testing without starting subprocess workers.
+        # Direct compatibility with deterministic unit tests.
         ck,c,rows,base,H,_,coefficients,method,pools,seconds,round_id=task
+        indices=list(range(len(coefficients)))
+        task_seconds=float('inf')
+        legacy=True
+    started=time.monotonic();deadline=started+task_seconds
     d0=reviewed(c.booked,base[rows])
     bank=scenarios(c,d0,pools,(20261020 if round_id>=0
                         else 20261021+1009*(-round_id-1)),count=50)
-    result=[]
-    for coeff in coefficients:
+    results=[]
+    for j in indices:
         stats=(_SCORE_STATE or {}).get('planner_stats',{})
         before=(stats.get('hits',0),stats.get('solves',0))
-        d=reviewed_policy(c,rows,H,d0,np.asarray(coeff))
+        remaining=deadline-time.monotonic()
+        if remaining<=.1:
+            results.append((int(j),dict(value=None,complete=False,
+                                         status='TASK_WALL_LIMIT')))
+            continue
+        d=reviewed_policy(c,rows,H,d0,np.asarray(coefficients[j]))
         try:
-            value=scores(c,d,d0,bank,method,seconds)
-            result.append(dict(value=value,complete=True,
-                   planner_cache_hits=stats.get('hits',0)-before[0],
-                   planner_solver_calls=stats.get('solves',0)-before[1]))
+            value=scores(c,d,d0,bank,method,seconds,deadline=deadline)
+            record=dict(value=float(value),complete=True,
+                    planner_cache_hits=stats.get('hits',0)-before[0],
+                    planner_solver_calls=stats.get('solves',0)-before[1])
         except RuntimeError as exc:
-            result.append(dict(value=None,complete=False,status=str(exc)))
-    return ck,c.n,result
+            record=dict(value=None,complete=False,status=str(exc))
+        results.append((int(j),record))
+    if legacy:
+        return ck,c.n,[record for _,record in results]
+    return ck,c.n,results
 
 
-def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id,folder,*,pool=None):
-    """Persist certified component scores upon completion; verify cache identity."""
+def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id,
+                   folder,*,pool=None,task_seconds=600.,deadline=None):
+    """Full-component candidate evaluation, sharded and checkpointed exactly.
+
+    A candidate is certified only when EVERY component has a certified score.
+    No incomplete or timed-out component enters the comparative objective.
+    """
     folder.mkdir(parents=True,exist_ok=True)
     ids=[key(c) for _,c,_ in items]
-    tasks=[];gathered={}
+    gathered={ck:{} for ck in ids}
     base=data['X']@data['case_w']
     identity=hashlib.sha256(json.dumps(dict(method=method,coefficients=coefficients,
                      bank_round=round_id),sort_keys=True).encode()).hexdigest()
+    tasks=[]
     for ck,c,rows in items:
-        filename=folder/(ck+'.json')
-        if filename.exists():
-            record=json.loads(filename.read_text())
-            if record.get('identity') != identity:
-                raise RuntimeError(f'Stale score cache for {ck}; use a new artifact directory')
-            if len(record['results'])==len(coefficients):
-                gathered[ck]=record
-                continue
-        tasks.append((ck,c,rows,coefficients,round_id))
+        # One large component's 51 candidates are now spread across workers.
+        shard=1 if c.n>=25 else 3 if c.n>=12 else 6
+        for start in range(0,len(coefficients),shard):
+            indices=list(range(start,min(start+shard,len(coefficients))))
+            path=folder/(ck+f'_shard_{start:04d}.json')
+            if path.exists():
+                record=json.loads(path.read_text())
+                if record.get('identity')!=identity or record.get('indices')!=indices:
+                    raise RuntimeError(f'Stale candidate shard for {ck}, {start}')
+                values=record['results']
+                if len(values)==len(indices):
+                    gathered[ck].update({j:v for j,v in zip(indices,values)})
+                    continue
+            tasks.append((ck,c,rows,coefficients,round_id,indices,task_seconds,path))
+    def collect(executor):
+        # Bounded in-flight work limits memory, and avoids launching the entire
+        # backlog after a method or round has used its time allocation.
+        from concurrent.futures import wait, FIRST_COMPLETED
+        queue=iter(tasks);active={}
+        def submit_next():
+            if deadline is not None and time.monotonic()>=deadline:return False
+            try:work=next(queue)
+            except StopIteration:return False
+            ck,c,rows,coeff,ri,ind,limit,path=work
+            future=executor.submit(_train_component,(ck,c,rows,coeff,ri,ind,limit))
+            active[future]=(ck,ind,path)
+            return True
+        for _ in range(min(2*cores,len(tasks))):
+            if not submit_next():break
+        while active:
+            finished,_=wait(active,return_when=FIRST_COMPLETED)
+            for future in finished:
+                ck,indices,path=active.pop(future)
+                got,_,results=future.result()
+                if got!=ck or [j for j,_ in results]!=indices:
+                    raise AssertionError('Scored candidate shard mismatch')
+                values=[v for _,v in results]
+                record=dict(identity=identity,indices=indices,results=values)
+                atomic_json(path,record)
+                gathered[ck].update({j:v for j,v in results})
+                submit_next()
     if tasks:
-        def collect(executor):
-            futures=[executor.submit(_train_component,task) for task in tasks]
-            for future in as_completed(futures):
-                ck,n,res=future.result()
-                record=dict(cases=n,results=res,identity=identity)
-                atomic_json(folder/(ck+'.json'),record)
-                gathered[ck]=record
         if pool is not None:
             collect(pool)
         else:
@@ -235,14 +280,21 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
                    mp_context=get_context('spawn'),initializer=_score_initializer,
                    initargs=(state,)) as executor:
                 collect(executor)
-    if len(gathered)!=len(items):
-        raise RuntimeError("Incomplete component-level training scores")
     valid=np.ones(len(coefficients),bool)
     score=np.zeros(len(coefficients))
+    unresolved=0
     for ck in ids:
-        for k,x in enumerate(gathered[ck]['results']):
-            if not x['complete']:valid[k]=False
-            else:score[k]+=x['value']
+        for j in range(len(coefficients)):
+            x=gathered[ck].get(j)
+            if x is None or not x['complete']:
+                valid[j]=False
+                unresolved+=1
+            else:
+                score[j]+=x['value']
+    atomic_json(folder/'batch_status.json',dict(method=method,round=round_id,
+                components=len(items),candidates=len(coefficients),
+                unfinished_scores=unresolved,complete_candidates=int(valid.sum()),
+                remaining_shards=len(tasks)))
     return score,valid
 
 
