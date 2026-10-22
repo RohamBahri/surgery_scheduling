@@ -66,6 +66,7 @@ def secure_manifest(root,args):
     config=dict(workbook=digest(args.workbook),source={f:digest(p/f) for f in files},
                 folds=args.fold,final_acknowledged=args.acknowledge_final,seconds=args.seconds,pw_seconds=args.pw_seconds,
                 shared_seconds=args.shared_seconds,rounds=args.rounds,search_seconds=args.search_seconds,
+                task_seconds=args.task_seconds,round_seconds=args.round_seconds,
                 global_nodes=args.global_nodes,global_seconds=args.global_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
                 scenario_seed=20261020,scenarios=dict(A=50,B=50,C=200),
@@ -337,6 +338,8 @@ def train_search(args,ctx,method):
     sampled=rg.choice(len(candidates),size=min(150,len(candidates)),replace=False)
     shortlist_items=[candidates[int(j)] for j in sampled]
     search_start=time.monotonic()
+    method_deadline=search_start+args.search_seconds
+    exhausted_reason=None
     score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
                      pools=ctx['pools'],seconds=args.seconds,
                      cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
@@ -349,8 +352,10 @@ def train_search(args,ctx,method):
             mp_context=get_context('spawn'),initializer=_score_initializer,
             initargs=(score_state,)) as score_pool:
         for round_id in range(len(history),args.rounds):
-            if time.monotonic()-search_start>=args.search_seconds:
+            if time.monotonic()>=method_deadline:
+                exhausted_reason='METHOD_WALL_LIMIT'
                 break
+            round_deadline=min(method_deadline,time.monotonic()+args.round_seconds)
             step=8./2**round_id
             proposed=[beta+theta]
             for v in directions:
@@ -359,14 +364,17 @@ def train_search(args,ctx,method):
             fititems=[(ck,c,rows) for ck,c,rows in shortlist_items]
             preview,valid=parallel_score(fititems,fit,H,[p.tolist() for p in proposed],
                                  method,ctx['pools'],args.seconds,args.cores,round_id,
-                                 root/f'round_{round_id:02d}'/'screen',pool=score_pool)
+                                 root/f'round_{round_id:02d}'/'screen',pool=score_pool,
+                                 task_seconds=args.task_seconds,deadline=round_deadline)
             order=sorted((i for i in range(1,len(proposed)) if valid[i]),key=lambda i:preview[i])[:5]
             indices=[0]+order
             allscore,valid=parallel_score(items,fit,H,[proposed[i].tolist() for i in indices],
                                method,ctx['pools'],args.seconds,args.cores,round_id,
-                               root/f'round_{round_id:02d}'/'all',pool=score_pool)
+                               root/f'round_{round_id:02d}'/'all',pool=score_pool,
+                               task_seconds=args.task_seconds,deadline=round_deadline)
             if not valid[0]:
-                raise RuntimeError('Incumbent score uncertified on full Bank A; increase --seconds')
+                exhausted_reason='INCOMPLETE_FULL_BANK_A_SCORE'
+                break
             alternatives=[j for j in range(1,len(indices)) if valid[j]
                           and allscore[j]<allscore[0]-1e-8]
             winner=min(alternatives,key=lambda j:allscore[j],default=None)
@@ -377,12 +385,14 @@ def train_search(args,ctx,method):
                 c0=proposed[0].tolist();c1=proposed[indices[winner]].tolist()
                 bscore,bvalid=parallel_score(items,fit,H,[c0,c1],method,ctx['pools'],
                              args.seconds,args.cores,-round_id-1,
-                             root/f'round_{round_id:02d}'/'confirm_B',pool=score_pool)
+                             root/f'round_{round_id:02d}'/'confirm_B',pool=score_pool,
+                             task_seconds=args.task_seconds,deadline=round_deadline)
                 confirmation=dict(incumbent=float(bscore[0]) if bvalid[0] else None,
                                   candidate=float(bscore[1]) if bvalid[1] else None,
                                   completed=bool(bvalid.all()))
                 if not bvalid[0]:
-                    raise RuntimeError('Incumbent score uncertified on Bank B')
+                    exhausted_reason='INCOMPLETE_BANK_B_CONFIRMATION'
+                    break
                 accepted=bool(bvalid[1] and bscore[1]<bscore[0]-1e-8)
                 if accepted:theta=proposed[indices[winner]]-beta
             history.append(dict(round=round_id,accepted=accepted,
@@ -395,7 +405,8 @@ def train_search(args,ctx,method):
     coeff=beta+theta
     atomic_json(result,dict(coeff=coeff.tolist(),theta=theta.tolist(),history=history,
                  completed_rounds=len(history),requested_rounds=args.rounds,
-                 status='COMPLETE_ROUNDS' if len(history)==args.rounds else 'BUDGET_EXHAUSTED',
+                 status='COMPLETE_ROUNDS' if len(history)==args.rounds else
+                        (exhausted_reason or 'BUDGET_EXHAUSTED'),
                  wall_seconds_this_session=time.monotonic()-search_start,
                  guarantee='full-Bank-A candidate search with independent per-round Bank-B confirmation; outer search not globally optimal or population-certified'))
     return coeff
@@ -709,8 +720,12 @@ def main():
     ap.add_argument('--shared-seconds',type=float,default=21600)
     ap.add_argument('--radius',type=float,default=32.)
     ap.add_argument('--rounds',type=int,default=10)
-    ap.add_argument('--search-seconds',type=float,default=86400.,
+    ap.add_argument('--search-seconds',type=float,default=21600.,
                     help='Soft per-method directional training budget; stops between rounds')
+    ap.add_argument('--task-seconds',type=float,default=600.,
+                    help='Maximum wall seconds for one component/candidate shard')
+    ap.add_argument('--round-seconds',type=float,default=7200.,
+                    help='Maximum wall seconds for a directional learning round')
     ap.add_argument('--fold',choices=['2013'],default='2013',
                     help='Frozen design: all 24,506 pre-2013 cases train; 8,774 2013 cases test')
     ap.add_argument('--acknowledge-final',action='store_true',
@@ -722,7 +737,7 @@ def main():
     args.methods=[s.strip().upper() for s in args.methods.split(',')]
     if not set(args.methods)<=set(['VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
-    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds)<=0:
+    if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
         ap.error('Opening the 2013 test requires --acknowledge-final')
