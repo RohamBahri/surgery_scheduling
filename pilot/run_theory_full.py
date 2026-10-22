@@ -426,128 +426,164 @@ def train_vf(args,ctx):
 
 
 def _eval_component(task):
-    ck,c,rows,base,H,models,pools,seconds,pw_seconds,pw_nodes=task
-    d0=reviewed(c.booked,base[rows]);banks=init_bank(c,d0,pools)
-    cases={};start=time.monotonic()
+    """Every method gets a finite budget; timeouts preserve the feasible witness."""
+    ck,c,rows,base,H,models,pools,seconds,pw_seconds,pw_nodes,component_seconds=task
+    from surgery.anchored_weekly_solver import solve_week
+    from gurobipy import GurobiError
+    started=time.monotonic()
+    deadline=started+component_seconds
+    d0=reviewed(c.booked,base[rows])
+    banks=init_bank(c,d0,pools)
+    cases={}
+    def remaining(requested):
+        return min(float(requested), max(0.,deadline-time.monotonic()))
+    def require_budget(requested):
+        budget=remaining(requested)
+        if budget<=.1:raise RuntimeError('COMPONENT_WALL_LIMIT')
+        return budget
     def add(name,d,extra=None):
-        evaluation_start=time.monotonic()
-        record=dict(status='COMPLETE',duration=list(np.asarray(d,float)))
-        if extra:record.update(extra)
+        tick=time.monotonic()
+        rec=dict(status='COMPLETE',duration=np.asarray(d,float).tolist())
+        if extra:rec.update(extra)
         try:
-            selected=deploy(c,d,seconds)
-            record['assignments']={str(s):list(z) for s,z in selected.items()}
-            record['realized']={str(s):evaluate(c,z,c.actual)['cost'] for s,z in selected.items()}
-            record['model']={bank:float(np.mean([expected_reduced(c,z,draws) for z in selected.values()]))
-                             for bank,draws in banks.items()}
-            record['over720']={str(s):evaluate(c,z,c.actual)['room_days_over_720'] for s,z in selected.items()}
-            record['max_room_load']={str(s):evaluate(c,z,c.actual)['max_room_load']
-                                     for s,z in selected.items()}
-            regime={}; imbalance={}
-            for seed,z in selected.items():
-                l=loads(c,z,d)
+            selected=deploy(c,d,require_budget(seconds),deadline=deadline)
+            rec['assignments']={str(sd):list(z) for sd,z in selected.items()}
+            rec['realized']={str(sd):evaluate(c,z,c.actual)['cost'] for sd,z in selected.items()}
+            rec['model']={label:float(np.mean([
+                 expected_reduced(c,z,draws) for z in selected.values()]))
+                 for label,draws in banks.items()}
+            rec['over720']={str(sd):evaluate(c,z,c.actual)['room_days_over_720']
+                            for sd,z in selected.items()}
+            rec['max_room_load']={str(sd):evaluate(c,z,c.actual)['max_room_load']
+                                  for sd,z in selected.items()}
+            regimes={};imbalance={}
+            for sd,z in selected.items():
+                load=loads(c,z,d)
                 occupied=np.bincount(np.asarray(z,int),minlength=c.k)>0
-                excess=l[occupied]-480.
-                overtime=float(np.maximum(excess,0).sum())
-                idle=float(np.maximum(-excess,0).sum())
-                imbalance[str(seed)]=min(overtime,idle)
-                regime[str(seed)]=('LIGHT_UNIFORM' if overtime<1e-7 else
+                overload=float(np.maximum(load[occupied]-480.,0.).sum())
+                idle=float(np.maximum(480.-load[occupied],0.).sum())
+                imbalance[str(sd)]=min(overload,idle)
+                regimes[str(sd)]=('LIGHT_UNIFORM' if overload<1e-7 else
                                   'HEAVY_UNIFORM' if idle<1e-7 else 'MIXED')
-            record['regime']=regime
-            record['planned_imbalance']=imbalance
-            record['hash_assignment_disagreement']=(len({tuple(z) for z in selected.values()})>1)
-            record['hash_cost_disagreement']=(max(record['realized'].values())-
-                                              min(record['realized'].values())>1e-5)
-            record['changed']=int(np.sum(abs(np.asarray(d)-d0)>1e-7))
-        except RuntimeError as exc:record.update(status='UNRESOLVED',error=str(exc))
-        record['evaluation_seconds']=time.monotonic()-evaluation_start
-        cases[name]=record
-    add('CASE',d0)
-    add('BOOKED',c.booked)
-    risk=reviewed(c.booked,np.quantile(banks['A'],1.75/2.75,axis=0)-c.booked)
-    add('RISK',risk)
-    # Unrestricted feasible-advice benchmarks on EVERY component; same
-    # reference algorithms and exact final planner as the existing study.
+            rec['regime']=regimes
+            rec['planned_imbalance']=imbalance
+            rec['hash_assignment_disagreement']=int(len({tuple(z) for z in selected.values()})>1)
+            rec['hash_cost_disagreement']=int(
+                 max(rec['realized'].values())-min(rec['realized'].values())>1e-5)
+            rec['changed']=int(np.sum(np.abs(np.asarray(d)-d0)>1e-7))
+        except (RuntimeError,GurobiError) as exc:
+            rec.update(status='UNRESOLVED',error=str(exc))
+        rec['evaluation_seconds']=time.monotonic()-tick
+        cases[name]=rec
+    def attempt(name,fun):
+        if remaining(.5)<=.1:
+            cases[name]=dict(status='COMPONENT_WALL_LIMIT')
+            return
+        try:
+            fun()
+        except (RuntimeError,GurobiError) as exc:
+            cases[name]=dict(status='UNRESOLVED',error=str(exc))
+    # Test outcomes are not read into the training stage. Hindsight is a
+    # reporting-only oracle; do not permit it to influence the advice policy.
     try:
-        d_per,_,accepted,status,_=prescription(c,d0,banks,seeds=(0,),
-                 seconds=seconds,budget=pw_seconds if c.n<=20 else 2*pw_seconds)
-        add('PER_WEEK',d_per,dict(search_status=status,search_accepted=bool(accepted)))
-    except RuntimeError as exc:
-        cases['PER_WEEK']=dict(status='UNRESOLVED',error=str(exc))
-    try:
-        d_per,_,accepted,status,_=prescription(c,d0,banks,seeds=SEEDS,
-                 seconds=seconds,budget=pw_seconds if c.n<=20 else 2*pw_seconds)
-        add('PER_WEEK_ROBUST',d_per,dict(search_status=status,search_accepted=bool(accepted)))
-    except RuntimeError as exc:
-        cases['PER_WEEK_ROBUST']=dict(status='UNRESOLVED',error=str(exc))
+        hist=solve_week(c,c.actual,seconds=require_budget(seconds),
+                        threads=1,tie=False)
+        hindsight=dict(complete=hist.complete,
+              cost=hist.value if hist.complete else None,
+              lower=hist.bound,status=hist.status)
+    except (RuntimeError,GurobiError) as exc:
+        hindsight=dict(complete=False,cost=None,lower=None,status=str(exc))
+    for name,d in [('CASE',d0),('BOOKED',c.booked),
+                   ('RISK',reviewed(c.booked,
+                       np.quantile(banks['A'],1.75/2.75,axis=0)-c.booked))]:
+        add(name,d)
     for name,coeff in models.items():
         if coeff is None:
             cases[name]=dict(status='TRAINING_UNRESOLVED')
-            continue
-        d=reviewed_policy(c,rows,H,d0,coeff)
-        add(name,d)
-    # Unrestricted conditional stochastic benchmark. This assignment is
-    # feasible but NOT deployable advice; never run it through the hash planner.
-    # Bank A chooses it; B/C and realized durations evaluate it independently.
-    saa=saa_mip(c,banks['A'],seconds=pw_seconds)
-    reference=dict(status=saa.status,certified=bool(saa.complete),
-                   lower=saa.lower,upper=saa.upper,seconds=saa.seconds,
-                   assignment=None if saa.assignment is None else list(saa.assignment))
-    if saa.assignment is not None:
-        z=tuple(map(int,saa.assignment))
-        reference.update(
-            model={name:expected_reduced(c,z,draws) for name,draws in banks.items()},
-            realized=float(evaluate(c,z,c.actual)['cost']))
-        if saa.lower is not None and saa.lower>reference['model']['A']+1e-4:
-            raise AssertionError('Unrestricted SAA lower bound exceeds its primal')
-    # Independently trained case-advice methods may be weaker than the
-    # unrestricted SAA, but they can never beat its certified global lower.
-    for name,record in cases.items():
-        if record.get('status')=='COMPLETE' and saa.lower is not None:
-            if record['model']['A']<saa.lower-1e-4:
-                raise AssertionError(f'{name} beats the unrestricted SAA dual bound')
+        else:
+            attempt(name,lambda name=name,coeff=coeff:
+                    add(name,reviewed_policy(c,rows,H,d0,coeff)))
+    for name,seeds in (('PER_WEEK',(0,)),('PER_WEEK_ROBUST',SEEDS)):
+        def run_pw(name=name,seeds=seeds):
+            duration,_,accepted,status,_=prescription(
+                c,d0,banks,seeds=seeds,seconds=require_budget(seconds),
+                budget=require_budget(pw_seconds))
+            add(name,duration,dict(search_status=status,
+                                   search_accepted=bool(accepted)))
+        attempt(name,run_pw)
 
-    # One separate exact-QP (fixed CASE assignment), one global VF per instance,
-    # one unrestricted SAA bound, one all-dimensional direct advice B&B.
-    if cases['CASE']['status']=='COMPLETE':
-        z=cases['CASE']['assignments']['0']
-        qfill=vf_fixed_plan_lp(c,z,banks['A'],seconds=pw_seconds,d0=d0)
-        if qfill.reviewed is not None:
-            add('QFILL',qfill.reviewed,dict(vf_cert=qfill.to_json()))
-        else:cases['QFILL']=dict(status='UNRESOLVED',vf_cert=qfill.to_json())
-    vf=vf_per_week_milp(c,banks['A'],seconds=pw_seconds,d0=d0)
-    if vf.reviewed is not None:
-        add('VF_PW',vf.reviewed,dict(vf_cert=vf.to_json()))
-    else:cases['VF_PW']=dict(status='UNRESOLVED',vf_cert=vf.to_json())
-    pw=exact_box_policy(c,banks['A'],d0,seconds=pw_seconds,
-                        solve_seconds=seconds,nodes=pw_nodes,saa_reference=saa)
-    if pw['reviewed'] is not None:
-        add('PW_BOUNDED',pw['reviewed'],dict(global_certificate=pw))
-    else:cases['PW_BOUNDED']=dict(status='UNRESOLVED',global_certificate=pw)
-    anchor=exact_box_policy(c,banks['A'],d0,seconds=pw_seconds,
-                        solve_seconds=seconds,nodes=pw_nodes,restricted='case+saa',
-                        saa_reference=saa)
-    if anchor['reviewed'] is not None:
-        add('PW_ANCHORED',anchor['reviewed'],dict(global_certificate=anchor))
-    else:cases['PW_ANCHORED']=dict(status='UNRESOLVED',global_certificate=anchor)
-    vfcg=value_function_exact(c,banks['A'],d0,seconds=pw_seconds,
-                              separation_seconds=seconds,seed=0,saa_reference=saa)
-    if vfcg['reviewed'] is not None:
-        add('PW_VFCG',vfcg['reviewed'],dict(global_certificate=vfcg,
-             optimization_hash_seed=0))
-    else:cases['PW_VFCG']=dict(status='UNRESOLVED',global_certificate=vfcg)
-    # Hindsight is an evaluation-only constant: no method uses these
-    # realized outcomes to select a schedule, advice, or fitted coefficient.
-    from surgery.anchored_weekly_solver import solve_week
-    hindsight=solve_week(c,c.actual,seconds=max(seconds,600.),threads=1,tie=False)
-    hindsight_record=dict(complete=hindsight.complete,
-           cost=hindsight.value if hindsight.complete else None,
-           lower=hindsight.bound,
-           status=hindsight.status)
-    # The exact PW algorithm never substitutes an unrestricted SAA assignment
-    # as an inducible schedule. This gap is unconditional for the given bank.
+    # Nondeployable unrestricted stochastic-planning benchmark. The same
+    # feasible SAA schedule is evaluated separately on Banks B/C and history.
+    saa=None
+    reference=dict(status='UNRESOLVED',certified=False,lower=None,
+                   upper=None,seconds=0.,assignment=None)
+    if remaining(pw_seconds)>.1:
+        try:
+            saa=saa_mip(c,banks['A'],seconds=require_budget(pw_seconds))
+            reference=dict(status=saa.status,certified=bool(saa.complete),
+                       lower=saa.lower,upper=saa.upper,seconds=saa.seconds,
+                       assignment=None if saa.assignment is None else list(saa.assignment))
+            if saa.assignment is not None:
+                z=tuple(map(int,saa.assignment))
+                reference.update(
+                    model={label:expected_reduced(c,z,draws)
+                           for label,draws in banks.items()},
+                    realized=float(evaluate(c,z,c.actual)['cost']))
+                if saa.lower is not None and saa.lower>reference['model']['A']+1e-4:
+                    raise AssertionError('SAA dual exceeds feasible benchmark')
+        except (RuntimeError,GurobiError) as exc:
+            reference['status']='UNRESOLVED: '+str(exc)
+    else:
+        reference['status']='COMPONENT_WALL_LIMIT'
+    if saa is not None and saa.lower is not None:
+        for name,rec in cases.items():
+            if rec.get('status')=='COMPLETE' and rec['model']['A']<saa.lower-1e-4:
+                raise AssertionError(f'{name} scenario score violates SAA lower bound')
+
+    if cases.get('CASE',{}).get('status')=='COMPLETE':
+        def qfill():
+            z=cases['CASE']['assignments']['0']
+            cert=vf_fixed_plan_lp(c,z,banks['A'],seconds=require_budget(pw_seconds),d0=d0)
+            if cert.reviewed is None:
+                cases['QFILL']=dict(status='UNRESOLVED',vf_cert=cert.to_json())
+            else:
+                add('QFILL',cert.reviewed,dict(vf_cert=cert.to_json()))
+        attempt('QFILL',qfill)
+    else:
+        cases['QFILL']=dict(status='DEPENDENCY_UNRESOLVED')
+    def vf_case():
+        cert=vf_per_week_milp(c,banks['A'],seconds=require_budget(pw_seconds),d0=d0)
+        if cert.reviewed is None:
+            cases['VF_PW']=dict(status='UNRESOLVED',vf_cert=cert.to_json())
+        else:add('VF_PW',cert.reviewed,dict(vf_cert=cert.to_json()))
+    attempt('VF_PW',vf_case)
+    for name,restricted in (('PW_BOUNDED',None),('PW_ANCHORED','case+saa')):
+        def bounded(name=name,restricted=restricted):
+            ans=exact_box_policy(c,banks['A'],d0,
+                 seconds=require_budget(pw_seconds),
+                 solve_seconds=min(seconds,remaining(pw_seconds)),
+                 nodes=pw_nodes,restricted=restricted,saa_reference=saa)
+            if ans['reviewed'] is None:
+                cases[name]=dict(status='UNRESOLVED',global_certificate=ans)
+            else:
+                add(name,ans['reviewed'],dict(global_certificate=ans))
+        attempt(name,bounded)
+    def vfcg():
+        ans=value_function_exact(c,banks['A'],d0,
+                  seconds=require_budget(pw_seconds),
+                  separation_seconds=min(seconds,remaining(pw_seconds)),
+                  seed=0,saa_reference=saa)
+        if ans['reviewed'] is None:
+            cases['PW_VFCG']=dict(status='UNRESOLVED',global_certificate=ans)
+        else:
+            add('PW_VFCG',ans['reviewed'],dict(global_certificate=ans,
+                 optimization_hash_seed=0))
+    attempt('PW_VFCG',vfcg)
     return ck,dict(site=c.group,monday=c.monday,cases=c.n,
-                    methods=cases,hindsight=hindsight_record,saa_reference=reference,
-                    elapsed=time.monotonic()-start)
+                   methods=cases,hindsight=hindsight,saa_reference=reference,
+                   component_wall_seconds=float(component_seconds),
+                   component_wall_limit_hit=bool(remaining(0.2)<=.1),
+                   elapsed=time.monotonic()-started)
 
 
 def evaluate_all(args,ctx,models):
@@ -558,7 +594,7 @@ def evaluate_all(args,ctx,models):
         p=root/(ck+'.json')
         if p.exists():done[ck]=json.loads(p.read_text());continue
         todo.append((ck,c,rows,base,ctx['H_eval'],models,ctx['pools'],
-                     args.seconds,args.pw_seconds,args.pw_nodes))
+                     args.seconds,args.pw_seconds,args.pw_nodes,args.eval_component_seconds))
     if todo:
         with ProcessPoolExecutor(max_workers=min(args.cores,len(todo)),
                                  mp_context=get_context('spawn')) as pool:
