@@ -749,8 +749,14 @@ def evaluate_all(args,ctx,models):
                 sum(np.mean(list(r['methods'][arm]['realized'].values())) for r in records)/sum(r['cases'] for r in records),
                 model_C_per_case=None if len(records)!=len(rows) else
                 sum(r['methods'][arm]['model']['C'] for r in records)/sum(r['cases'] for r in records),
-                 evaluation_wall_hours=sum(float(r['methods'][arm].get('evaluation_seconds',0.))
-                                            for r in records)/3600.)
+                 deployment_evaluation_wall_hours=sum(
+                     float(r['methods'][arm].get('evaluation_seconds',0.))
+                     for r in records)/3600.,
+                 method_total_wall_hours=sum(
+                     float(r['methods'][arm].get(
+                         'method_wall_seconds',
+                         r['methods'][arm].get('evaluation_seconds',0.)))
+                     for r in records)/3600.)
     # Model-dependence stress preserves each case's 200-sample marginal.
     output['dependence_stress']={}
     n_all=sum(r['cases'] for r in rows)
