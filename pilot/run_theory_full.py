@@ -190,7 +190,17 @@ def scores(c,d,d0,bank,method,seconds,seed=0,deadline=None):
                 raise RuntimeError('EG_LIBRARY_PRIMARY_UNCERTIFIED: '+ans.status)
             Q=float(ans.value-480*c.k+np.sum(d)+30*c.n)
             eps=_objective_tolerance(ans.value)
-            value=Q+max(gz-max(fz-Q-eps,0.) for gz,fz in zip(g,f))
+            # B_1 is a gap loss. Its hinge includes Q; do not add Q again.
+            if ans.assignment is None:
+                raise RuntimeError('EG_LIBRARY_NO_PRIMARY_ASSIGNMENT')
+            primary=tuple(map(int,ans.assignment))
+            # Include the primary-optimal schedule at this candidate d,
+            # even if it does not occur in the frozen schedule library.
+            selected_g=expected_reduced(c,primary,bank)
+            selected_f=phi(c,primary,d)
+            losses=[gz-max(fz-Q-eps,0.) for gz,fz in zip(g,f)]
+            losses.append(selected_g-max(selected_f-Q-eps,0.))
+            value=max(losses)
         else:
             target=int(np.argmin(g))
             value=f[target]+max(gz-fz for gz,fz in zip(g,f))
@@ -251,6 +261,9 @@ def _train_component(task):
     deadline=min(started+task_seconds,
                  float('inf') if parent_deadline is None else parent_deadline)
     d0=reviewed(c.booked,base[rows])
+    # Give components with >=25 cases a 120 s primary/planner allowance.
+    # They are already split into one candidate per scoring shard.
+    seconds=max(float(seconds),120.) if c.n>=25 and not legacy else float(seconds)
     seed=(20261020 if round_id>=0 else
           20261021 if (_SCORE_STATE or {}).get('fixed_banks') else
           20261021+1009*(-round_id-1))
@@ -322,7 +335,8 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
                     continue
                 # An unfinished task must be eligible for a fresh retry.
                 # Its incomplete record is not a frozen certified score.
-            tasks.append((ck,c,rows,coefficients,round_id,indices,task_seconds,path))
+            allowance=max(float(task_seconds),240.) if c.n>=25 else task_seconds
+            tasks.append((ck,c,rows,coefficients,round_id,indices,allowance,path))
     def collect(executor):
         # Bounded in-flight work limits memory, and avoids launching the entire
         # backlog after a method or round has used its time allocation.
@@ -363,17 +377,22 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
     valid=np.ones(len(coefficients),bool)
     score=np.zeros(len(coefficients))
     unresolved=0
+    unresolved_components=set()
     for ck in ids:
         for j in range(len(coefficients)):
             x=gathered[ck].get(j)
             if x is None or not x['complete']:
                 valid[j]=False
                 unresolved+=1
+                unresolved_components.add(ck)
             else:
                 score[j]+=x['value']
     atomic_json(folder/'batch_status.json',dict(method=method,round=round_id,
                 components=len(items),candidates=len(coefficients),
-                unfinished_scores=unresolved,complete_candidates=int(valid.sum()),
+                unfinished_scores=unresolved,
+                unresolved_components=len(unresolved_components),
+                unresolved_cases=sum(c.n for ck,c,_ in items if ck in unresolved_components),
+                complete_candidates=int(valid.sum()),
                 remaining_shards=len(tasks)))
     return score,valid
 
@@ -614,7 +633,9 @@ def _eval_arm_task(task):
     from gurobipy import GurobiError
     from surgery.anchored_weekly_solver import solve_week
     base=state['base'];H=state['H'];pools=state['pools']
-    models=state['models'];seconds=state['seconds']
+    models=state['models']
+    seconds=(max(state['seconds'],state.get('large_eval_solver_seconds',0.))
+             if c.n>=25 else state['seconds'])
     pw_seconds=state['pw_seconds']
     d0=reviewed(c.booked,base[rows])
     banks=init_bank(c,d0,pools)
@@ -772,7 +793,8 @@ def evaluate_all(args,ctx,models):
     state=dict(base=ctx['held']['X']@ctx['held']['case_w'],
         H=ctx['H_eval'],pools=ctx['pools'],models=models,
         seconds=args.seconds,pw_seconds=args.pw_seconds,pw_nodes=args.pw_nodes,
-        cache_path=str(ctx['root']/'exact_deployments.sqlite3'))
+        cache_path=str(ctx['root']/'exact_deployments.sqlite3'),
+        large_eval_solver_seconds=getattr(args,'large_eval_solver_seconds',0.))
     from surgery.theory_cache import connect
     connection=connect(state['cache_path']);connection.close()
     jobs=[];done={}
