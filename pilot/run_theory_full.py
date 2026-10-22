@@ -314,7 +314,7 @@ def parallel_score(items,data,H,coefficients,method,pools,seconds,cores,round_id
     return score,valid
 
 
-def train_search(args,ctx,method):
+def train_search(args,ctx,method,*,warm_start=None):
     """Exact candidate scoring + reproducible full-training directional search.
 
     This is an APPROXIMATION of the original direct/EG outer problem. Neither
@@ -346,6 +346,7 @@ def train_search(args,ctx,method):
     shortlist_items=[candidates[int(j)] for j in sampled]
     search_start=time.monotonic()
     method_deadline=search_start+args.search_seconds
+    warm_start_status='NOT_REQUESTED' if warm_start is None else 'PENDING'
     exhausted_reason=None
     score_state=dict(base=fit['X']@fit['case_w'],H=H,method=method,
                      pools=ctx['pools'],seconds=args.seconds,
@@ -358,16 +359,48 @@ def train_search(args,ctx,method):
     with ProcessPoolExecutor(max_workers=args.cores,
             mp_context=get_context('spawn'),initializer=_score_initializer,
             initargs=(score_state,)) as score_pool:
+        if not history and warm_start is not None:
+            # The VF solution is only a warm start. It must beat STAT on
+            # THIS METHOD'S actual objective before becoming the incumbent.
+            candidate=np.clip(np.asarray(warm_start,float)-beta,-args.radius,args.radius)
+            if candidate.shape!=theta.shape:raise AssertionError('Warm-start dimension mismatch')
+            v=[beta.tolist(),(beta+candidate).tolist()]
+            costs,valid=parallel_score(items,fit,H,v,method,ctx['pools'],
+                        args.seconds,args.cores,0,root/'warm_start_A',
+                        pool=score_pool,task_seconds=args.task_seconds,
+                        deadline=min(method_deadline,time.monotonic()+args.round_seconds))
+            if valid.all() and costs[1]<costs[0]-1e-8:
+                if method=='OBS':
+                    theta=candidate.copy()
+                    warm_start_status='ACCEPTED_OBS_TRAIN_COST_NO_INDEPENDENT_BANK'
+                else:
+                    fresh,confirmed=parallel_score(items,fit,H,v,method,ctx['pools'],
+                        args.seconds,args.cores,-101,root/'warm_start_B',
+                        pool=score_pool,task_seconds=args.task_seconds,
+                        deadline=min(method_deadline,time.monotonic()+args.round_seconds))
+                    if confirmed.all() and fresh[1]<fresh[0]-1e-8:
+                        theta=candidate.copy()
+                        warm_start_status='ACCEPTED_A_AND_B'
+                    else:warm_start_status='REJECTED_BY_B_OR_TIMEOUT'
+            else:warm_start_status='REJECTED_BY_A_OR_TIMEOUT'
         for round_id in range(len(history),args.rounds):
             if time.monotonic()>=method_deadline:
                 exhausted_reason='METHOD_WALL_LIMIT'
                 break
             round_deadline=min(method_deadline,time.monotonic()+args.round_seconds)
-            step=8./2**round_id
+            step=args.radius/2**round_id
             proposed=[beta+theta]
             for v in directions:
                 for sign in (-1.,1.):
-                    proposed.append(beta+theta+sign*step*np.asarray(v))
+                    proposed.append(beta+np.clip(theta+sign*step*np.asarray(v),
+                                                  -args.radius,args.radius))
+            # Include coordinate-wise extreme advice coefficients. The old
+            # 8/2**round schedule could move only 15.984 units in ten rounds,
+            # even though the declared coefficient domain is [-32,32].
+            for j in range(len(theta)):
+                for sign in (-1.,1.):
+                    boundary=theta.copy();boundary[j]=sign*args.radius
+                    proposed.append(beta+boundary)
             fititems=[(ck,c,rows) for ck,c,rows in shortlist_items]
             preview,valid=parallel_score(fititems,fit,H,[p.tolist() for p in proposed],
                                  method,ctx['pools'],args.seconds,args.cores,round_id,
@@ -387,20 +420,25 @@ def train_search(args,ctx,method):
             winner=min(alternatives,key=lambda j:allscore[j],default=None)
             accepted=False; confirmation=None
             if winner is not None:
-                # Fresh independent Bank B for each round, never used in proposing
-                # this candidate. This is a safeguard, not a sequential p-value.
-                c0=proposed[0].tolist();c1=proposed[indices[winner]].tolist()
-                bscore,bvalid=parallel_score(items,fit,H,[c0,c1],method,ctx['pools'],
-                             args.seconds,args.cores,-round_id-1,
-                             root/f'round_{round_id:02d}'/'confirm_B',pool=score_pool,
-                             task_seconds=args.task_seconds,deadline=round_deadline)
-                confirmation=dict(incumbent=float(bscore[0]) if bvalid[0] else None,
-                                  candidate=float(bscore[1]) if bvalid[1] else None,
-                                  completed=bool(bvalid.all()))
-                if not bvalid[0]:
-                    exhausted_reason='INCOMPLETE_BANK_B_CONFIRMATION'
-                    break
-                accepted=bool(bvalid[1] and bscore[1]<bscore[0]-1e-8)
+                if method=='OBS':
+                    # Actual training durations are the SAME in A and B;
+                    # changing the RNG seed creates no independent evidence.
+                    accepted=True
+                    confirmation=dict(status='NOT_APPLICABLE_SAME_OUTCOMES',
+                                      description='OBS optimized on all historical fit outcomes')
+                else:
+                    c0=proposed[0].tolist();c1=proposed[indices[winner]].tolist()
+                    bscore,bvalid=parallel_score(items,fit,H,[c0,c1],method,ctx['pools'],
+                                 args.seconds,args.cores,-round_id-1,
+                                 root/f'round_{round_id:02d}'/'confirm_B',pool=score_pool,
+                                 task_seconds=args.task_seconds,deadline=round_deadline)
+                    confirmation=dict(incumbent=float(bscore[0]) if bvalid[0] else None,
+                                      candidate=float(bscore[1]) if bvalid[1] else None,
+                                      completed=bool(bvalid.all()))
+                    if not bvalid[0]:
+                        exhausted_reason='INCOMPLETE_BANK_B_CONFIRMATION'
+                        break
+                    accepted=bool(bvalid[1] and bscore[1]<bscore[0]-1e-8)
                 if accepted:theta=proposed[indices[winner]]-beta
             history.append(dict(round=round_id,accepted=accepted,
                                 winner=None if not accepted else int(indices[winner]),
@@ -415,7 +453,12 @@ def train_search(args,ctx,method):
                  status='COMPLETE_ROUNDS' if len(history)==args.rounds else
                         (exhausted_reason or 'BUDGET_EXHAUSTED'),
                  wall_seconds_this_session=time.monotonic()-search_start,
-                 guarantee='full-Bank-A candidate search with independent per-round Bank-B confirmation; outer search not globally optimal or population-certified'))
+                 warm_start=warm_start_status,
+                 guarantee=('OBS: full observed-fit objective only; no independent Bank B'
+                     if method=='OBS' else
+                     'full-Bank-A candidate search with independent per-round Bank-B '
+                     'confirmation, not a statistical acceptance guarantee; '
+                     'outer search not globally optimal'))
     return coeff
 
 
