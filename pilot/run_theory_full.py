@@ -774,15 +774,10 @@ def _eval_arm_task(task):
     return ck,arm,report
 
 
-def evaluate_all(args,ctx,models):
-    """One method per component per task, with independent wall limits."""
-    evaluation_start=time.monotonic()
-    root=ctx['root']/'full_evaluation'
-    root.mkdir(exist_ok=True)
-    shard_root=root/'per_arm';shard_root.mkdir(exist_ok=True)
-    chosen=list(args.eval_arms)
+def validate_evaluation_arms(chosen):
+    """Keep the paper launcher's evaluation-arm contract aligned with the runner."""
     admissible=set(('BOOKED','CASE','RISK','STAT','STAT_PLUS','SHARED',
-                    'VF_SHARED','EG','OBS','ROBUST','SHARED_GLOBAL',
+                    'VF','VF_SHARED','EG','OBS','ROBUST','SHARED_GLOBAL',
                     'ANCHORED_TARGET','SHARED_BASE','SHARED_PLUS','VF_PLUS',
                     'GAP_PLUS','ANCHORED_PLUS','EG_LIB','ANCHORED_T','PER_WEEK','PER_WEEK_ROBUST','QFILL',
                     'VF_PW','PW_VFCG','PW_BOUNDED','PW_ANCHORED','SAA','HINDSIGHT'))
@@ -790,6 +785,16 @@ def evaluate_all(args,ctx,models):
         raise ValueError('Duplicate or unsupported evaluation method')
     if 'CASE' not in chosen:
         raise ValueError('CASE must be included for the predeclared fallback')
+
+
+def evaluate_all(args,ctx,models):
+    """One method per component per task, with independent wall limits."""
+    evaluation_start=time.monotonic()
+    root=ctx['root']/'full_evaluation'
+    root.mkdir(exist_ok=True)
+    shard_root=root/'per_arm';shard_root.mkdir(exist_ok=True)
+    chosen=list(args.eval_arms)
+    validate_evaluation_arms(chosen)
     state=dict(base=ctx['held']['X']@ctx['held']['case_w'],
         H=ctx['H_eval'],pools=ctx['pools'],models=models,
         seconds=args.seconds,pw_seconds=args.pw_seconds,pw_nodes=args.pw_nodes,
