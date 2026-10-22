@@ -1,76 +1,45 @@
-# UHN daily planning experiment
+# Surgery duration recommendations — VF research
 
-This repository implements one experiment on the UHN July 2011–June 2013 workbook. It uses TGH, TWH main, and TWH day surgery. Cases keep their dates and room groups; rooms may be released. PMH is excluded.
+**Current paper method:** value-function (VF) learning for surgeon-mediated, congestion-aware operating-room planning.
 
-The five methods are Booked, Shift, Case-Error, VF-Direct, and VF. The four response scenarios are \((alpha,h)=(0.5,30),(0.5,60),(0.8,30),(0.8,60)\). VF-Direct is fitted once per group and evaluated through each response.
+The current research uses historical elective surgeries from UHN (2011–2013), with **24,506 training** and **8,774 retrospective evaluation** cases. The study compares a five-feature shared VF recommendation policy against matched statistical (STAT), CASE, and BOOKED controls and a direct scheduling-cost (SHARED) benchmark. Surgeons' response parameters are **assumed scenarios**, not estimated responses to displayed advice.
 
-## Install and run
+The completed October 2026 model-selection and mechanism experiments are frozen. The **2013 cohort has been examined repeatedly**; subsequent analyses are retrospective diagnostics, not new independent holdouts.
 
-The exact package versions used by CI are in \`requirements-lock.txt\`. A full Gurobi license is required for the complete experiment.
+## Current entrypoints
 
-\`\`\`bash
+| Purpose | Entry |
+|---|---|
+| Main method-selection study (completed; reproduce only if needed) | `bash run_selection_12h.sh` |
+| VF mechanism and response follow-up (completed; reproduce only if needed) | `bash run_vf_followups.sh` |
+| Stage-level method selection | `pilot/run_objective_selection.py` |
+| Stage-level VF follow-ups | `pilot/run_vf_followups.py` |
+
+The current runner relies on `pilot/run_theory_full.py` and the `surgery/` implementation, especially `objective_selection.py`, `theory_exact.py`, `anchored_weekly_solver.py`, and `weekly_planner.py`. The *anchored* solver module provides the common exact physical-room planner and deterministic hash tie rule; its name does not mean ANCHORED is a selected learning method.
+
+The original workbook belongs at `data/UHNOperating_RoomScheduling2011-2013.xlsx`. Do **not** commit raw data or local artifacts. Frozen run results remain under `artifacts/`, which is git-ignored.
+
+## Install and test
+
+Use Python with a valid Gurobi license for solver-backed and full experiments.
+
+```bash
 python -m pip install -r requirements-lock.txt
 python -m pip install -e . --no-deps
 python -m pytest -q
-
-python run_experiment.py /path/to/UHNOperating_RoomScheduling2011-2013.xlsx --stage audit
-python run_experiment.py /path/to/UHNOperating_RoomScheduling2011-2013.xlsx --stage pilot
-\`\`\`
-
-Then use \`--stage checks\`, \`baselines\`, \`pilot-vf\`, \`train\`, and finally \`evaluate\`. Repeating the same command resumes completed checkpoints. The run identity includes the workbook hash, scientific source code, scenarios, tie rule, seed, and numerical environment.
-
-## Fixed design
-
-- Training: July 2011–December 2012. Test: January–June 2013.
-- One planning instance is one room group on one date; surgery dates never move.
-- A surgeon's cases within a group/date stay in one room.
-- Candidate rooms are rooms represented by the retained workload that day; rooms may be released.
-- Room eligibility first uses each service's training rooms on the same weekday, then its rooms over all training weekdays, then all candidate rooms only if necessary. Both fallback levels are audited.
-- Sessions are 480 minutes with 30 minutes between cases.
-- Cost is one unit per idle minute and 1.75 per overtime minute.
-- Production planning uses one exact Gurobi set-partitioning model over feasible room patterns. It minimizes cost, then the largest planned room load, then the alphabetical surgeon-to-room assignment. The compact Gurobi model remains only as an independent validation formulation in tests.
-- Training features are booking, service indicators, and four offline history scores: procedure bias, surgeon bias, procedure spread, and surgeon spread. Each training date is scored from all other training dates; test cases use the complete training sample. Spread is the average pairwise absolute difference in booking error.
-- Results remain separate across the four behavioral scenarios.
-
-## Resume and exactness
-
-Completed daily solves, accepted policy updates, Shift trials, growing VF libraries, oracle cuts, and feasible oracle bounds are checkpointed in SQLite. Each day has its own database. An unfinished ordinary planner remains pending and is retried; it is never treated as exact or dropped from reporting. An unfinished response-limited oracle may remain as a valid lower/upper bracket.
-
-Independent days run in separate processes with \`--workers\`; \`--threads\` is the Gurobi thread count per worker. Case-Error fits run in blocks of 30 updates and resume if capped. Test evaluation requires converged Case-Error fits. P3's first VF iteration is reused by the full fit.
-
-## Outputs
-
-- \`audit/\`: cohort flow, retained/excluded Excel rows, cancellation and booking diagnostics, specialty-block summaries, weekday eligibility and fallback diagnostics, encoder metadata, and feature arrays.
-- \`pilots_P1_P2.json\`, \`pilot_P3.json\`: training-only timing and certification records.
-- \`checks/\`: Historical, Historical-one-room, Booked, and realized-duration planning checks.
-- \`models_*.json\`, \`penalty_diagnostics.csv\`, \`training_diagnostics.json\`, \`training_certificates.csv\`: coefficients, fitting states, penalty diagnostics, VF trajectories, and training certificates.
-- \`frozen_test_policies.json\`: the weights and shifts frozen before test evaluation.
-- \`report/\`: daily results, case-level recommendations and outcomes, occupied room-day loads, method summaries, oracle brackets, opportunity ratios, and paired weekly bootstrap comparisons.
-- \`checkpoints.sqlite\`, \`days/*/checkpoints.sqlite\`, \`solver_log.jsonl\`: resumable state and optimizer logs.
-
-The supplied workbook produces 24,506 training and 8,774 test cases. These are audited outputs, not hard-coded count targets. The analysis concerns retained elective workloads, not complete historical hospital operations.
-
-See \`docs/experiment.md\`, \`docs/theory.md\`, and \`docs/validation.md\`.
-
-## Weekly supported-day research branch
-
-A separate experimental weekly physical-room planner (optional evidence-supported
-second weekdays, exact Gurobi planner and gap-VF oracle) is described in
-[docs/weekly.md](docs/weekly.md). It does not replace the daily pipeline or
-assert learned-policy results.
-
-## Weekly rich-feature development branch
-
-The supported weekly planner, fixed-booking-anchor correction features, and
-training-only pilot are documented in [docs/weekly.md](docs/weekly.md).
-Use `run_weekly_rich.py` for the new case-level feature workflow. The older
-`run_experiment.py` remains a separately maintained **daily** experiment.
-
-
-## October 2026: behavioral advice comparison
-
-See [the two-method experiment](docs/advice_comparison.md). The runner compares a five-coefficient shared adjustment with per-week prescriptions on all 24,506 development cases, using 15 one-thread planner workers and a frozen 2013 option:
-
-```bash
-python pilot/run_advice_comparison.py --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx --out artifacts/advice_comparison --cores 15
 ```
+
+## Experiment provenance and outputs
+
+- [Selection protocol and limitations](docs/paper_selection_12h.md).
+- [VF follow-up design and interpretation](docs/vf_followups.md).
+- Original method selection: `artifacts/objective_selection_12h/objective_selection_2013/`.
+- Follow-up summaries: `artifacts/vf_followups/vf_followups/summary.json`.
+
+Source-code SHA and study configuration are recorded in checkpoint contracts. A changed version of scientific code requires a **new artifact directory**, not reuse of incompatible training checkpoints.
+
+## Historical code
+
+Earlier daily-planning, ANCHORED, GAP, weekly-surrogate, and exact bilevel research remains in Git history and selected research modules. Those investigations **are not competing headline methods for the current VF paper**. Their documentation is historical and may describe different costs, planner/tie rules, or cohorts. Do not launch an old experiment merely because a historical runner exists.
+
+For current manuscript work, preserve the distinction between the model-based VF upper bound, the solver's exact deployment status, and observed retrospective realized modeled costs. We have not established global optimality of the trained five-parameter VF coefficients or external-hospital causal benefits.
