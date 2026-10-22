@@ -316,16 +316,26 @@ def summarize(args):
             'ANCHORED_PLUS':{'ACCEPTED','PAIRED_TRAINING_HEURISTIC'},
             'SHARED_BASE':{'TRAINED_WITH_ACCEPTED_UPDATES','PAIRED_TRAINING_HEURISTIC'},
         }
+        base_status=policies.get('SHARED_BASE',{}).get('status')
+        plus_status=policies.get('SHARED_PLUS',{}).get('status')
+        allowed_shared={'TRAINED_WITH_ACCEPTED_UPDATES','PAIRED_TRAINING_HEURISTIC'}
         if totals['SHARED_PLUS']['exact_coverage']<.98 or (
               policies.get('SHARED_PLUS',{}).get('coeff') is None):
             selection_reason='SHARED_PLUS_NOT_SUFFICIENTLY_EVALUATED'
+        elif plus_status in allowed_shared:
+            reference='SHARED_PLUS'
+        elif base_status in allowed_shared and (
+                totals['SHARED_BASE']['exact_coverage']>=.98):
+            reference='SHARED_BASE'
         else:
+            selection_reason='NO_MEANINGFUL_DIRECT_SHARED_TRAINING'
+        if selection_reason is None:
             eligible=[a for a in admissible_statuses
-                    if totals[a]['exact_coverage']>=.98
+                    if a!=reference and totals[a]['exact_coverage']>=.98
                     and policies.get(a,{}).get('status') in admissible_statuses[a]
                     and comparisons[a]['ci_familywise'][1]<-.5]
             recommended=(min(eligible,key=lambda k:comparisons[k]['effect'])
-                         if eligible else 'SHARED_PLUS')
+                         if eligible else reference)
             selection_reason=('SUPERIOR_CHALLENGER' if eligible
                               else 'NO_CREDIBLE_CHALLENGER_IMPROVEMENT')
     else:
@@ -343,8 +353,9 @@ def summarize(args):
          important_note=('Multiple-comparison-adjusted week-bootstrap intervals; '
           'select only challengers with >=98% exact case coverage and more '
           'than 0.5 cost units/case improvement. Fallback is CASE, then '
-          'feasible recorded original assignment; it is a distinct operational '
-          'policy, not exact deployment. Historical 2013 has been '
+          'recorded original assignment; this is a RETROSPECTIVE fallback '
+          'replay, not an implementable prospective policy or exact '
+          'deployment. Historical 2013 has been '
           'previously exposed. An incomplete learner is NOT evidence against '
           'its mathematical objective.'))
     atomic(args.out/'selection'/'selection_summary.json',output)
