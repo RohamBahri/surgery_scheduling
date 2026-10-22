@@ -15,7 +15,7 @@ The completed October 2026 model-selection and mechanism experiments are frozen.
 | Stage-level method selection | `pilot/run_objective_selection.py` |
 | Stage-level VF follow-ups | `pilot/run_vf_followups.py` |
 
-For the complete list of active and historical runners, see [Experiment entrypoints](docs/entrypoints.md). Older `run_*.py` programs are retained where they are imported by other code or tests; they are not all active workflows.
+For the complete list of active and historical runners, see [Experiment entrypoints](docs/entrypoints.md). Historical weekly and anchored entrypoints have been relocated to `legacy/weekly/` and `legacy/anchored/` and should be launched using `python -m legacy.<family>.<module>` from the repository root. The root-level `run_weekly_rich.py` and `run_weekly_train.py` remain because the VF dependency chain imports them directly; they are not alternative headline methods.
 
 The current runner relies on `pilot/run_theory_full.py` and the `surgery/` implementation, especially `objective_selection.py`, `theory_exact.py`, `anchored_weekly_solver.py`, and `weekly_planner.py`. The *anchored* solver module provides the common exact physical-room planner and deterministic hash tie rule; its name does not mean ANCHORED is a selected learning method.
 
