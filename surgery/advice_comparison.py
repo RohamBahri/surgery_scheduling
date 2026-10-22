@@ -139,7 +139,14 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
     reference=True reproduces the original coordinate-only restricted arm.
     """
     deadline = time.monotonic() + budget
-    baseline, bc = score(c, d0, banks, seeds, max(seconds, 600.))
+    # A timeout does not justify silently extending the caller's wall limit.
+    remaining=max(0.,deadline-time.monotonic())
+    if remaining<=.1:
+        return d0,None,False,"BUDGET_EXHAUSTED",{}
+    try:
+        baseline, bc = score(c, d0, banks, seeds, min(seconds,remaining))
+    except RuntimeError as exc:
+        return d0,None,False,"BASELINE_UNCERTIFIED: "+str(exc),{}
     if all(len(c.allowed[int(s)]) == 1 for s in c.surgeon):
         return d0, baseline, False, "FIXED", bc
     d = d0.copy()
@@ -221,6 +228,10 @@ def prescription(c, d0, banks, *, seeds=(0,), seconds=120., budget=900., passes=
                         break
                     probe, probe_plans = trial, found
 
+    if time.monotonic()>=deadline:
+        # The candidate is a feasible reviewed-duration vector but has not
+        # passed the prescribed Bank-B acceptance gate. Preserve the incumbent.
+        return d0,baseline,False,"BUDGET_BEFORE_CONFIRM_B",bc
     candidate_b = objective(c, d, d0, plans, banks["B"], seeds)
     baseline_b = objective(c, d0, d0, baseline, banks["B"], seeds)
     if candidate_b >= baseline_b - 1e-8:
