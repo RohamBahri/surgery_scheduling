@@ -69,6 +69,7 @@ def secure_manifest(root,args):
                 task_seconds=args.task_seconds,round_seconds=args.round_seconds,
                 global_nodes=args.global_nodes,global_seconds=args.global_seconds,
                 eval_component_seconds=args.eval_component_seconds,
+                mechanism_seconds=args.mechanism_seconds,
                 preprocess_seconds=args.preprocess_seconds,
                 coefficient_radius=args.radius,cores=args.cores,methods=args.methods,
                 pw_nodes=args.pw_nodes,
@@ -477,7 +478,7 @@ def train_vf(args,ctx):
 
 def _eval_component(task):
     """Every method gets a finite budget; timeouts preserve the feasible witness."""
-    ck,c,rows,base,H,models,pools,seconds,pw_seconds,pw_nodes,component_seconds=task
+    ck,c,rows,base,H,models,pools,seconds,pw_seconds,pw_nodes,component_seconds,mechanism_seconds=task
     from surgery.anchored_weekly_solver import solve_week
     from gurobipy import GurobiError
     started=time.monotonic()
@@ -640,8 +641,72 @@ def _eval_component(task):
             add('PW_VFCG',ans['reviewed'],dict(global_certificate=ans,
                  optimization_hash_seeds=list(SEEDS)))
     attempt('PW_VFCG',vfcg)
+    # Mechanism-only post hoc evaluations: same learned advice, but either
+    # alternative near-tie selection or a different response realization.
+    # No re-fitting or changes to the main deployed-policy scores.
+    mechanism_start=time.monotonic()
+    mechanism_deadline=min(deadline,mechanism_start+mechanism_seconds)
+    mechanisms={}
+    core=('CASE','STAT','SHARED','OBS','EG','ROBUST','VF_SHARED')
+    from surgery.planner import response as surgeon_response
+    from surgery.weekly_planner import solve_week as balanced_planner
+    for name in core:
+        rec=cases.get(name,{})
+        if rec.get('status')!='COMPLETE':continue
+        reviewed_duration=np.asarray(rec['duration'],float)
+        analysis=dict()
+        budget=min(seconds,mechanism_deadline-time.monotonic())
+        if budget>.1:
+            try:
+                chosen=balanced_planner(c,reviewed_duration,seconds=budget,
+                      threads=1,tie=True,balance=True)
+                if chosen.complete and chosen.assignment is not None:
+                    analysis['balanced_tie']=dict(status='COMPLETE',
+                      realized=evaluate(c,chosen.assignment,c.actual)['cost'],
+                      model_C=expected_reduced(c,chosen.assignment,banks['C']),
+                      max_realized_room_load=evaluate(
+                          c,chosen.assignment,c.actual)['max_room_load'])
+                else:
+                    analysis['balanced_tie']=dict(status='UNRESOLVED',
+                                                  solver_status=chosen.status)
+            except (RuntimeError,GurobiError) as exc:
+                analysis['balanced_tie']=dict(status='UNRESOLVED',error=str(exc))
+        else:analysis['balanced_tie']=dict(status='MECHANISM_WALL_LIMIT')
+        changes={}
+        try:
+            displayed=display(c.booked,reviewed_duration)
+        except ValueError:
+            analysis['response_sweep']=dict(status='INVALID_NOMINAL_INVERSION')
+        else:
+            for alpha,h in SWEEP[1:]:
+                setting=f'{alpha:g}_{h:g}'
+                test_duration=np.maximum(1.,c.booked+surgeon_response(displayed,alpha,h))
+                if np.allclose(test_duration,reviewed_duration,rtol=0,atol=1e-9):
+                    selected={int(k):tuple(z) for k,z in rec['assignments'].items()}
+                    status='REUSED_NOMINAL'
+                else:
+                    selected={}
+                    status='COMPLETE'
+                    for sd in SEEDS:
+                        budget=min(seconds,mechanism_deadline-time.monotonic())
+                        if budget<=.1:
+                            status='MECHANISM_WALL_LIMIT';break
+                        try:selected[sd]=certified(c,test_duration,sd,budget)
+                        except (RuntimeError,GurobiError) as exc:
+                            status='UNRESOLVED: '+str(exc);break
+                if status in ('COMPLETE','REUSED_NOMINAL'):
+                    changes[setting]=dict(status=status,
+                       cost_model_C=float(np.mean([
+                          expected_reduced(c,z,banks['C']) for z in selected.values()])),
+                       cost_realized=float(np.mean([
+                          evaluate(c,z,c.actual)['cost'] for z in selected.values()])))
+                else:changes[setting]=dict(status=status)
+            analysis['response_sweep']=changes
+        mechanisms[name]=analysis
+
     return ck,dict(site=c.group,monday=c.monday,cases=c.n,
-                   methods=cases,hindsight=hindsight,saa_reference=reference,
+                   methods=cases,mechanism_diagnostics=mechanisms,
+                   hindsight=hindsight,saa_reference=reference,
                    component_wall_seconds=float(component_seconds),
                    component_wall_limit_hit=bool(remaining(0.2)<=.1),
                    elapsed=time.monotonic()-started)
@@ -655,7 +720,8 @@ def evaluate_all(args,ctx,models):
         p=root/(ck+'.json')
         if p.exists():done[ck]=json.loads(p.read_text());continue
         todo.append((ck,c,rows,base,ctx['H_eval'],models,ctx['pools'],
-                     args.seconds,args.pw_seconds,args.pw_nodes,args.eval_component_seconds))
+                     args.seconds,args.pw_seconds,args.pw_nodes,args.eval_component_seconds,
+               args.mechanism_seconds))
     if todo:
         with ProcessPoolExecutor(max_workers=min(args.cores,len(todo)),
                                  mp_context=get_context('spawn')) as pool:
@@ -830,6 +896,8 @@ def main():
     ap.add_argument('--methods',default='VF,SHARED,OBS,EG,ROBUST,GLOBAL,ANCHORED')
     ap.add_argument('--global-nodes',type=int,default=40)
     ap.add_argument('--global-seconds',type=float,default=7200.)
+    ap.add_argument('--mechanism-seconds',type=float,default=600.,
+                    help='Final optional per-component sensitivity budget')
     ap.add_argument('--eval-component-seconds',type=float,default=4200.,
                     help='Whole wall budget for one test component, all methods combined')
     ap.add_argument('--preprocess-seconds',type=float,default=7200.,
@@ -839,7 +907,7 @@ def main():
     if not set(args.methods)<=set(['VF','SHARED','SHARED_LEGACY','OBS','EG','ROBUST','GLOBAL','ANCHORED']):
         ap.error('Unknown method')
     if not 1<=args.cores<=15 or min(args.seconds,args.shared_seconds,args.pw_seconds,args.radius,args.search_seconds,args.task_seconds,args.round_seconds,
-                                         args.eval_component_seconds,args.preprocess_seconds)<=0:
+                                         args.eval_component_seconds,args.preprocess_seconds,args.mechanism_seconds)<=0:
         ap.error('Invalid time, coefficient radius or cores')
     if not args.acknowledge_final:
         ap.error('Opening the 2013 test requires --acknowledge-final')
