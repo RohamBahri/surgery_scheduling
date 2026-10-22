@@ -15,6 +15,7 @@ cd "$(dirname "$0")"
 : "${SHARED_SECONDS:=14400}"
 : "${PW_SECONDS:=480}"
 : "${EVAL_COMPONENT_SECONDS:=4200}"
+: "${MECHANISM_SECONDS:=600}"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 "$PYTHON_BIN" -m pytest -q tests/test_theory_exact.py tests/test_theory_solver.py tests/test_theory_regressions.py
 cmd=("$PYTHON_BIN" pilot/run_theory_full.py
@@ -24,6 +25,7 @@ cmd=("$PYTHON_BIN" pilot/run_theory_full.py
   --round-seconds "$ROUND_SECONDS" --search-seconds "$SEARCH_SECONDS"
   --preprocess-seconds "$PREPROCESS_SECONDS"
   --pw-seconds "$PW_SECONDS" --eval-component-seconds "$EVAL_COMPONENT_SECONDS"
+  --mechanism-seconds "$MECHANISM_SECONDS"
   --shared-seconds "$SHARED_SECONDS" --global-seconds "$GLOBAL_SECONDS"
   --global-nodes 40 --pw-nodes 100 --rounds 10 --radius 32)
 if command -v caffeinate >/dev/null 2>&1; then
