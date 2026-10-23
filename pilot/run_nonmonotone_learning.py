@@ -328,6 +328,7 @@ def work(ctx,root,args):
 
 
 def eval_2013(ctx,root,args,cache,selected):
+    evaluated_started=time.perf_counter()
     held=ctx["held"];items=ctx["eval"]
     b=np.asarray(held["booked"],float)
     c=ResponseDC(b,.8,30.,args.cap,1.)
@@ -338,6 +339,7 @@ def eval_2013(ctx,root,args,cache,selected):
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
     H,_,_=five_features(ctx,items,raw,c,cache,"eval",scaler=scale)
     ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(raw+H@theta)}
+    save_case_table(root/"cases_test.csv",held,raw,raw+H@theta,H,c)
     # Verify deployment's smallest display EXACTLY preserves reviewed booking.
     for label,r in (("CASE",raw),("VF",raw+H@theta)):
         displays=c.display(r)
@@ -349,16 +351,19 @@ def eval_2013(ctx,root,args,cache,selected):
     for key,comp,idx in items:
         for label,d in ds.items():
             rec=plans[label][key]
+            metrics=evaluate(comp,rec["assignment"],comp.actual)
             row=dict(component=key,week=comp.monday,
                      cases=comp.n,method=label,complete=rec["complete"],
-                     status=rec["status"],
-                     cost=evaluate(comp,rec["assignment"],comp.actual)["cost"],
+                     status=rec["status"],cost=metrics["cost"],
+                     idle_minutes=metrics["idle"],
+                     overtime_minutes=metrics["overtime"],
                      mae=float(np.abs(comp.actual-d[idx]).sum()))
             rows.append(row)
     save(root/"evaluation_2013.json",dict(
          label="EXPLORATORY_REUSED_2013_DATA",
          entries=rows))
     report(ctx,root)
+    record_stage_time(root,"evaluation",time.perf_counter()-evaluated_started)
 
 
 def report(ctx,root):
@@ -384,7 +389,9 @@ def report(ctx,root):
         if N:
             output[method]=dict(
                cost_per_case=sum(entry[method]["cost"] for entry in eligible)/N,
-               mae_per_case=sum(entry[method]["mae"] for entry in eligible)/N)
+               mae_per_case=sum(entry[method]["mae"] for entry in eligible)/N,
+               idle_minutes_per_case=sum(entry[method]["idle_minutes"] for entry in eligible)/N,
+               overtime_minutes_per_case=sum(entry[method]["overtime_minutes"] for entry in eligible)/N)
     if N:
         weekdata={}
         for entry in eligible:
