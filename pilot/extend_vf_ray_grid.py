@@ -231,6 +231,7 @@ def select_all(ctx,root,output,cache,policies,args):
 
 def frozen_ray_displays(ctx,root,output,cache,policies,selections):
     """Canonical B TRAINING displays; never adapt to C/B evaluation link."""
+    output.mkdir(parents=True,exist_ok=True)
     data=ctx["held"]
     booked=_as_float_array(data["booked"])
     X=_as_float_array(data["X"])
