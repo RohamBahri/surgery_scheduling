@@ -1,322 +1,277 @@
-"""Non-monotone surgeon-response CASE and value-function MM / pDCA.
+"""CASE pDCA and fixed-roster VF schedule-library MM.
 
-This is a new research trainer, not a change to the frozen 2026 experiments.
-Policy controls DISPLAYED advice. Each case clips its own display; shared
-coefficients are never restricted to the intersection of reachable intervals.
-
-For fixed schedules, the CASE and VF losses admit G(w)-H(w) decompositions
-with convex G,H. A cutting-plane convex QP supplies pDCA updates; an outer
-exact-planner step supplies a touching VF majorizer. No global optimum of the
-nonconvex learning problem is claimed.
+Nominal behavioral assumptions are fixed: alpha=.8, h=30. CASE learns a
+shared RAW advice score; VF adds five shared congestion-aware coefficients.
+Only deployed advice is canonicalized to its minimum-magnitude preimage.
+Optimization retains the full adoption / attenuation / rejection response.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass
+import json
+from pathlib import Path
+
 import numpy as np
 from scipy import sparse
 
 C_OVER = 1.75
 C_UNDER = 1.0
 KAPPA = C_OVER + C_UNDER
-CAPACITY = 480.0
-TURNOVER = 30.0
+CAPACITY = 480.
+TURNOVER = 30.
 
 
-def response(u, alpha, h):
-    """The original non-monotone adoption, attenuation and rejection law."""
-    u = np.asarray(u, dtype=float)
-    if not (0 < alpha <= 1 and h > 0):
-        raise ValueError("Require 0 < alpha <= 1 and h > 0")
-    return np.sign(u) * np.minimum(
-        alpha * np.abs(u), np.maximum(h - (1 - alpha) * np.abs(u), 0.0)
-    )
+def response(u, alpha=.8, h=30.):
+    """Non-monotone response, not the linear inverse-response approximation."""
+    u=np.asarray(u,float)
+    q=1.-alpha
+    return np.sign(u)*np.minimum(alpha*np.abs(u),
+                np.maximum(h-q*np.abs(u),0.))
 
 
 @dataclass(frozen=True)
 class Scenario:
-    alpha: float
-    h: float
-    weight: float = 1.0
+    alpha: float = .8
+    h: float = 30.
 
     def __post_init__(self):
-        if not (0 < self.alpha <= 1 and self.h > 0 and self.weight > 0):
-            raise ValueError("Invalid scenario")
+        if not (0 < self.alpha < 1 and self.h > 0):
+            raise ValueError("Response requires 0<alpha<1 and h>0")
 
 
 class ResponseDC:
-    """Exact DC decomposition of response(clip(raw, lower_i, cap)).
+    """Exact DC compiler for max{F(clip(u,-cap,cap)), floor-booked}.
 
-    The continuous piecewise-linear composite is constant to the left of
-    lower_i. At every breakpoint, split the change of slope into its positive
-    and negative parts. Then response = P-N, with both P and N convex.
-    This handles display clipping, short bookings, and all rejection regions.
+    The floor belongs to the IMPLEMENTED duration, not the displayed advice.
+    Thus very negative advice can attenuate/reject instead of being clipped
+    into the acceptance branch for short booked cases.
+
+    The composite is piecewise linear in the raw displayed-advice score.
+    Split each slope jump into positive and negative hinge coefficients:
+    f(u)=P(u)-N(u), with convex P,N. No binary response variables.
     """
 
-    def __init__(self, booked, alpha, h, cap, canonical_nominal=None):
-        self.booked = np.asarray(booked, dtype=float)
-        if self.booked.ndim != 1 or np.any(self.booked < 1):
-            raise ValueError("Positive one-dimensional booked durations required")
-        if not (0 < alpha <= 1 and h > 0 and cap > 0):
-            raise ValueError("Invalid response or cap")
-        self.alpha, self.h, self.cap = float(alpha), float(h), float(cap)
-        self.canonical_nominal = canonical_nominal
-        if canonical_nominal is not None:
-            a0, h0 = canonical_nominal
-            if not (0 < a0 <= 1 and h0 > 0):
-                raise ValueError("Invalid nominal response for minimum-magnitude display")
-        self.lo = np.maximum(-self.cap, 1.0 - self.booked)
-        self.hi = np.full_like(self.lo, self.cap)
-
-        def response_knots(a, threshold):
-            q = 1-a
-            values = [-threshold, threshold]
-            if q > 0:
-                values += [-threshold/q, threshold/q]
-            return values
-
-        knots_for_cases, jumps_for_cases, offsets = [], [], []
-        for lo, hi in zip(self.lo, self.hi):
-            lo, hi = float(lo), float(hi)
-            def f(x):
-                displayed = np.clip(x, lo, hi)
-                if canonical_nominal is not None:
-                    a0, h0 = canonical_nominal
-                    displayed = response(displayed, a0, h0) / a0
-                return float(response(displayed, alpha, h))
-            values = [lo, hi]
-            if canonical_nominal is None:
-                values.extend(response_knots(alpha, h))
-            else:
-                a0, h0 = canonical_nominal
-                boundaries = [lo]+sorted(x for x in response_knots(a0,h0)
-                                          if lo < x < hi)+[hi]
-                values.extend(boundaries)
-                targets = [a0*x for x in response_knots(alpha,h)]
-                for x0,x1 in zip(boundaries[:-1],boundaries[1:]):
-                    y0=float(response(x0,a0,h0))
-                    y1=float(response(x1,a0,h0))
-                    if abs(y1-y0) < 1e-12:
-                        continue
-                    for target in targets:
-                        t=(target-y0)/(y1-y0)
-                        if 0 < t < 1:
-                            values.append(x0+t*(x1-x0))
-            values=sorted(x for x in values if lo <= x <= hi)
+    def __init__(self, booked, alpha=.8, h=30., cap=180., floor=1.):
+        self.booked=np.asarray(booked,float)
+        if self.booked.ndim != 1 or np.any(self.booked < floor):
+            raise ValueError("Booked durations must exceed the positive-duration floor")
+        self.alpha,self.h,self.cap,self.floor=map(float,(alpha,h,cap,floor))
+        if not (0<alpha<1 and h>0 and cap>0 and floor>0):
+            raise ValueError("Invalid nominal response")
+        self.lo=np.full_like(self.booked,-cap)
+        self.hi=np.full_like(self.booked,cap)
+        self.offset=np.empty_like(self.booked)
+        all_knots=[];all_jumps=[]
+        q=1-alpha
+        for i,b in enumerate(self.booked):
+            cutoff=floor-float(b)
+            def actual(x):
+                return max(float(response(np.clip(x,-cap,cap),alpha,h)),cutoff)
+            base=[-cap,cap,-h,h,-h/q,h/q]
+            base=sorted(set(float(t) for t in base if -cap <= t <= cap))
+            roots=list(base)
+            for x0,x1 in zip(base[:-1],base[1:]):
+                y0=float(response(x0,alpha,h));y1=float(response(x1,alpha,h))
+                if abs(y1-y0)<1.e-12:
+                    continue
+                frac=(cutoff-y0)/(y1-y0)
+                if 1e-12<frac<1-1e-12:
+                    roots.append(x0+frac*(x1-x0))
+            roots=sorted(roots)
             unique=[]
-            for x in values:
-                if not unique or x-unique[-1] > 1e-9:
+            for x in roots:
+                if not unique or x-unique[-1]>1e-9:
                     unique.append(x)
             if len(unique)<2:
-                raise ValueError("Empty displayed-advice domain")
-            slopes=[0.0]
-            slopes += [(f(x1)-f(x0))/(x1-x0)
-                       for x0,x1 in zip(unique[:-1],unique[1:])]
-            slopes += [0.0]
+                raise ValueError("Invalid raw score domain")
+            slopes=[0.]+[(actual(v)-actual(u))/(v-u)
+                for u,v in zip(unique[:-1],unique[1:])]+[0.]
             jumps=[slopes[j+1]-slopes[j] for j in range(len(unique))]
-            knots_for_cases.append(unique)
-            jumps_for_cases.append(jumps)
-            offsets.append(f(lo))
-        width=max(map(len,knots_for_cases))
-        self.knots=np.full((len(self.lo),width),np.inf)
+            all_knots.append(unique);all_jumps.append(jumps)
+            self.offset[i]=actual(-cap)
+        width=max(map(len,all_knots))
+        self.knots=np.full((len(self.booked),width),np.inf)
         self.positive=np.zeros_like(self.knots)
         self.negative=np.zeros_like(self.knots)
-        for i,(knots,jumps) in enumerate(zip(knots_for_cases,jumps_for_cases)):
+        for i,(knots,jumps) in enumerate(zip(all_knots,all_jumps)):
             for j,(k,delta) in enumerate(zip(knots,jumps)):
                 self.knots[i,j]=k
-                self.positive[i,j]=max(delta,0.0)
-                self.negative[i,j]=max(-delta,0.0)
-        self.offset=np.asarray(offsets)
-        self._check_shapes()
-
-    def _check_shapes(self):
-        assert self.positive.shape == self.negative.shape == self.knots.shape
-        assert self.positive.shape[0] == len(self.booked)
+                self.positive[i,j]=max(delta,0.)
+                self.negative[i,j]=max(-delta,0.)
 
     def parts(self, raw):
-        raw = np.asarray(raw, float)
-        if raw.shape != self.booked.shape or not np.isfinite(raw).all():
-            raise ValueError("Invalid raw advice")
-        distance = np.maximum(raw[:, None] - self.knots, 0.0)
-        positive = self.offset + (distance * self.positive).sum(axis=1)
-        negative = (distance * self.negative).sum(axis=1)
-        active = (raw[:, None] > self.knots).astype(float)
-        active += 0.5 * (raw[:, None] == self.knots)
-        dp = (active * self.positive).sum(axis=1)
-        dn = (active * self.negative).sum(axis=1)
-        return positive, negative, dp, dn
+        raw=np.asarray(raw,float)
+        if raw.shape!=self.booked.shape:
+            raise ValueError("Advice scores do not match case array")
+        hinge=np.maximum(raw[:,None]-self.knots,0.)
+        P=self.offset+(hinge*self.positive).sum(axis=1)
+        N=(hinge*self.negative).sum(axis=1)
+        active=(raw[:,None]>self.knots).astype(float)
+        active+=.5*(raw[:,None]==self.knots)
+        return P,N,(active*self.positive).sum(axis=1),(
+            active*self.negative).sum(axis=1)
+
+    def correction(self, raw):
+        u=np.clip(np.asarray(raw,float),-self.cap,self.cap)
+        return np.maximum(response(u,self.alpha,self.h),self.floor-self.booked)
 
     def display(self, raw):
-        u = np.clip(raw, self.lo, self.hi)
-        if self.canonical_nominal is not None:
-            a0, h0 = self.canonical_nominal
-            u = response(u, a0, h0) / a0
-        return u
+        """Smallest signed display inducing nominal implemented correction."""
+        return self.correction(raw)/self.alpha
 
     def reviewed(self, raw):
-        return self.booked + response(self.display(raw), self.alpha, self.h)
+        return self.booked+self.correction(raw)
 
-    def verify(self, raw, tol=1e-7):
-        p, n, _, _ = self.parts(raw)
-        if not np.allclose(p - n, self.reviewed(raw) - self.booked,
-                           rtol=0, atol=tol):
-            raise AssertionError("DC response != exact clipped non-monotone response")
+    def verify(self, raw):
+        P,N,_,_=self.parts(raw)
+        correction=self.correction(raw)
+        if not np.allclose(P-N,correction,rtol=0,atol=1e-8):
+            raise AssertionError("Response DC decomposition is not exact")
+        displayed=self.display(raw)
+        if np.any(np.abs(displayed)>np.minimum(self.cap,self.h)+1e-8):
+            raise AssertionError("Canonical display exceeds increasing response branch")
+        adopted=np.maximum(response(displayed,self.alpha,self.h),
+                           self.floor-self.booked)
+        if not np.allclose(adopted,correction,rtol=0,atol=1e-8):
+            raise AssertionError("Minimum-magnitude display changes adopted booking")
 
 
-def occupied_room_matrix(items, plans, n_cases):
-    """Sparse incidence for occupied physical room-days only.
-
-    items are the verified components (key, Week, global row indices);
-    plans maps each key to a length-Week.n certified assignment.
-    """
-    rr, cc, counts = [], [], []
-    for key, week, rows in items:
-        rows = np.asarray(rows, int)
-        if key not in plans:
-            raise ValueError("Missing certified plan: " + str(key))
-        z = np.asarray(plans[key], int)
-        if z.shape != (week.n,):
-            raise ValueError("Assignment length mismatch")
-        # Also validates eligibility and observed surgeon-day retention.
+def room_matrix(items, plans, n_cases):
+    """All roster blocks, INCLUDING UNUSED 480-minute blocks."""
+    rr=[];cc=[];counts=[]
+    for key,c,rows in items:
+        z=np.asarray(plans[key],int)
+        rows=np.asarray(rows,int)
         from surgery.weekly_planner import loads
-        loads(week, z, week.booked)
-        for j in sorted(set(z.tolist())):
-            selected = rows[z == j]
-            rr.extend([len(counts)] * len(selected))
-            cc.extend(selected.tolist())
-            counts.append(len(selected))
-    if len(cc) != n_cases or len(set(cc)) != n_cases:
-        raise AssertionError("Room incidence must partition all training cases")
-    matrix = sparse.csr_matrix((np.ones(len(cc)), (rr, cc)),
-                               shape=(len(counts), n_cases))
-    return matrix, np.asarray(counts, int)
+        loads(c,z,c.booked) # inspect eligibility and required day retention
+        if len(rows)!=c.n:
+            raise AssertionError("Component rows incomplete")
+        for j in range(c.k):
+            ix=rows[z==j]
+            rr.extend([len(counts)]*len(ix))
+            cc.extend(ix.tolist())
+            counts.append(len(ix))
+    if len(cc)!=n_cases or len(set(cc))!=n_cases:
+        raise AssertionError("Every case must appear exactly once")
+    S=sparse.csr_matrix((np.ones(len(cc)),(rr,cc)),
+                        shape=(len(counts),n_cases))
+    return S,np.asarray(counts,int)
 
 
 class DCObjective:
-    """Case error or fixed-plan VF, over one common displayed-advice policy.
+    """Full asymmetric cost/envelope exactly as manuscript Section 4.
 
-    raw = base + X @ w. The reference base is ZERO for CASE and the frozen
-    fitted CASE display for VF. The same raw advice enters every scenario.
-    For VF, actual_bank is training-only duration scenario draws (draws,cases).
-    The exact fixed-plan reduced VF objective is G-H.
+    CASE: sum theta(actual - (booked+F(u))).
+    VF: sum J(fixed_schedules,booked+F(u))
+           + sum theta(actual-(booked+F(u))).
+    Both divide by NUMBER OF TRAINING COMPONENTS, not number of cases.
+    The L1 coefficient penalty is convex; intercept is unpenalized for CASE.
     """
 
-    def __init__(self, booked, X, base, scenarios, cap, *, mode,
-                 actual=None, actual_bank=None, room_matrices=None,
-                 ridge=0.001, l1=0.0, regularize_from=None, canonical_nominal=None):
-        self.booked = np.asarray(booked, float)
-        self.X = np.asarray(X, float)
-        self.base = np.asarray(base, float)
-        n, p = self.X.shape
-        if self.booked.shape != (n,) or self.base.shape != (n,):
-            raise ValueError("Shape mismatch: booked/base")
-        if mode not in ("CASE", "VF"):
-            raise ValueError("Unknown objective")
-        self.mode = mode
-        self.scenarios = tuple(scenarios)
-        if not self.scenarios:
-            raise ValueError("At least one scenario required")
-        weights = np.array([s.weight for s in self.scenarios], float)
-        self.weights = weights / weights.sum()
-        self.canonical_nominal = canonical_nominal
-        self.maps = [ResponseDC(self.booked, s.alpha, s.h, cap, canonical_nominal)
-                     for s in self.scenarios]
-        self.cap = float(cap)
-        self.ridge = float(ridge)
-        self.l1 = float(l1)
-        if self.ridge < 0 or self.l1 < 0:
-            raise ValueError("Penalties must be nonnegative")
-        self.reference = np.zeros(p) if regularize_from is None else np.asarray(regularize_from, float)
-        if self.reference.shape != (p,):
-            raise ValueError("Reference coefficient shape mismatch")
-        self.actual = None if actual is None else np.asarray(actual, float)
-        self.bank = None if actual_bank is None else np.asarray(actual_bank, float)
-        if mode == "CASE" and (self.actual is None or self.actual.shape != (n,)):
-            raise ValueError("CASE requires actual training durations")
-        if mode == "VF" and (self.bank is None or self.bank.ndim != 2 or
-                              self.bank.shape[1] != n or self.bank.shape[0] < 1):
-            raise ValueError("VF requires a frozen training scenario bank")
-        self.rooms = room_matrices
-        if mode == "VF":
-            if self.rooms is None or len(self.rooms) != len(self.scenarios):
-                raise ValueError("VF needs a fixed schedule for each response scenario")
-            for S in self.rooms:
-                if S.shape[1] != n:
-                    raise ValueError("Invalid room incidence")
-        self.n, self.p = n, p
+    def __init__(self, booked, X, base, response_map, *,
+                 mode, actual, components, rooms=None, lam=0.,
+                 penalize=None):
+        self.booked=np.asarray(booked,float)
+        self.X=np.asarray(X,float)
+        self.base=np.asarray(base,float)
+        self.actual=np.asarray(actual,float)
+        self.map=response_map
+        self.mode=mode
+        if mode not in ("CASE","VF"):
+            raise ValueError("mode must be CASE or VF")
+        self.n,self.p=self.X.shape
+        if self.booked.shape!=(self.n,) or self.base.shape!=(self.n,) or self.actual.shape!=(self.n,):
+            raise ValueError("CASE/VF array shape mismatch")
+        self.components=int(components)
+        self.rooms=rooms
+        if self.components<=0:
+            raise ValueError("Need positive number of components")
+        if mode=="VF" and (rooms is None or rooms.shape[1]!=self.n):
+            raise ValueError("VF requires fixed physical-room assignments")
+        self.lam=float(lam)
+        self.penalize=np.ones(self.p) if penalize is None else np.asarray(penalize,float)
+        if self.penalize.shape!=(self.p,):
+            raise ValueError("Penalty mask length mismatch")
 
-    def replace_rooms(self, matrices):
-        if self.mode != "VF":
-            raise ValueError("Only VF has room schedules")
-        return DCObjective(self.booked, self.X, self.base, self.scenarios,
-                           self.cap, mode="VF", actual_bank=self.bank,
-                           room_matrices=matrices, ridge=self.ridge,
-                           l1=self.l1, regularize_from=self.reference,
-                           canonical_nominal=self.canonical_nominal)
+    def replace_rooms(self,S):
+        return DCObjective(self.booked,self.X,self.base,self.map,mode=self.mode,
+                           actual=self.actual,components=self.components,rooms=S,
+                           lam=self.lam,penalize=self.penalize)
 
-    def parts(self, w):
-        """Return G,H,subgradient G,subgradient H; both G,H are convex."""
-        w = np.asarray(w, float)
-        if w.shape != (self.p,) or not np.isfinite(w).all():
-            raise ValueError("Bad coefficient vector")
-        raw = self.base + self.X @ w
-        G = H = 0.0
-        dg = np.zeros(self.p)
-        dh = np.zeros(self.p)
-        for k, (weight, response_map) in enumerate(zip(self.weights, self.maps)):
-            P, N, Pp, Np = response_map.parts(raw)
-            if self.mode == "CASE":
-                e = self.actual - self.booked
-                choose_p = np.where(P > e + N, 1., np.where(P < e + N, 0., .5))
-                value = KAPPA * np.maximum(e + N, P).sum() - C_UNDER * e.sum()
-                H_local = C_OVER * P.sum() + C_UNDER * N.sum()
-                coeff_p = KAPPA * choose_p
-                coeff_n = KAPPA * (1. - choose_p)
-                dh_raw = C_OVER * Pp + C_UNDER * Np
-            else:
-                e = self.bank - self.booked[None, :]
-                choose_p = np.where(P[None, :] > e + N[None, :], 1.,
-                                    np.where(P[None, :] < e + N[None, :], 0., .5))
-                case_term = np.maximum(e + N[None, :], P[None, :]).mean(axis=0)
-                coeff_p = KAPPA * choose_p.mean(axis=0)
-                coeff_n = KAPPA * (1. - choose_p.mean(axis=0))
-                S = self.rooms[k]
-                counts = np.diff(S.indptr)
-                load_offset = (S @ self.booked + TURNOVER * (counts - 1) - CAPACITY)
-                pp, nn = S @ P, S @ N
-                high = np.where(load_offset + pp > nn, 1.,
-                         np.where(load_offset + pp < nn, 0., .5))
-                room_cost = TURNOVER * S.shape[0] + KAPPA * np.maximum(load_offset + pp, nn).sum()
-                value = KAPPA * case_term.sum() + room_cost
-                H_local = KAPPA * (P.sum() + N.sum())
-                coeff_p += KAPPA * np.asarray(S.T @ high).ravel()
-                coeff_n += KAPPA * np.asarray(S.T @ (1. - high)).ravel()
-                dh_raw = KAPPA * (Pp + Np)
-            G += weight * value / self.n
-            H += weight * H_local / self.n
-            dg += weight * (self.X.T @ (coeff_p * Pp + coeff_n * Np)) / self.n
-            dh += weight * (self.X.T @ dh_raw) / self.n
-        diff = w - self.reference
-        G += 0.5 * self.ridge * np.dot(diff, diff)
-        dg += self.ridge * diff
-        if self.l1:
-            G += self.l1 * np.abs(diff).sum()
-            dg += self.l1 * np.sign(diff)
-        return float(G), float(H), dg, dh
+    def parts(self,w):
+        w=np.asarray(w,float)
+        u=self.base+self.X@w
+        P,N,Pp,Np=self.map.parts(u)
+        e=self.actual-self.booked
+        A=np.maximum(e+N,P)
+        choose_a=np.where(P>e+N,1.,np.where(P<e+N,0.,.5))
+        G=KAPPA*A.sum()-C_UNDER*e.sum()
+        if self.mode=="CASE":
+            H=C_OVER*P.sum()+C_UNDER*N.sum()
+            dp=KAPPA*choose_a*Pp
+            dn=KAPPA*(1-choose_a)*Np
+            hraw=C_OVER*Pp+C_UNDER*Np
+        else:
+            S=self.rooms
+            counts=np.diff(S.indptr)
+            kappa=S@self.booked+TURNOVER*np.maximum(counts-1,0)-CAPACITY
+            pp=S@P
+            nn=S@N
+            O=np.maximum(kappa+pp,nn)
+            I=np.maximum(nn-kappa,pp)
+            G+=C_OVER*O.sum()+C_UNDER*I.sum()
+            H=KAPPA*(P.sum()+N.sum())
+            choose_o=np.where(kappa+pp>nn,1.,np.where(kappa+pp<nn,0.,.5))
+            choose_i=np.where(nn-kappa>pp,1.,np.where(nn-kappa<pp,0.,.5))
+            grad_P=KAPPA*choose_a+C_OVER*np.asarray(S.T@choose_o).ravel()+C_UNDER*np.asarray(S.T@(1-choose_i)).ravel()
+            grad_N=KAPPA*(1-choose_a)+C_OVER*np.asarray(S.T@(1-choose_o)).ravel()+C_UNDER*np.asarray(S.T@choose_i).ravel()
+            dp=grad_P*Pp
+            dn=grad_N*Np
+            hraw=KAPPA*(Pp+Np)
+        G/=self.components
+        H/=self.components
+        dg=self.X.T@(dp+dn)/self.components
+        dh=self.X.T@hraw/self.components
+        G+=self.lam*np.dot(self.penalize,np.abs(w))
+        dg+=self.lam*self.penalize*np.sign(w)
+        return float(G),float(H),np.asarray(dg),np.asarray(dh)
 
-    def value(self, w):
-        g, h, _, _ = self.parts(w)
-        return float(g - h)
+    def value(self,w):
+        G,H,_,_=self.parts(w)
+        return float(G-H)
 
-    def scenario_values(self, w):
-        """Exact decomposed loss under each response scenario (without penalty)."""
-        vals = []
-        for k, s in enumerate(self.scenarios):
-            obj = DCObjective(self.booked, self.X, self.base, [s], self.cap,
-                 mode=self.mode, actual=self.actual, actual_bank=self.bank,
-                 room_matrices=None if self.mode == "CASE" else [self.rooms[k]],
-                 ridge=0., l1=0., canonical_nominal=self.canonical_nominal)
-            vals.append(obj.value(w))
-        return vals
+
+def library_value(items,libraries,d,actual,lam,w):
+    """True finite-library envelope, with full unused-roster idle cost."""
+    from surgery.weekly_planner import evaluate
+    total=0.
+    for key,c,rows in items:
+        if not libraries.get(key):
+            raise ValueError("Every component needs a feasible schedule")
+        segment=d[rows]
+        best=min(evaluate(c,z,segment)["cost"] for z in libraries[key])
+        e=c.actual-segment
+        total+=best+(C_OVER*np.maximum(e,0.)+
+                     C_UNDER*np.maximum(-e,0.)).sum()
+    return float(total/len(items)+lam*np.abs(w).sum())
+
+
+def choose_library_schedules(items,libraries,d):
+    """Touch the current LIBRARY surrogate, not a guessed global optimum."""
+    from surgery.weekly_planner import evaluate
+    selected={}
+    for key,c,rows in items:
+        costs=[evaluate(c,z,d[rows])["cost"] for z in libraries[key]]
+        pos=min(range(len(costs)),key=lambda j:(costs[j],tuple(libraries[key][j])))
+        selected[key]=libraries[key][pos]
+    return selected
+
+
+def _save(path,payload):
+    path=Path(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload,sort_keys=True,indent=2,allow_nan=False))
+    tmp.replace(path)
 
 
 def _solve_qp_cuts(objective, center, h_gradient, lower, upper, prox,
@@ -441,65 +396,96 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
                 status=reason,iterations=history,backend=backend)
 
 
-def mm_vf(items, booked, H, case_display, scenarios, actual_bank, cap,
-          *, root, iterations=8, radius=32., ridge=.001,
-          pdca_steps=20, max_cuts=60, seconds_per_plan=120.,
-          backend="gurobi", solve_plans=None, canonical_nominal=None):
-    """Outer exact-plan MM, inner full-response pDCA; resumable per iteration.
 
-    solve_plans(items, durations, scenario_index, iteration) must return
-    mapping component key -> certified assignment. The runner supplies the
-    exact weekly Gurobi implementation and checkpoints every plan.
+
+
+
+def mm_vf(items, booked, H, case_raw, response_map, actual, *,
+          root, lam, initial_libraries, iterations=30, radius=64.,
+          pdca_steps=50, max_cuts=80, backend="gurobi",
+          solve_plans=None):
+    """Finite-library majorization followed by full-response pDCA.
+
+    Every planner incumbent is FEASIBLE; certification is not required to
+    enlarge a library. A time-limited dual bound is recorded for epsilon.
+    Every accepted update decreases the EXACT finite-library surrogate.
+    Library enlargement can only tighten that surrogate.
     """
-    from pathlib import Path
-    import json
-    root = Path(root)
+    if solve_plans is None:
+        raise ValueError("Planner callback required")
+    root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
-    state_path = root/"vf_mm_state.json"
-    if state_path.exists():
-        state=json.loads(state_path.read_text())
+    status=root/"vf_library_progress.json"
+    if status.exists():
+        state=json.loads(status.read_text())
         theta=np.asarray(state["theta"],float)
+        libraries=state["libraries"]
     else:
         theta=np.zeros(H.shape[1])
-        state={"theta":theta.tolist(),"history":[],"status":"RUNNING"}
-    if solve_plans is None:
-        raise ValueError("Exact scenario-specific planner callback required")
-    actual_bank=np.asarray(actual_bank,float)
-    for k in range(len(state["history"]),iterations):
-        d_by_scenario=[]
-        rooms=[]
-        for j,scenario in enumerate(scenarios):
-            mapping=ResponseDC(booked,scenario.alpha,scenario.h,cap,canonical_nominal)
-            reviewed=mapping.reviewed(case_display+H@theta)
-            d_by_scenario.append(reviewed)
-            plan=solve_plans(items,reviewed,j,k)
-            S,_=occupied_room_matrix(items,plan,len(booked))
-            rooms.append(S)
-        objective=DCObjective(booked,H,case_display,scenarios,cap,mode="VF",
-                              actual_bank=actual_bank,room_matrices=rooms,ridge=ridge,
-                              canonical_nominal=canonical_nominal)
-        old=objective.value(theta)
+        libraries={key:[list(map(int,z)) for z in initial_libraries[key]]
+                   for key,_,_ in items}
+        state=dict(theta=theta.tolist(),history=[],libraries=libraries,
+                   status="RUNNING")
+    if not all(libraries.get(key) for key,_,_ in items):
+        raise ValueError("Every component requires a feasible initial assignment")
+    dcase=np.asarray(booked,float)+response_map.correction(case_raw)
+    case_certificate=library_value(items,libraries,dcase,actual,lam,theta)
+    state.setdefault("case_initial_certificate",case_certificate)
+    for outer in range(len(state["history"]),iterations):
+        d=np.asarray(booked,float)+response_map.correction(case_raw+H@theta)
+        candidates=solve_plans(items,d,outer)
+        gaps=[]
+        for key,c,rows in items:
+            candidate=candidates.get(key)
+            if candidate is not None:
+                z=candidate.get("assignment") if isinstance(candidate,dict) else candidate
+                if z is not None:
+                    z=list(map(int,z))
+                    from surgery.weekly_planner import loads
+                    loads(c,z,d[rows])
+                    if z not in libraries[key]:
+                        libraries[key].append(z)
+            from surgery.weekly_planner import evaluate
+            value=min(evaluate(c,z,d[rows])["cost"] for z in libraries[key])
+            bound=candidate.get("bound") if isinstance(candidate,dict) else None
+            gaps.append(max(0.,value-max(0.,float(bound))) if bound is not None else value)
+        selected=choose_library_schedules(items,libraries,d)
+        S,_=room_matrix(items,selected,len(booked))
+        objective=DCObjective(booked,H,case_raw,response_map,mode="VF",
+                              actual=actual,components=len(items),rooms=S,lam=lam)
+        before=library_value(items,libraries,d,actual,lam,theta)
+        if abs(before-objective.value(theta))>1e-5*max(1.,abs(before)):
+            raise AssertionError("MM touching identity failed: objective normalization/rooms")
         fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
                     max_cuts=max_cuts,backend=backend)
-        proposal=np.asarray(fitted["weights"],float)
-        upper=objective.value(proposal)
-        # The true VF score is <= fixed-plan majorizer at the candidate,
-        # and equals the fixed-plan majorizer at the incumbent.
-        accepted=bool(upper < old-1e-8*max(1.,abs(old)))
-        state["history"].append(dict(outer=k+1,before=old,majorizer_after=upper,
-                         accepted=accepted,plans=len(items)*len(scenarios),
-                         pdca_status=fitted["status"],pdca_iterations=fitted["iterations"]))
+        trial=np.asarray(fitted["weights"],float)
+        new_d=booked+response_map.correction(case_raw+H@trial)
+        after=library_value(items,libraries,new_d,actual,lam,trial)
+        accepted=bool(after<before-1e-8*max(1.,abs(before)))
+        improvement=max(0.,before-after) if accepted else 0.
+        state["history"].append(dict(outer=outer+1,
+                      before=float(before),candidate=float(after),
+                      delta=float(improvement),
+                      epsilon=float(np.mean(gaps)),
+                      accepted=accepted,
+                      added_schedules=sum(len(z) for z in libraries.values()),
+                      pdca_status=fitted["status"],
+                      inner=fitted["iterations"]))
         if accepted:
-            theta=proposal
+            theta=trial
             state["theta"]=theta.tolist()
+        state["libraries"]=libraries
+        state["status"]="RUNNING"
+        _save(status,state)
         if not accepted:
-            state["status"]="NO_VERIFIED_MM_GAIN"
-        tmp=state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state,sort_keys=True,indent=2,allow_nan=False))
-        tmp.replace(state_path)
-        if not accepted:
+            state["status"]="NO_CONFIRMED_IMPROVEMENT"
+            _save(status,state)
+            break
+        if improvement/max(1.,abs(before))<1e-6:
+            state["status"]="RELATIVE_IMPROVEMENT"
+            _save(status,state)
             break
     else:
         state["status"]="OUTER_ITERATION_CAP"
-        state_path.write_text(json.dumps(state,sort_keys=True,indent=2,allow_nan=False))
+        _save(status,state)
     return state
