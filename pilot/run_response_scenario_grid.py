@@ -59,7 +59,7 @@ def contract(args,root):
         context_sha256=sha_bytes(args.context.read_bytes()),
         train=[vars(x) for x in TRAIN_SCENARIOS],
         evaluation=[vars(x) for x in EVAL_SCENARIOS],
-        arms=METHODS,case_lambda_scale=CASE_LAMBDA_SCALE,
+        arms=list(METHODS),case_lambda_scale=CASE_LAMBDA_SCALE,
         vf_lambda_scale=VF_LAMBDA_SCALE,naive_lambda_scale=1.0,
         case_radius=100.,vf_radius=64.,cap=180.,
         case_steps=args.case_steps,vf_outers=args.vf_outers,
