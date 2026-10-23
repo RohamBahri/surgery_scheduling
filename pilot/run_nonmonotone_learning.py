@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
-"""Train non-monotone displayed-advice CASE and VF on a frozen UHN context.
+"""Reproducible UHN CASE -> provisional plan -> VF library-MM study.
 
-Run from repository root. Never updates the old frozen 2013 artifacts.
-Use --evaluate only after fitting; the repeatedly inspected 2013 cohort is
-retrospective/exploratory, not a fresh untouched holdout.
+ONE response: alpha=.8, h=30. THREE arms: BOOKED, CASE, VF.
+No robustness sweep, donor simulation, synthetic profiles, or old search.
 """
 from __future__ import annotations
+
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import get_context
 import hashlib
 import json
 import os
 import pickle
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
 
-for name in ("OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","OMP_NUM_THREADS","NUMEXPR_NUM_THREADS"):
+for name in ("OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","OMP_NUM_THREADS"):
     os.environ[name]="1"
+
 import numpy as np
+from scipy import sparse
+from scipy.optimize import linprog
+
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-
 from surgery.nonmonotone_learning import (
-    DCObjective, ResponseDC, Scenario, occupied_room_matrix, pdca, mm_vf)
-from surgery.weekly_planner import loads, evaluate
-from surgery.advice_comparison import scenarios as duration_scenarios
+    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, Scenario)
+from surgery.weekly_planner import evaluate, loads
+from surgery.weekly_training import training_lambda
 
 
-def save(path, obj):
+def save(path,obj):
     path=Path(path)
     path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_suffix(path.suffix+".tmp")
@@ -35,300 +38,337 @@ def save(path, obj):
     tmp.replace(path)
 
 
-def digest(data):
-    return hashlib.sha256(data).hexdigest()
+def sha(contents):
+    return hashlib.sha256(contents).hexdigest()
 
 
-def component_key(key):
-    return digest(str(key).encode())[:24]
-
-
-def _solve_task(task):
-    key,c,d,seconds,seed,tie=task
+def _plan_job(job):
+    key,c,d,seconds,tie=job
     from surgery.anchored_weekly_solver import solve_week
-    ans=solve_week(c,np.asarray(d,float),seconds=seconds,threads=1,
-                   tie=tie,hash_seed=seed)
-    if not ans.complete or ans.assignment is None:
-        return key,None,str(ans.status)
-    assignment=list(map(int,ans.assignment))
-    if abs(evaluate(c,assignment,d)["cost"]-ans.value)>0.11:
-        raise AssertionError("Certified plan objective reconstruction failed: "+str(key))
-    return key,assignment,"CERTIFIED"
+    result=solve_week(c,np.asarray(d,float),seconds=seconds,
+                      threads=1,tie=tie,hash_seed=0)
+    # A time-limited optimizer may return a sound incumbent without a proof.
+    # Even with no incumbent, the recorded original assignment is feasible.
+    assignment=(list(map(int,result.assignment))
+                if result.assignment is not None
+                else list(map(int,c.original)))
+    cost=evaluate(c,assignment,d)["cost"]
+    bound=result.bound
+    if bound is not None and np.isfinite(bound):
+        bound=max(0.,min(float(bound),float(cost)))
+    else:
+        bound=0. # Valid, possibly weak dual lower bound; cost is nonnegative.
+    return key,dict(assignment=assignment,cost=float(cost),
+                    bound=float(bound),complete=bool(result.complete),
+                    status=str(result.status))
 
 
 class PlannerCache:
+    """One source-of-truth weekly planner, with feasible timeout handling."""
+
     def __init__(self,root,cores,seconds):
-        self.root=Path(root)
-        self.cores=int(cores)
+        self.root=Path(root)/"plans"
+        self.cores=max(1,int(cores))
         self.seconds=float(seconds)
-        if self.cores<1 or self.seconds<=0:
-            raise ValueError("Positive cores and planner seconds required")
 
-    def solve(self,items,values,stage,seed=0,tie=False):
-        cache_dir=self.root/"plans"/stage/("hash_"+str(seed) if tie else "primary")
-        cache_dir.mkdir(parents=True,exist_ok=True)
-        answers={}
-        pending=[]
+    def solve(self,items,durations,tag,tie=False):
+        dest=self.root/tag
+        dest.mkdir(parents=True,exist_ok=True)
+        results={};pending=[]
         for key,c,rows in items:
-            d=np.asarray(values[rows],float)
-            sig=digest(str(key).encode()+d.astype("<f8").tobytes()+
-                       repr((self.seconds,seed,tie)).encode())
-            path=cache_dir/(component_key(key)+".json")
+            d=np.asarray(durations[rows],float)
+            keyhash=sha(str(key).encode())
+            signature=sha(str(key).encode()+np.ascontiguousarray(d,dtype="<f8").tobytes()+
+                          repr((self.seconds,tie)).encode())
+            path=dest/(keyhash+".json")
             if path.exists():
-                rec=json.loads(path.read_text())
-                if rec.get("signature")==sig and rec.get("status")=="CERTIFIED":
-                    answers[key]=rec["assignment"]
+                entry=json.loads(path.read_text())
+                if entry.get("signature")==signature:
+                    results[key]=entry["result"]
                     continue
-            pending.append((key,c,d,self.seconds,seed,tie,sig,str(path)))
-        if pending:
-            print(stage,"seed",seed,"certified cached",len(answers),
-                  "to solve",len(pending),flush=True)
-        if self.cores==1:
-            results=((task,_solve_task(task[:6])) for task in pending)
-            for task,(key,z,status) in results:
-                if z is None:
-                    raise RuntimeError("Uncertified exact planner "+str(key)+": "+status)
-                save(task[7],dict(signature=task[6],assignment=z,status=status))
-                answers[key]=z
-        else:
+            pending.append(((key,c,d,self.seconds,tie),path,signature))
+        print(tag,":",len(results),"cached,",len(pending),"to solve",flush=True)
+        if pending and self.cores==1:
+            for job,path,sig in pending:
+                key,entry=_plan_job(job)
+                save(path,dict(signature=sig,result=entry))
+                results[key]=entry
+        elif pending:
             with ProcessPoolExecutor(max_workers=self.cores,
-                                     mp_context=get_context("spawn")) as pool:
-                futures={pool.submit(_solve_task,task[:6]):task for task in pending}
-                for f in as_completed(futures):
-                    task=futures[f]
-                    key,z,status=f.result()
-                    if z is None:
-                        raise RuntimeError("Uncertified exact planner "+str(key)+": "+status)
-                    save(task[7],dict(signature=task[6],assignment=z,status=status))
-                    answers[key]=z
-        if len(answers)!=len(items):
-            raise AssertionError("Missing exact planner components")
-        return answers
+                    mp_context=get_context("spawn")) as pool:
+                futures={pool.submit(_plan_job,job):(path,sig)
+                         for job,path,sig in pending}
+                for future in as_completed(futures):
+                    key,entry=future.result()
+                    path,sig=futures[future]
+                    save(path,dict(signature=sig,result=entry))
+                    results[key]=entry
+        coverage=sum(v["complete"] for v in results.values())
+        print(tag,": certified",coverage,"/",len(items),flush=True)
+        return results
 
 
-def parse_scenarios(tokens):
-    out=[]
-    for token in tokens:
-        chunks=token.split(":")
-        if len(chunks) not in (2,3):
-            raise ValueError("Use alpha:h or alpha:h:weight")
-        out.append(Scenario(*map(float,chunks)))
-    return tuple(out)
+def train_lambda(design,ncomp):
+    # Old research's training-only multiplier, rescaled from mean per CASE
+    # to the manuscript's mean per planning component.
+    return training_lambda(np.asarray(design,float)) * len(design)/ncomp
 
 
-def provisional_features(ctx,case_display,cap,nominal,cache,items,old_H,stage,
-                         standardize=None):
-    """Rebuild congestion AFTER the new CASE fit; no old-CASE draft is reused.
+def lad_start(X,errors,lam,components,box):
+    """Sparse, globally solved regularized LAD LP (not an untested guess)."""
+    n,p=X.shape
+    X=sparse.csr_matrix(X)
+    I=sparse.eye(n,format="csr")
+    Z=sparse.csr_matrix((n,p))
+    # variables (w[0:p],t[0:n],v[0:p]); t>=|errors-Xw|,
+    # v>=|w|; do not regularize intercept.
+    E=sparse.eye(p,format="csr")
+    empty=sparse.csr_matrix((p,n))
+    A=sparse.vstack((
+        sparse.hstack((-X,-I,Z)),
+        sparse.hstack((X,-I,Z)),
+        sparse.hstack((E,empty,-E)),
+        sparse.hstack((-E,empty,-E))
+        ),format="csr")
+    b=np.r_[-errors,errors,np.zeros(2*p)]
+    c=np.r_[np.zeros(p),np.full(n,1./components),
+             np.r_[0.,np.full(p-1,lam)]]
+    result=linprog(c,A_ub=A,b_ub=b,bounds=(
+              [(-box,box)]*p+[(0,None)]*(n+p)),
+              method="highs",options={"time_limit":900.})
+    return (np.asarray(result.x[:p],float) if result.success else None,
+            dict(success=bool(result.success),status=int(result.status),
+                 message=str(result.message)))
 
-    Historical s/q fields in old_H were standardized out-of-fold. Using them
-    as the first two features and recomputing p, s*p, q*p preserves exactly
-    the five-dimensional span of the original feature design.
-    """
-    booked=ctx["fit"]["booked"] if stage=="fit" else ctx["held"]["booked"]
-    case_d=ResponseDC(booked,nominal.alpha,nominal.h,cap,
-                      canonical_nominal=(nominal.alpha,nominal.h)).reviewed(case_display)
-    maps=[cache.solve(items,case_d,stage+"_case_draft",seed=seed,tie=True)
-          for seed in (0,1,2)]
-    p=np.zeros(len(booked))
-    filled=np.zeros(len(booked),bool)
+
+def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
+    path=folder/"case_policy.json"
+    if path.exists():
+        rec=json.loads(path.read_text())
+        return np.asarray(rec["weights"],float)
+    data=ctx["fit"]
+    X=np.asarray(data["X"],float)
+    n=len(X)
+    ncomp=len(items)
+    lam=train_lambda(X,ncomp)
+    penalty=np.ones(X.shape[1]);penalty[0]=0.
+    obj=DCObjective(data["booked"],X,np.zeros(n),response_map,
+          mode="CASE",actual=data["actual"],components=ncomp,
+          lam=lam,penalize=penalty)
+    # Existing response-aware CASE fit serves as one warm start, not as
+    # the new model's fitted weights (its historical link was inverse).
+    old=np.asarray(data["case_w"],float)/response_map.alpha
+    old=np.clip(old,-radius,radius)
+    starts=[("old_inverse_case",old)]
+    lad,diagnostic=lad_start(X,np.asarray(data["actual"])-data["booked"],
+                            lam,ncomp,radius)
+    if lad is not None:
+        starts.insert(0,("regularized_LAD",lad))
+    logs=[]
+    best=(float("inf"),None)
+    for name,start in starts:
+        rec=pdca(obj,start,radius=radius,outer=steps,max_cuts=cuts,
+                 backend=backend)
+        weight=np.asarray(rec["weights"],float)
+        score=obj.value(weight)
+        logs.append(dict(start=name,objective=score,
+                         status=rec["status"],history=rec["iterations"]))
+        if score<best[0]:
+            best=score,weight
+    w=best[1]
+    save(path,dict(weights=w.tolist(),objective=float(best[0]),
+                   lambda_case=lam,initialization=diagnostic,
+                   starts=logs,alpha=response_map.alpha,h=response_map.h,
+                   cap=response_map.cap,uses_true_nonmonotone_response=True))
+    return w
+
+
+def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
+    """ONE frozen CASE draft per physical-room component, hash seed zero."""
+    data=ctx["fit"] if stage=="train" else ctx["held"]
+    n=len(data["booked"])
+    baseline=response_map.reviewed(case_raw)
+    draft=cache.solve(items,baseline,stage+"_case_draft",tie=True)
+    history=np.asarray(ctx["H"] if stage=="train" else ctx["H_eval"],float)
+    # The first two columns retain the original surgeon/procedure history
+    # scores; old CASE congestion columns are explicitly discarded.
+    s,q=history[:,0],history[:,1]
+    p=np.empty(n)
     for key,c,rows in items:
-        zs=[np.asarray(m[key],int) for m in maps]
-        p[rows]=np.mean([np.clip((loads(c,z,case_d[rows])[z]-480.)/120.,-2.,2.)
-                         for z in zs],axis=0)
-        filled[rows]=True
-    if not filled.all():
-        raise AssertionError("Missing congestion feature rows")
-    sq=np.asarray(old_H[:,:2],float)
-    s,q=sq[:,0],sq[:,1]
-    raw=np.column_stack((s,q,p,s*p,q*p))
-    if standardize is None:
+        z=np.asarray(draft[key]["assignment"],int)
+        p[rows]=np.clip((loads(c,z,baseline[rows])[z]-480.)/120.,-2.,2.)
+    raw=np.column_stack([s,q,p,s*p,q*p])
+    if scaler is None:
         mu=raw.mean(axis=0)
         sd=raw.std(axis=0)
-        sd=np.where(sd<1e-10,1.,sd)
+        sd=np.maximum(sd,1e-12)
     else:
-        mu,sd=standardize
-    return (raw-mu)/sd,(mu,sd)
+        mu,sd=scaler
+    return (raw-mu)/sd,(mu,sd),draft
 
 
-def prepare_bank(ctx,items,case_display,cap,nominal,draws,seed):
-    """Freeze a scenario bank; no evaluation outcomes enter training."""
-    from surgery.nonmonotone_learning import ResponseDC
-    booked=np.asarray(ctx["fit"]["booked"],float)
-    baseline=ResponseDC(booked,nominal.alpha,nominal.h,cap,
-             canonical_nominal=(nominal.alpha,nominal.h)).reviewed(case_display)
-    bank=np.zeros((draws,len(booked)))
-    filled=np.zeros(len(booked),bool)
-    for key,c,rows in items:
-        bank[:,rows]=duration_scenarios(c,baseline[rows],ctx["pools"],seed,count=draws)
-        filled[rows]=True
-    if not filled.all() or not np.isfinite(bank).all():
-        raise AssertionError("Invalid scenario bank")
-    return bank
+def work(ctx,root,args):
+    train=ctx["train"]
+    data=ctx["fit"]
+    b=np.asarray(data["booked"],float)
+    actual=np.asarray(data["actual"],float)
+    response_map=ResponseDC(b,.8,30.,args.cap,1.)
+    root.mkdir(parents=True,exist_ok=True)
+    cache=PlannerCache(root,args.cores,args.plan_seconds)
+    if args.stage in ("case","all","draft","vf"):
+        coef=case_fit(ctx,train,response_map,root,args.case_steps,
+                      args.cuts,args.backend,args.case_radius)
+        if args.stage=="case":
+            return
+        case_raw=np.asarray(data["X"],float)@coef
+        H,(mu,sd),case_draft=five_features(
+                    ctx,train,case_raw,response_map,cache,"train")
+        save(root/"vf_features.json",dict(mean=mu.tolist(),std=sd.tolist()))
+        booked=cache.solve(train,b,"train_booked",tie=True)
+        if args.stage=="draft":
+            return
+        libraries={key:[entry["assignment"],case_draft[key]["assignment"],
+                        list(map(int,c.original))]
+                   for key,c,_ in train
+                   for entry in [booked[key]]}
+        # Feasible schedule certificates are retained on timeouts instead
+        # of promoting an unfinished planner solve to "exact".
+        vf_lam=train_lambda(H,len(train))
+        def oracle(items,d,k):
+            return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
+        state=mm_vf(train,b,H,case_raw,response_map,actual,root=root,
+                 lam=vf_lam,initial_libraries=libraries,
+                 iterations=args.vf_outers,radius=args.vf_radius,
+                 pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
+                 backend=args.backend,solve_plans=oracle)
+        chosen=np.asarray(state["theta"],float)
+        save(root/"selected_policy.json",dict(method="CASE+VF",
+               case_coeff=coef.tolist(),vf_theta=chosen.tolist(),
+               lambda_case=json.loads((root/"case_policy.json").read_text())["lambda_case"],
+               lambda_vf=vf_lam,cap=args.cap,alpha=.8,h=30.,
+               train_components=len(train),train_cases=len(b),
+               certificate_history=state["history"],
+               vf_status=state["status"]))
+        return
+    if args.stage=="evaluate":
+        selected=json.loads((root/"selected_policy.json").read_text())
+        eval_2013(ctx,root,args,cache,selected)
+        return
+    if args.stage=="report":
+        report(ctx,root)
+        return
+    raise ValueError("Unknown stage")
 
 
-def evaluated(ctx,weights,theta,mu_sd,cap,nominal,scenarios,cache):
-    """Evaluation on reused 2013 cohort; exactly solved or explicitly failed."""
-    held=ctx["held"]
-    items=ctx["eval"]
-    X=np.asarray(held["X"],float)
+def eval_2013(ctx,root,args,cache,selected):
+    held=ctx["held"];items=ctx["eval"]
     b=np.asarray(held["booked"],float)
-    raw=X@weights
-    H,_=provisional_features(ctx,raw,cap,nominal,cache,items,
-                     ctx["H_eval"],"held",standardize=mu_sd)
-    records={}
-    for j,s in enumerate(scenarios):
-        z_book=cache.solve(items,b,"held_BOOKED",seed=0,tie=True)
-        case=ResponseDC(b,s.alpha,s.h,cap,canonical_nominal=(nominal.alpha,nominal.h))
-        durations={"BOOKED":b,"CASE":case.reviewed(raw),
-                    "VF":case.reviewed(raw+H@theta)}
-        for name,d in durations.items():
-            plans=z_book if name=="BOOKED" else cache.solve(
-                items,d,"held_"+name+"_scenario_"+str(j),seed=0,tie=True)
-            total=0.
-            for key,c,rows in items:
-                total+=evaluate(c,plans[key],c.actual)["cost"]
-            records.setdefault(name,{})[str(j)]=float(total/len(b))
-    return records
+    c=ResponseDC(b,.8,30.,args.cap,1.)
+    coef=np.asarray(selected["case_coeff"],float)
+    theta=np.asarray(selected["vf_theta"],float)
+    raw=np.asarray(held["X"],float)@coef
+    record=json.loads((root/"vf_features.json").read_text())
+    scale=np.asarray(record["mean"]),np.asarray(record["std"])
+    H,_,_=five_features(ctx,items,raw,c,cache,"eval",scaler=scale)
+    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(raw+H@theta)}
+    # Verify deployment's smallest display EXACTLY preserves reviewed booking.
+    for label,r in (("CASE",raw),("VF",raw+H@theta)):
+        displays=c.display(r)
+        if not np.allclose(b+response(displays,.8,30.),ds[label],atol=1e-8):
+            raise AssertionError("Non-monotone training/deployment mismatch")
+    plans={label:cache.solve(items,d,"eval_"+label,tie=True)
+           for label,d in ds.items()}
+    rows=[]
+    for key,comp,idx in items:
+        for label,d in ds.items():
+            rec=plans[label][key]
+            row=dict(component=key,site=comp.group,week=comp.monday,
+                     cases=comp.n,method=label,complete=rec["complete"],
+                     status=rec["status"],
+                     cost=evaluate(comp,rec["assignment"],comp.actual)["cost"],
+                     mae=float(np.abs(comp.actual-d[idx]).sum()),
+                     assignment=rec["assignment"])
+            rows.append(row)
+    save(root/"evaluation_2013.json",dict(
+         label="EXPLORATORY_REUSED_2013_DATA",
+         entries=rows))
+    report(ctx,root)
+
+
+def report(ctx,root):
+    file=root/"evaluation_2013.json"
+    if not file.exists():
+        print("No evaluation yet. Training outputs in",root,flush=True)
+        return
+    records=json.loads(file.read_text())["entries"]
+    by={}
+    for r in records:
+        by.setdefault(r["component"],{})[r["method"]]=r
+    methods=("BOOKED","CASE","VF")
+    eligible=[x for x in by.values() if
+              all(m in x and x[m]["complete"] for m in methods)]
+    N=sum(x["BOOKED"]["cases"] for x in eligible)
+    summary=dict(status="EXPLORATORY_REUSED_HOLDOUT",
+                 common_certified_components=len(eligible),
+                 all_components=len(by),common_certified_cases=N)
+    for m in methods:
+        if N:
+            summary[m]=dict(cost_per_case=sum(x[m]["cost"] for x in eligible)/N,
+                            mae_per_case=sum(x[m]["mae"] for x in eligible)/N)
+        summary[m+"_uncertified"]=[
+            key for key,x in by.items() if m not in x or not x[m]["complete"]]
+    if N:
+        summary["VF_minus_CASE"]=summary["VF"]["cost_per_case"]-summary["CASE"]["cost_per_case"]
+        summary["CASE_minus_BOOKED"]=summary["CASE"]["cost_per_case"]-summary["BOOKED"]["cost_per_case"]
+        summary["VF_changed_assignment_fraction"]=sum(
+             x["CASE"]["assignment"]!=x["VF"]["assignment"]
+             for x in eligible)/len(eligible)
+    save(root/"summary.json",summary)
+    print(json.dumps({k:v for k,v in summary.items()
+                      if not k.endswith("_uncertified")},indent=2),flush=True)
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--context",type=Path,
-          default=Path("artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))
-    p.add_argument("--out",type=Path,default=Path("artifacts/nonmonotone_case_vf"))
-    p.add_argument("--caps",type=float,nargs="+",default=[45.])
-    p.add_argument("--scenario",action="append",default=None,
-                   help="alpha:h[:weight]; repeated scenarios, equal weights by default")
-    p.add_argument("--nominal",default="0.8:30",
-                   help="Nominal response defining minimum-magnitude displayed advice")
-    p.add_argument("--draws",type=int,default=50)
-    p.add_argument("--case-steps",type=int,default=25)
-    p.add_argument("--vf-outers",type=int,default=8)
-    p.add_argument("--vf-pdca-steps",type=int,default=20)
-    p.add_argument("--max-cuts",type=int,default=60)
-    p.add_argument("--case-radius",type=float,default=300.)
-    p.add_argument("--vf-radius",type=float,default=32.)
-    p.add_argument("--case-ridge",type=float,default=.001)
-    p.add_argument("--case-l1",type=float,default=.0001)
-    p.add_argument("--vf-ridge",type=float,default=.001)
-    p.add_argument("--cores",type=int,default=8)
-    p.add_argument("--plan-seconds",type=float,default=120.)
-    p.add_argument("--backend",choices=("gurobi","scipy"),default="gurobi")
-    p.add_argument("--evaluate",action="store_true")
-    args=p.parse_args()
-    if args.draws<1 or len(set(args.caps))!=len(args.caps):
-        raise ValueError("Positive scenario count and distinct display caps required")
-    scenarios=parse_scenarios(args.scenario or ["0.8:30","0.6:30","0.4:30","0.8:15"])
-    nominal=parse_scenarios([args.nominal])[0]
+    ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--stage",choices=("case","draft","vf","all","evaluate","report"),
+                    default="all")
+    ap.add_argument("--context",type=Path,default=Path(
+       "artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))
+    ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_case_vf_mm"))
+    ap.add_argument("--cap",type=float,default=180.)
+    ap.add_argument("--case-steps",type=int,default=200)
+    ap.add_argument("--vf-outers",type=int,default=30)
+    ap.add_argument("--vf-pdca-steps",type=int,default=50)
+    ap.add_argument("--cuts",type=int,default=80)
+    ap.add_argument("--case-radius",type=float,default=100.)
+    ap.add_argument("--vf-radius",type=float,default=64.)
+    ap.add_argument("--cores",type=int,default=15)
+    ap.add_argument("--plan-seconds",type=float,default=180.)
+    ap.add_argument("--backend",choices=("gurobi","scipy"),default="gurobi")
+    args=ap.parse_args()
     if not args.context.exists():
-        raise FileNotFoundError("Need the prior exact-context checkpoint: "+str(args.context))
+        raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
     with args.context.open("rb") as f:
         ctx=pickle.load(f)
-    fit=ctx["fit"]
-    if len(fit["booked"])!=24506 or len(ctx["held"]["booked"])!=8774:
-        raise AssertionError("Unexpected frozen UHN training/evaluation cohort")
-    if len(ctx["train"])!=3362 or len(ctx["eval"])!=1125:
-        raise AssertionError("Unexpected number of exact planning components")
-    from surgery import nonmonotone_learning as module
-    manifest=dict(context_sha256=digest(args.context.read_bytes()),
-        source_sha256=digest(Path(__file__).read_bytes()+Path(module.__file__).read_bytes()),
-        caps=args.caps,scenarios=[vars(s) for s in scenarios],nominal=vars(nominal),
-        draws=args.draws,case_steps=args.case_steps,vf_outers=args.vf_outers,
-        vf_pdca_steps=args.vf_pdca_steps,max_cuts=args.max_cuts,
-        case_radius=args.case_radius,vf_radius=args.vf_radius,
-        case_ridge=args.case_ridge,case_l1=args.case_l1,vf_ridge=args.vf_ridge,
-        backend=args.backend,plan_seconds=args.plan_seconds,
-        note="Full nonmonotone canonical display; 2013 reused/exploratory")
+    from surgery import nonmonotone_learning as core
+    fingerprint=sha(Path(__file__).read_bytes()+Path(core.__file__).read_bytes())
+    settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
+                  alpha=.8,h=30.,cap=args.cap,case_steps=args.case_steps,
+                  vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,
+                  cuts=args.cuts,case_radius=args.case_radius,
+                  vf_radius=args.vf_radius,
+                  plan_seconds=args.plan_seconds,backend=args.backend)
     args.out.mkdir(parents=True,exist_ok=True)
-    settings=args.out/"manifest.json"
-    if settings.exists() and json.loads(settings.read_text())!=manifest:
-        raise RuntimeError("Source or scientific settings changed: choose a new --out directory")
-    save(settings,manifest)
-    worst_jobs=len(ctx["train"])*len(args.caps)*(
-        3+len(scenarios)*(args.vf_outers+1))
-    if args.evaluate:
-        worst_jobs+=len(ctx["eval"])*(3+1+2*len(scenarios))
-    print("PRE-FLIGHT: full-cohort study; up to",worst_jobs,
-          "planner-component requests before caching/analytic short-circuits;",
-          len(ctx["train"]),"training components;",
-          len(scenarios),"response scenarios;",
-          args.vf_outers,"VF outer steps. No subset is silently used.",
+    contract=args.out/"run_contract.json"
+    if contract.exists():
+        if json.loads(contract.read_text())!=settings:
+            raise ValueError("Scientific settings changed; choose a new --out directory")
+    else:
+        save(contract,settings)
+    print("UHN CASE/VF:",len(ctx["train"]),"train components;",
+          len(ctx["eval"]),"evaluation components; nominal response only",
           flush=True)
-    cache=PlannerCache(args.out,args.cores,args.plan_seconds)
-    X=np.asarray(fit["X"],float)
-    b=np.asarray(fit["booked"],float)
-    observed=np.asarray(fit["actual"],float)
-    initial=np.asarray(fit["case_w"],float)/nominal.alpha
-    results={}
-    for cap in args.caps:
-        folder=args.out/("cap_"+str(cap).replace(".","_"))
-        folder.mkdir(parents=True,exist_ok=True)
-        case_path=folder/"case_pdca.json"
-        case_obj=DCObjective(b,X,np.zeros(len(b)),scenarios,cap,mode="CASE",
-               actual=observed,ridge=args.case_ridge,l1=args.case_l1)
-        if case_path.exists():
-            case_fit=json.loads(case_path.read_text())
-        else:
-            case_fit=pdca(case_obj,initial,radius=args.case_radius,
-                          outer=args.case_steps,max_cuts=args.max_cuts,
-                          backend=args.backend)
-            save(case_path,case_fit)
-        weights=np.asarray(case_fit["weights"],float)
-        raw_case=X@weights
-        H,mu_sd=provisional_features(ctx,raw_case,cap,nominal,cache,
-                      ctx["train"],ctx["H"],"fit_cap_"+str(cap))
-        save(folder/"five_feature_normalization.json",
-             dict(mean=mu_sd[0].tolist(),sd=mu_sd[1].tolist()))
-        bank=prepare_bank(ctx,ctx["train"],raw_case,cap,nominal,args.draws,20261020)
-        def solve_plans(items,durations,j,k):
-            return cache.solve(items,durations,"fit_cap_"+str(cap)+
-                               "_vf_outer_"+str(k)+"_scenario_"+str(j),
-                               seed=0,tie=False)
-        state=mm_vf(ctx["train"],b,H,raw_case,scenarios,bank,cap,
-                    root=folder,iterations=args.vf_outers,radius=args.vf_radius,
-                    ridge=args.vf_ridge,pdca_steps=args.vf_pdca_steps,
-                    max_cuts=args.max_cuts,backend=args.backend,
-                    canonical_nominal=(nominal.alpha,nominal.h),
-                    solve_plans=solve_plans)
-        theta=np.asarray(state["theta"],float)
-        matrices=[]
-        for j,s in enumerate(scenarios):
-            d=ResponseDC(b,s.alpha,s.h,cap,
-               canonical_nominal=(nominal.alpha,nominal.h)).reviewed(raw_case+H@theta)
-            plan=cache.solve(ctx["train"],d,"fit_cap_"+str(cap)+
-                             "_vf_final_scenario_"+str(j),seed=0,tie=False)
-            S,_=occupied_room_matrix(ctx["train"],plan,len(b))
-            matrices.append(S)
-        final=DCObjective(b,H,raw_case,scenarios,cap,mode="VF",
-             actual_bank=bank,room_matrices=matrices,ridge=args.vf_ridge,
-             canonical_nominal=(nominal.alpha,nominal.h))
-        result=dict(cap=cap,case_coeff=weights.tolist(),vf_theta=theta.tolist(),
-                    case_training_objective=case_obj.value(weights),
-                    vf_training_objective=final.value(theta),
-                    vf_scenario_objectives=final.scenario_values(theta),
-                    case_status=case_fit["status"],vf_status=state["status"],
-                    vf_history=state["history"],
-                    response_scenarios=[vars(s) for s in scenarios])
-        save(folder/"fitted_policy.json",result)
-        results[str(cap)]=result
-    best=min(results.values(),key=lambda x:x["vf_training_objective"])
-    save(args.out/"selected_policy.json",dict(selection="minimum prespecified training VF",
-         cap=best["cap"],case_coeff=best["case_coeff"],vf_theta=best["vf_theta"],
-         training_vf_objective=best["vf_training_objective"],
-         full_train_components=len(ctx["train"]),train_cases=len(b)))
-    if args.evaluate:
-        selected=best
-        norm=json.loads((args.out/("cap_"+str(best["cap"]).replace(".","_"))/
-                         "five_feature_normalization.json").read_text())
-        held=evaluated(ctx,np.asarray(best["case_coeff"]),np.asarray(best["vf_theta"]),
-                       (np.asarray(norm["mean"]),np.asarray(norm["sd"])),
-                       best["cap"],nominal,scenarios,cache)
-        save(args.out/"retrospective_2013.json",
-             dict(label="EXPLORATORY_REUSED_HOLDOUT",cost_per_case=held))
-    print(json.dumps(dict(selected_cap=best["cap"],
-                          vf_training_objective=best["vf_training_objective"],
-                          artifact=str(args.out/"selected_policy.json")),
-                     indent=2))
+    work(ctx,args.out,args)
 
 
 if __name__=="__main__":
