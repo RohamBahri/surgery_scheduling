@@ -141,3 +141,40 @@ def test_gurobi_convex_cut_master_when_license_available():
         assert step["after"] <= step["before"]+1e-7 or not step["accepted"]
         if step["inner_status"] == "INNER_CONVERGED":
             assert step["inner_certified"]
+
+
+def test_gurobi_exact_planner_plus_vf_mm_if_licensed(tmp_path):
+    """Small but real planner -> scenario response -> outer MM integration."""
+    gp=pytest.importorskip("gurobipy")
+    try:
+        m=gp.Model("vf_integration_license")
+        m.Params.OutputFlag=0
+        x=m.addVar(lb=0.,ub=1.)
+        m.setObjective(x*x)
+        m.optimize()
+        m.dispose()
+    except gp.GurobiError as exc:
+        pytest.skip("No licensed small Gurobi model: "+str(exc))
+    from surgery.weekly_data import Week
+    from surgery.anchored_weekly_solver import solve_week
+    week=Week("TGH","2012-01-02",((0,"OR1"),(0,"OR2")),
+        np.array([101,102,103]),("S1",),np.zeros(3,dtype=int),
+        np.zeros(3,dtype=int),((0,1),),((0,),),
+        np.array([190.,180.,160.]),np.array([195.,175.,170.]),())
+    week.validate()
+    tested=[]
+    def true_planner(items,durations,j,k):
+        a=solve_week(week,np.asarray(durations),seconds=20,threads=1,tie=False)
+        assert a.complete and a.assignment is not None
+        tested.append((j,k))
+        return {"block":a.assignment}
+    ans=mm_vf([("block",week,np.arange(3))],week.booked,
+              np.array([[1.],[0.5],[-0.25]]),
+              np.array([12.,-4.,8.]),[Scenario(.8,30)],
+              np.array([[205.,170.,166.],[185.,190.,175.]]),
+              45.,root=tmp_path,iterations=2,pdca_steps=2,
+              max_cuts=20,backend="gurobi",solve_plans=true_planner,
+              canonical_nominal=(.8,30.))
+    assert tested
+    assert all(not r["accepted"] or r["majorizer_after"] < r["before"]+1e-8
+               for r in ans["history"])
