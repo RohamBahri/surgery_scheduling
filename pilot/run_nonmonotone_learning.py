@@ -328,33 +328,76 @@ def eval_2013(ctx,root,args,cache,selected):
 def report(ctx,root):
     file=root/"evaluation_2013.json"
     if not file.exists():
-        print("No evaluation yet. Training outputs in",root,flush=True)
+        print("Training saved; 2013 evaluation has not been requested.",flush=True)
         return
     records=json.loads(file.read_text())["entries"]
     by={}
-    for r in records:
-        by.setdefault(r["component"],{})[r["method"]]=r
+    for row in records:
+        by.setdefault(row["component"],{})[row["method"]]=row
     methods=("BOOKED","CASE","VF")
-    eligible=[x for x in by.values() if
-              all(m in x and x[m]["complete"] for m in methods)]
-    N=sum(x["BOOKED"]["cases"] for x in eligible)
-    summary=dict(status="EXPLORATORY_REUSED_HOLDOUT",
-                 common_certified_components=len(eligible),
-                 all_components=len(by),common_certified_cases=N)
-    for m in methods:
+    eligible=[entry for entry in by.values()
+              if all(m in entry and entry[m]["complete"] for m in methods)]
+    N=sum(entry["BOOKED"]["cases"] for entry in eligible)
+    output=dict(status="EXPLORATORY_REUSED_2013_HOLDOUT",
+                common_certified_components=len(eligible),
+                all_components=len(by),common_certified_cases=N)
+    for method in methods:
+        output[method+"_uncertified"]=[
+            key for key,entry in by.items()
+            if method not in entry or not entry[method]["complete"]]
         if N:
-            summary[m]=dict(cost_per_case=sum(x[m]["cost"] for x in eligible)/N,
-                            mae_per_case=sum(x[m]["mae"] for x in eligible)/N)
-        summary[m+"_uncertified"]=[
-            key for key,x in by.items() if m not in x or not x[m]["complete"]]
+            output[method]=dict(
+               cost_per_case=sum(entry[method]["cost"] for entry in eligible)/N,
+               mae_per_case=sum(entry[method]["mae"] for entry in eligible)/N)
     if N:
-        summary["VF_minus_CASE"]=summary["VF"]["cost_per_case"]-summary["CASE"]["cost_per_case"]
-        summary["CASE_minus_BOOKED"]=summary["CASE"]["cost_per_case"]-summary["BOOKED"]["cost_per_case"]
-        summary["VF_changed_assignment_fraction"]=sum(
-             x["CASE"]["assignment"]!=x["VF"]["assignment"]
-             for x in eligible)/len(eligible)
-    save(root/"summary.json",summary)
-    print(json.dumps({k:v for k,v in summary.items()
+        sites={}
+        weekdata={}
+        for entry in eligible:
+            location=entry["BOOKED"]["site"]
+            monday=entry["BOOKED"]["week"]
+            loc=sites.setdefault(location,dict(cases=0,costs={m:0. for m in methods}))
+            wk=weekdata.setdefault(monday,dict(cases=0,costs={m:0. for m in methods}))
+            cases=entry["BOOKED"]["cases"]
+            loc["cases"]+=cases;wk["cases"]+=cases
+            for name in methods:
+                value=entry[name]["cost"]
+                loc["costs"][name]+=value
+                wk["costs"][name]+=value
+        output["by_site"]={loc:dict(cases=x["cases"],
+                            cost_per_case={m:x["costs"][m]/x["cases"]
+                                           for m in methods})
+                            for loc,x in sites.items()}
+        output["changed_assignment_fraction"]=float(np.mean([
+            entry["CASE"]["assignment"]!=entry["VF"]["assignment"]
+            for entry in eligible]))
+        weeks=sorted(weekdata)
+        denom=np.array([weekdata[t]["cases"] for t in weeks],float)
+        rng=np.random.default_rng(20261022)
+        take=rng.integers(0,len(weeks),size=(10000,len(weeks)))
+        resamples=denom[take].sum(axis=1)
+        differences={}
+        for compared,reference in (("VF","CASE"),("CASE","BOOKED"),("VF","BOOKED")):
+            vector=np.array([weekdata[t]["costs"][compared]-
+                             weekdata[t]["costs"][reference] for t in weeks])
+            distribution=vector[take].sum(axis=1)/resamples
+            lo,hi=np.quantile(distribution,[.025,.975])
+            differences[compared+"_minus_"+reference]=dict(
+                  estimate=float(vector.sum()/N),
+                  calendar_week_bootstrap_95=[float(lo),float(hi)],
+                  better_weeks=int(np.sum(vector<0)),
+                  worse_weeks=int(np.sum(vector>0)),
+                  equal_weeks=int(np.sum(vector==0)),
+                  resamples=10000)
+        output["paired_cost_differences"]=differences
+    selected=root/"selected_policy.json"
+    if selected.exists():
+        policy=json.loads(selected.read_text())
+        output["training_common_library_certificates"]=policy.get(
+            "common_library_certificates")
+        output["training_raw_score_regimes"]=policy.get("raw_score_regimes")
+        output["vf_status"]=policy.get("vf_status")
+    save(root/"summary.json",output)
+    print(json.dumps({k:v for k,v in output.items()
                       if not k.endswith("_uncertified")},indent=2),flush=True)
 
 
