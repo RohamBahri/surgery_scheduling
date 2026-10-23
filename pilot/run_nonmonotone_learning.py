@@ -206,6 +206,10 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
     path=folder/"case_policy.json"
     if path.exists():
         saved=json.loads(path.read_text())
+        if saved.get("link","nonmonotone")!=response_map.link:
+            raise ValueError("CASE checkpoint was fit with another response link")
+        if not np.isclose(saved.get("lambda_scale",1.),lambda_scale):
+            raise ValueError("CASE checkpoint has a different L1 penalty scale")
         print("CASE: reusing fitted coefficients from",path,
               "objective",saved.get("initial_objective"),"->",
               saved.get("objective"),flush=True)
@@ -248,7 +252,7 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
             objective=float(result["objective"]),lambda_case=float(lam),
             lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
             alpha=.8,h=30.,cap=response_map.cap,
-            lambda_scale=lambda_scale))
+            link=response_map.link,lambda_scale=lambda_scale))
     record_stage_time(folder,"case",time.perf_counter()-started)
     return w
 
