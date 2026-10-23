@@ -113,6 +113,51 @@ week-clustered paired cost bootstrap intervals and better/worse weeks).
 No response banks, alternative methods, response-regime breakdowns,
 cross-method library certificates, or extra termination gates.
 
+## Resume completed CASE and see live progress
+
+If CASE already finished successfully, with an objective reduction from
+383.598 to 376.158 in 15 accepted steps, DO NOT repeat CASE.
+Pull the new branch only after the running Python process has exited.
+Use the SAME output folder containing case_policy.json. Code-only speed
+and reporting revisions record their source history and keep its fitted
+coefficients; scientific parameter changes still require a new directory.
+
+    git fetch origin
+    git switch feature/nonmonotone-case-vf-mm
+    git pull --ff-only origin feature/nonmonotone-case-vf-mm
+    mkdir -p artifacts/case_vf_exact_qp_v1
+    set -o pipefail
+    caffeinate -i python -u pilot/run_nonmonotone_learning.py \
+      --stage vf \
+      --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+      --out artifacts/case_vf_exact_qp_v1 \
+      --cores 15 --plan-seconds 180 \
+      --case-steps 200 --vf-outers 30 --vf-pdca-steps 50 \
+      --cuts 80 --backend gurobi \
+      2>&1 | tee -a artifacts/case_vf_exact_qp_v1/run.log
+
+Python -u makes progress unbuffered; tee saves stdout and stderr.
+Future fresh CASE fits print and persist every pDCA step's objective,
+accepted status, solver status and elapsed seconds, in case_progress.jsonl.
+Planner stages print completed component counts every 100 new solves.
+VF logs each outer step's before and after objectives, Delta, epsilon,
+library size and elapsed wall seconds. Completed stages record time
+in stage_wall_times.json. Wall times for the CASE run completed before
+these updates cannot be recovered retroactively.
+
+Computational optimizations: the CASE QP uses one raw-score auxiliary
+per case, reducing repeated feature-row nonzeros; VF scores previously
+validated library schedules using NumPy room-load bincount operations.
+The training objective and the latest SHARED/VF planner are unchanged.
+
+New outputs: cases_train.csv and cases_test.csv preserve case ID,
+booked and actual duration, CASE/VF raw score, minimum displayed advice,
+reviewed duration, and all five standardized VF features. Evaluation
+contains idle and overtime minutes per component and arm; summary gives
+these per case. There is no behavioral scenario or robustness sweep.
+
+The review's wall-time estimates are not measured guarantees.
+
 ## Verification scope
 
 Small licensed-QP unit tests check the exact CASE epigraph formulation,
