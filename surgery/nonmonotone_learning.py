@@ -600,6 +600,12 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                    optimizer=optimizer,status="RUNNING")
     if state.get('optimizer',optimizer)!=optimizer:
         raise ValueError('VF checkpoint optimizer mismatch')
+    if state.get("status") in ("NO_CONFIRMED_IMPROVEMENT",
+                               "RELATIVE_IMPROVEMENT",
+                               "OUTER_ITERATION_CAP"):
+        print(f"VF_{optimizer.upper()}: reusing completed checkpoint "
+              f"({len(state['history'])} iterations)",flush=True)
+        return state
     if not all(libraries.get(key) for key,_,_ in items):
         raise ValueError("Every component requires a feasible initial assignment")
     run_started=time.perf_counter()
