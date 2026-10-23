@@ -441,3 +441,68 @@ def test_single_command_runner_cli_and_method_roster():
     assert run.returncode==0,run.stderr
     assert "--shared-rounds" in run.stdout
     assert "--plan-seconds" in run.stdout
+
+
+
+def test_four_method_train_to_evaluation_smoke_with_stubbed_optimizers(
+        tmp_path,monkeypatch):
+    """Check the single-run wiring without an unrestricted Gurobi license."""
+    import json
+    from pilot import run_nominal_four_methods as runner
+    from surgery import nonmonotone_learning
+    c=toy_week()
+    items=[("toy",c,np.arange(c.n))]
+    data=dict(X=np.array([[1.,-1.],[1.,0.],[1.,1.]]),
+              booked=c.booked.copy(),actual=c.actual.copy(),
+              case_id=c.case_ids.copy())
+    ctx=dict(train=items,eval=items,fit=data,held=data,
+             H=np.ones((c.n,5)),H_eval=np.ones((c.n,5)))
+    class FakeCache:
+        def solve(self,items,d,tag,tie=False):
+            return {key:dict(assignment=[0]*week.n,
+                             complete=True,status="OPTIMAL",bound=0.)
+                    for key,week,rows in items}
+    def case_fit(ctx,items,behavior,root,*args,**kwargs):
+        (root/"case_policy.json").write_text(json.dumps(
+            dict(lambda_case=.2,objective=1.,initial_objective=1.2)))
+        return np.array([0.,1.])
+    def features(ctx,items,case_raw,behavior,cache,stage,scaler=None):
+        H=np.column_stack([np.ones(c.n),
+             np.arange(c.n),np.ones(c.n)*.5,np.zeros(c.n),np.ones(c.n)])
+        return H,(np.zeros(5),np.ones(5)),FakeCache().solve(items,None,"draft")
+    def vf(items,booked,H,case_raw,behavior,actual,*,root,
+           initial_libraries,optimizer,**kw):
+        assert optimizer in ("pdca","directions")
+        (root/"vf_library_progress.json").parent.mkdir(parents=True,exist_ok=True)
+        (root/"vf_library_progress.json").write_text("{}")
+        return dict(theta=[.5 if optimizer=="pdca" else -.5,0.,0.,0.,0.],
+             status="RELATIVE_IMPROVEMENT",
+             history=[dict(optimizer=optimizer,accepted=True)],
+             libraries=initial_libraries,optimizer=optimizer)
+    def shared(*args,root,**kwargs):
+        root.mkdir(exist_ok=True,parents=True)
+        (root/"shared_progress.json").write_text("{}")
+        return dict(theta=[0.,0.,0.,0.,0.],
+                    score=22.,status="COMPLETE")
+    monkeypatch.setattr(runner,"case_fit",case_fit)
+    monkeypatch.setattr(runner,"five_features",features)
+    monkeypatch.setattr(runner,"mm_vf",vf)
+    monkeypatch.setattr(runner,"train_shared",shared)
+    monkeypatch.setattr(runner,"train_lambda",
+                        lambda x,n,**kw:.15)
+    from types import SimpleNamespace
+    args=SimpleNamespace(case_steps=4,cuts=10,vf_outers=2,
+                         vf_pdca_steps=3,shared_rounds=2)
+    chosen=runner.train(ctx,args,tmp_path,FakeCache())
+    assert set(chosen["policies"])=={
+        "CASE","VF_PDCA","VF_DIRECTIONS","SHARED"}
+    runner.evaluate(ctx,args,tmp_path,FakeCache(),chosen)
+    out=json.loads((tmp_path/"summary.json").read_text())
+    assert out["common_certified_components"]==1
+    assert len(json.loads((tmp_path/"evaluation_2013.json").read_text())["entries"])==5
+    import csv
+    with (tmp_path/"cases_test.csv").open(newline="") as handle:
+        case_rows=list(csv.DictReader(handle))
+    assert len(case_rows)==3
+    assert "VF_DIRECTIONS_reviewed" in case_rows[0]
+    assert "SHARED_display" in case_rows[0]
