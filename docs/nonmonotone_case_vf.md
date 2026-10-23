@@ -91,6 +91,27 @@ objective-selection policies, comparison results, planner, or cohort.
   it does NOT reuse the earlier fitted CASE coefficients or congestion
   features as final policies.
 
+## If the old context.pkl is unavailable
+
+Generate ONLY the prerequisite context in a separate artifact directory.
+Do not rerun the entire old comparison and do not overwrite frozen
+objective-selection artifacts:
+
+    python pilot/run_objective_selection.py \
+      --stage setup \
+      --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx \
+      --out artifacts/nonmonotone_context \
+      --cores 10 --setup-solve-seconds 180
+
+Then use:
+
+    --context artifacts/nonmonotone_context/objective_selection_2013/context.pkl
+
+This preliminary setup also uses the original CASE machinery to create
+training-only historical residual donors. The NEW CASE is fitted afterward
+by the non-monotone pDCA implementation. Keep the generated context's
+supporting directories; do not move or rename context.pkl alone.
+
 ## Get the branch and run tests
 
     git fetch origin
