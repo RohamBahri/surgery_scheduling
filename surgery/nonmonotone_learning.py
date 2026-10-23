@@ -459,13 +459,17 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
     upper=np.full(len(x),radius)
     if np.any(x<lower) or np.any(x>upper):
         raise ValueError("Initial coefficients outside their bounds")
-    solver=(CaseConvexQP(objective,lower,upper)
-            if objective.mode=="CASE" and backend=="gurobi" else None)
     history=[]
     started=time.perf_counter()
     reason="ITERATION_CAP"
     if progress_label:
-        print(f"{progress_label} pDCA: started (maximum {outer} steps)",flush=True)
+        print(f"{progress_label} pDCA: setting up optimizer "
+              f"(maximum {outer} steps)",flush=True)
+    solver=(CaseConvexQP(objective,lower,upper)
+            if objective.mode=="CASE" and backend=="gurobi" else None)
+    if progress_label:
+        print(f"{progress_label} pDCA: optimizer ready after "
+              f"{time.perf_counter()-started:.1f}s",flush=True)
     try:
         for k in range(outer):
             g,h,_,hg=objective.parts(x)
