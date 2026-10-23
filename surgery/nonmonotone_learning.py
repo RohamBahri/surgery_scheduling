@@ -442,7 +442,8 @@ def _solve_qp_cuts(objective, center, h_gradient, lower, upper, prox,
 
 
 def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
-         max_cuts=60, tolerance=1e-5, backend="gurobi"):
+         max_cuts=60, tolerance=1e-5, backend="gurobi",
+         progress_label=None, progress_path=None):
     """Proximal DCA with exact CASE QP and verified objective descent.
 
     CASE/Gurobi: reuse an exact convex epigraph QP, not an approximate
@@ -461,7 +462,10 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
     solver=(CaseConvexQP(objective,lower,upper)
             if objective.mode=="CASE" and backend=="gurobi" else None)
     history=[]
+    started=time.perf_counter()
     reason="ITERATION_CAP"
+    if progress_label:
+        print(f"{progress_label} pDCA: started (maximum {outer} steps)",flush=True)
     try:
         for k in range(outer):
             g,h,_,hg=objective.parts(x)
@@ -484,6 +488,20 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
                 inner_certified=inner["certified"],
                 inner_gap=inner.get("gap"),
                 cuts=len(inner["trace"])))
+            row=history[-1]
+            row["elapsed_seconds"]=round(time.perf_counter()-started,3)
+            if progress_label:
+                print(f"{progress_label} pDCA {k+1}/{outer}: "
+                      f"objective {old:.6f} -> {value:.6f}; "
+                      f"{'accepted' if improved else 'not accepted'}; "
+                      f"{inner['status']}; "
+                      f"elapsed {row['elapsed_seconds']:.1f}s",flush=True)
+            if progress_path is not None:
+                path=Path(progress_path)
+                path.parent.mkdir(parents=True,exist_ok=True)
+                with path.open("a") as stream:
+                    stream.write(json.dumps(dict(**row,
+                        weights=(trial if improved else x).tolist()))+"\n")
             if not improved:
                 reason="NO_VERIFIED_DESCENT"
                 break
@@ -528,7 +546,11 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                    status="RUNNING")
     if not all(libraries.get(key) for key,_,_ in items):
         raise ValueError("Every component requires a feasible initial assignment")
+    run_started=time.perf_counter()
     for outer in range(len(state["history"]),iterations):
+        outer_started=time.perf_counter()
+        print(f"VF MM {outer+1}/{iterations}: obtaining planner schedules "
+              f"for {len(items)} components",flush=True)
         d=np.asarray(booked,float)+response_map.correction(case_raw+H@theta)
         candidates=solve_plans(items,d,outer)
         gaps=[]
@@ -570,6 +592,14 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
         if accepted:
             theta=trial
             state["theta"]=theta.tolist()
+        row=state["history"][-1]
+        row["elapsed_seconds"]=round(time.perf_counter()-outer_started,3)
+        print(f"VF MM {outer+1}/{iterations}: "
+              f"objective {before:.6f} -> {after:.6f}; "
+              f"delta={improvement:.6f}, epsilon={row['epsilon']:.6f}, "
+              f"accepted={accepted}; schedules={row['added_schedules']}; "
+              f"outer elapsed={row['elapsed_seconds']:.1f}s; "
+              f"total elapsed={time.perf_counter()-run_started:.1f}s",flush=True)
         state["libraries"]=libraries
         state["status"]="RUNNING"
         _save(status,state)
