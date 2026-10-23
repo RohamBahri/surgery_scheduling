@@ -7,6 +7,7 @@ Optimization retains the full adoption / attenuation / rejection response.
 """
 from __future__ import annotations
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -229,15 +230,30 @@ class DCObjective:
         return float(G-H)
 
 
+def planned_cost_fast(week, assignment, durations):
+    """Vectorized primary cost for a previously validated assignment.
+
+    No surgeon-day diagnostics or eligibility loops on each re-score:
+    loads() validates once when a schedule enters the library.
+    Turnover and unused roster block idle are both included.
+    """
+    z=np.asarray(assignment,dtype=int)
+    d=np.asarray(durations,dtype=float)
+    counts=np.bincount(z,minlength=week.k)
+    room_load=(np.bincount(z,weights=d+TURNOVER,minlength=week.k)
+               -TURNOVER*(counts>0))
+    return float((C_OVER*np.maximum(room_load-CAPACITY,0.)
+                  +C_UNDER*np.maximum(CAPACITY-room_load,0.)).sum())
+
+
 def library_value(items,libraries,d,actual,lam,w):
     """True finite-library envelope, with full unused-roster idle cost."""
-    from surgery.weekly_planner import evaluate
     total=0.
     for key,c,rows in items:
         if not libraries.get(key):
             raise ValueError("Every component needs a feasible schedule")
         segment=d[rows]
-        best=min(evaluate(c,z,segment)["cost"] for z in libraries[key])
+        best=min(planned_cost_fast(c,z,segment) for z in libraries[key])
         e=c.actual-segment
         total+=best+(C_OVER*np.maximum(e,0.)+
                      C_UNDER*np.maximum(-e,0.)).sum()
@@ -246,10 +262,9 @@ def library_value(items,libraries,d,actual,lam,w):
 
 def choose_library_schedules(items,libraries,d):
     """Touch the current LIBRARY surrogate, not a guessed global optimum."""
-    from surgery.weekly_planner import evaluate
     selected={}
     for key,c,rows in items:
-        costs=[evaluate(c,z,d[rows])["cost"] for z in libraries[key]]
+        costs=[planned_cost_fast(c,z,d[rows]) for z in libraries[key]]
         pos=min(range(len(costs)),key=lambda j:(costs[j],tuple(libraries[key][j])))
         selected[key]=libraries[key][pos]
     return selected
@@ -286,7 +301,9 @@ class CaseConvexQP:
         self.model=m
         n,p=objective.n,objective.p
         self.w=m.addMVar(p,lb=lower,ub=upper,name="weights")
-        raw=sparse.csr_matrix(objective.X) @ self.w + objective.base
+        raw=m.addMVar(n,lb=-GRB.INFINITY,name="raw_case_score")
+        m.addConstr(raw == sparse.csr_matrix(objective.X) @ self.w + objective.base,
+                    name="raw_from_features")
         P=0. * raw + objective.map.offset
         N=0. * raw
         # Sparse per-hinge embedding avoids artificial constraints on absent
@@ -525,8 +542,7 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                     loads(c,z,d[rows])
                     if z not in libraries[key]:
                         libraries[key].append(z)
-            from surgery.weekly_planner import evaluate
-            value=min(evaluate(c,z,d[rows])["cost"] for z in libraries[key])
+            value=min(planned_cost_fast(c,z,d[rows]) for z in libraries[key])
             bound=candidate.get("bound") if isinstance(candidate,dict) else None
             gaps.append(max(0.,value-max(0.,float(bound))) if bound is not None else value)
         selected=choose_library_schedules(items,libraries,d)
