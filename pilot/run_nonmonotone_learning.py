@@ -7,6 +7,8 @@ No robustness sweep, donor simulation, synthetic profiles, or old search.
 from __future__ import annotations
 
 import argparse
+import csv
+import time
 import hashlib
 import json
 import os
@@ -39,6 +41,44 @@ def save(path,obj):
 
 def sha(contents):
     return hashlib.sha256(contents).hexdigest()
+
+
+def record_stage_time(root,stage,elapsed):
+    path=Path(root)/"stage_wall_times.json"
+    values=json.loads(path.read_text()) if path.exists() else {}
+    values[stage]=float(round(elapsed,3))
+    save(path,values)
+    print(f"{stage}: {elapsed:.1f} wall seconds",flush=True)
+
+
+def save_case_table(path,data,case_raw,vf_raw,features,response_map):
+    """Per-case replay file; does not run extra optimizer calls."""
+    case_raw=np.asarray(case_raw,float)
+    vf_raw=np.asarray(vf_raw,float)
+    case_reviewed=response_map.reviewed(case_raw)
+    vf_reviewed=response_map.reviewed(vf_raw)
+    case_display=response_map.display(case_raw)
+    vf_display=response_map.display(vf_raw)
+    names=["surgeon_spread","procedure_spread","draft_congestion",
+           "surgeon_spread_x_congestion","procedure_spread_x_congestion"]
+    fields=["case_id","booked","actual","case_raw","case_display",
+            "case_reviewed","vf_raw","vf_display","vf_reviewed"] + [
+            "feature_"+v+"_standardized" for v in names]
+    path=Path(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(".tmp")
+    with tmp.open("w",newline="") as handle:
+        writer=csv.writer(handle)
+        writer.writerow(fields)
+        for i in range(len(case_raw)):
+            writer.writerow([int(data["case_id"][i]),
+                             float(data["booked"][i]),float(data["actual"][i]),
+                             float(case_raw[i]),float(case_display[i]),
+                             float(case_reviewed[i]),float(vf_raw[i]),
+                             float(vf_display[i]),float(vf_reviewed[i]),
+                             *np.asarray(features[i],float).tolist()])
+    tmp.replace(path)
+    print(f"Saved {len(case_raw)} per-case records: {path}",flush=True)
 
 
 def _plan_job(job):
@@ -87,11 +127,19 @@ class PlannerCache:
                     continue
             pending.append(((key,c,d,self.seconds,tie),path,signature))
         print(tag,":",len(results),"cached,",len(pending),"to solve",flush=True)
+        started=time.perf_counter()
+        done=0
+        def show_progress():
+            if done % 100==0 or done==len(pending):
+                print(f"{tag}: {done}/{len(pending)} new plans "
+                      f"({time.perf_counter()-started:.1f}s)",flush=True)
         if pending and self.cores==1:
             for job,path,sig in pending:
                 key,entry=_plan_job(job)
                 save(path,dict(signature=sig,result=entry))
                 results[key]=entry
+                done+=1
+                show_progress()
         elif pending:
             with ProcessPoolExecutor(max_workers=self.cores,
                     mp_context=get_context("spawn")) as pool:
@@ -102,6 +150,8 @@ class PlannerCache:
                     path,sig=futures[future]
                     save(path,dict(signature=sig,result=entry))
                     results[key]=entry
+                    done+=1
+                    show_progress()
         coverage=sum(v["complete"] for v in results.values())
         print(tag,": certified",coverage,"/",len(items),flush=True)
         return results
@@ -155,6 +205,7 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     path=folder/"case_policy.json"
     if path.exists():
         return np.asarray(json.loads(path.read_text())["weights"],float)
+    started=time.perf_counter()
     data=ctx["fit"]
     X=np.asarray(data["X"],float)
     ncomp=len(items)
@@ -163,8 +214,12 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     objective=DCObjective(data["booked"],X,np.zeros(len(X)),response_map,
            mode="CASE",actual=data["actual"],components=ncomp,
            lam=lam,penalize=penalty)
+    print("CASE: fitting LAD initializer",flush=True)
+    lad_started=time.perf_counter()
     start,lad=lad_start(X,np.asarray(data["actual"])-data["booked"],
                         lam,ncomp,radius)
+    print(f"CASE: LAD status {lad['status']}; "
+          f"{time.perf_counter()-lad_started:.1f}s",flush=True)
     if start is None:
         # No unrelated, inverse-link CASE policy is used as a substitute.
         # The explicit zero fallback keeps the experiment running and is
@@ -174,7 +229,9 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
         start=np.zeros(X.shape[1])
     initial=objective.value(start)
     result=pdca(objective,start,radius=radius,outer=steps,
-                max_cuts=cuts,backend=backend)
+                max_cuts=cuts,backend=backend,
+                progress_label="CASE",
+                progress_path=folder/"case_progress.jsonl")
     w=np.asarray(result["weights"],float)
     print("CASE pDCA: initial",round(initial,6),
           "final",round(float(result["objective"]),6),
@@ -184,8 +241,8 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
             objective=float(result["objective"]),lambda_case=float(lam),
             lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
             alpha=.8,h=30.,cap=response_map.cap))
+    record_stage_time(folder,"case",time.perf_counter()-started)
     return w
-
 
 
 def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
