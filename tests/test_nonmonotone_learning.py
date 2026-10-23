@@ -263,3 +263,35 @@ def test_vf_cut_cap_does_not_stop_accepted_progress(monkeypatch):
     assert len(ans["iterations"])==3
     assert all(row["accepted"] for row in ans["iterations"])
     assert ans["objective"]<1.
+
+
+
+def test_case_exact_qp_improves_with_70_shared_features():
+    """Regression for high-dimensional CASE failing at the first bundle cut cap."""
+    gp=pytest.importorskip("gurobipy")
+    try:
+        probe=gp.Model()
+        probe.Params.OutputFlag=0
+        z=probe.addVar(lb=0.,ub=1.)
+        probe.setObjective(z*z)
+        probe.optimize()
+        probe.dispose()
+    except gp.GurobiError as exc:
+        pytest.skip(str(exc))
+    rng=np.random.default_rng(2061)
+    n,p=120,70
+    X=rng.normal(size=(n,p))
+    X[:,0]=1.
+    booked=np.full(n,150.)
+    actual=booked+np.where(X[:,1]+.7*X[:,2]>0.,18.,-15.)
+    response_map=ResponseDC(booked,.8,30.,180.,1.)
+    obj=DCObjective(booked,X,np.zeros(n),response_map,mode="CASE",
+                    actual=actual,components=12,lam=.002,
+                    penalize=np.r_[0.,np.ones(p-1)])
+    start=np.zeros(p)
+    result=pdca(obj,start,radius=40.,outer=4,backend="gurobi")
+    assert result["iterations"]
+    assert all(r["inner_status"].startswith("CASE_QP_")
+               for r in result["iterations"])
+    assert result["objective"]<obj.value(start)-1e-3
+    assert any(r["accepted"] for r in result["iterations"])
