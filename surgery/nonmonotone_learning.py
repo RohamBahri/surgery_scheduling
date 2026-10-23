@@ -522,6 +522,54 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 
 
 
+def vf_directional_refine(items, libraries, booked, H, case_raw,
+                          response_map, actual, lam, reference, radius,
+                          *, steps=(16., 8., 4., 2., 1.)):
+    """Bounded multidirectional refinement of the SAME finite-library VF loss.
+
+    Pairs and coordinate directions are searched from a pDCA-produced
+    candidate. This is NOT a second VF fit or a regularization variant.
+    No approximate planner outputs decide acceptance: actual library
+    objective values are compared with the same full training data.
+    """
+    x=np.asarray(reference,float)
+    n=len(x)
+    basis=np.eye(n)
+    directions=[sgn*basis[j] for j in range(n) for sgn in (-1.,1.)]
+    # Include non-axis motion to cross the nonmonotone response plateaus.
+    for j in range(1,n):
+        for sign in (-1.,1.):
+            vec=basis[2 if n>2 else 0]+sign*basis[j]
+            norm=np.max(np.abs(vec))
+            if norm:
+                directions.append(vec/norm)
+                directions.append(-vec/norm)
+    # The pDCA search direction can also be productive after crossing a kink.
+    if np.linalg.norm(x)>1e-8:
+        v=x/max(1.,np.max(np.abs(x)))
+        directions.extend([v,-v])
+    d0=booked+response_map.correction(case_raw+H@x)
+    best=library_value(items,libraries,d0,actual,lam,x)
+    chosen=x.copy()
+    seen={tuple(np.round(x,9))}
+    tried=0
+    for step in steps:
+        for v in directions:
+            candidate=np.clip(x+step*v,-radius,radius)
+            key=tuple(np.round(candidate,9))
+            if key in seen:
+                continue
+            seen.add(key)
+            d=booked+response_map.correction(case_raw+H@candidate)
+            score=library_value(items,libraries,d,actual,lam,candidate)
+            tried+=1
+            if score<best-1e-8*max(1.,abs(best)):
+                best=score
+                chosen=candidate.copy()
+    return chosen,dict(objective=float(best),evaluated=tried,
+                       improved=bool(np.linalg.norm(chosen-x)>1e-10))
+
+
 def mm_vf(items, booked, H, case_raw, response_map, actual, *,
           root, lam, initial_libraries, iterations=30, radius=64.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
@@ -581,8 +629,22 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
         fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
                     max_cuts=max_cuts,backend=backend)
         trial=np.asarray(fitted["weights"],float)
-        new_d=booked+response_map.correction(case_raw+H@trial)
-        after=library_value(items,libraries,new_d,actual,lam,trial)
+        # ONE VF method: pDCA plus a multi-direction scan on its
+        # exact finite-library objective, never a second VF variant.
+        pdca_d=booked+response_map.correction(case_raw+H@trial)
+        pdca_value=library_value(items,libraries,pdca_d,actual,lam,trial)
+        scan_seed=trial if pdca_value<=before else theta
+        directed,direction_log=vf_directional_refine(
+                items,libraries,booked,H,case_raw,response_map,actual,lam,
+                scan_seed,radius)
+        directional_d=booked+response_map.correction(case_raw+H@directed)
+        directional_value=library_value(
+                items,libraries,directional_d,actual,lam,directed)
+        if directional_value<pdca_value:
+            trial=directed
+            after=directional_value
+        else:
+            after=pdca_value
         accepted=bool(after<before-1e-8*max(1.,abs(before)))
         improvement=max(0.,before-after) if accepted else 0.
         state["history"].append(dict(outer=outer+1,
@@ -592,6 +654,11 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                       accepted=accepted,
                       added_schedules=sum(len(z) for z in libraries.values()),
                       pdca_status=fitted["status"],
+                      pdca_objective=float(pdca_value),
+                      directional_objective=float(directional_value),
+                      directions_checked=direction_log["evaluated"],
+                      selected_update="directions" if
+                          directional_value<pdca_value else "pdca",
                       inner=fitted["iterations"]))
         if accepted:
             theta=trial
