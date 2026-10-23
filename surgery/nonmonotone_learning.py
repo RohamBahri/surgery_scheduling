@@ -527,8 +527,8 @@ def vf_directional_refine(items, libraries, booked, H, case_raw,
                           *, steps=(16., 8., 4., 2., 1.)):
     """Bounded multidirectional refinement of the SAME finite-library VF loss.
 
-    Pairs and coordinate directions are searched from a pDCA-produced
-    candidate. This is NOT a second VF fit or a regularization variant.
+    Pairs and coordinate directions are searched independently of pDCA.
+    This is the VF_DIRECTIONS optimizer, distinct from VF_PDCA.
     No approximate planner outputs decide acceptance: actual library
     objective values are compared with the same full training data.
     """
@@ -544,7 +544,7 @@ def vf_directional_refine(items, libraries, booked, H, case_raw,
             if norm:
                 directions.append(vec/norm)
                 directions.append(-vec/norm)
-    # The pDCA search direction can also be productive after crossing a kink.
+    # Also search radial steps along the current multidirectional iterate.
     if np.linalg.norm(x)>1e-8:
         v=x/max(1.,np.max(np.abs(x)))
         directions.extend([v,-v])
@@ -573,7 +573,7 @@ def vf_directional_refine(items, libraries, booked, H, case_raw,
 def mm_vf(items, booked, H, case_raw, response_map, actual, *,
           root, lam, initial_libraries, iterations=30, radius=64.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
-          solve_plans=None):
+          solve_plans=None, optimizer="pdca"):
     """Finite-library majorization followed by full-response pDCA.
 
     Every planner incumbent is FEASIBLE; certification is not required to
@@ -581,6 +581,8 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
     Every accepted update decreases the EXACT finite-library surrogate.
     Library enlargement can only tighten that surrogate.
     """
+    if optimizer not in ("pdca","directions"):
+        raise ValueError("VF optimizer must be 'pdca' or 'directions'")
     if solve_plans is None:
         raise ValueError("Planner callback required")
     root=Path(root)
@@ -595,13 +597,15 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
         libraries={key:[list(map(int,z)) for z in initial_libraries[key]]
                    for key,_,_ in items}
         state=dict(theta=theta.tolist(),history=[],libraries=libraries,
-                   status="RUNNING")
+                   optimizer=optimizer,status="RUNNING")
+    if state.get('optimizer',optimizer)!=optimizer:
+        raise ValueError('VF checkpoint optimizer mismatch')
     if not all(libraries.get(key) for key,_,_ in items):
         raise ValueError("Every component requires a feasible initial assignment")
     run_started=time.perf_counter()
     for outer in range(len(state["history"]),iterations):
         outer_started=time.perf_counter()
-        print(f"VF MM {outer+1}/{iterations}: obtaining planner schedules "
+        print(f"VF_{optimizer.upper()} MM {outer+1}/{iterations}: obtaining planner schedules "
               f"for {len(items)} components",flush=True)
         d=np.asarray(booked,float)+response_map.correction(case_raw+H@theta)
         candidates=solve_plans(items,d,outer)
@@ -626,25 +630,20 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
         before=library_value(items,libraries,d,actual,lam,theta)
         if abs(before-objective.value(theta))>1e-5*max(1.,abs(before)):
             raise AssertionError("MM touching identity failed: objective normalization/rooms")
-        fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
-                    max_cuts=max_cuts,backend=backend)
-        trial=np.asarray(fitted["weights"],float)
-        # ONE VF method: pDCA plus a multi-direction scan on its
-        # exact finite-library objective, never a second VF variant.
-        pdca_d=booked+response_map.correction(case_raw+H@trial)
-        pdca_value=library_value(items,libraries,pdca_d,actual,lam,trial)
-        scan_seed=trial if pdca_value<=before else theta
-        directed,direction_log=vf_directional_refine(
-                items,libraries,booked,H,case_raw,response_map,actual,lam,
-                scan_seed,radius)
-        directional_d=booked+response_map.correction(case_raw+H@directed)
-        directional_value=library_value(
-                items,libraries,directional_d,actual,lam,directed)
-        if directional_value<pdca_value:
-            trial=directed
-            after=directional_value
+        if optimizer=="pdca":
+            fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
+                        max_cuts=max_cuts,tolerance=1e-7,backend=backend)
+            trial=np.asarray(fitted["weights"],float)
+            search=dict(pdca_status=fitted["status"],
+                        inner=fitted["iterations"])
         else:
-            after=pdca_value
+            trial,dlog=vf_directional_refine(
+                items,libraries,booked,H,case_raw,response_map,actual,
+                lam,theta,radius)
+            search=dict(directions_checked=dlog["evaluated"],
+                        direction_improved=dlog["improved"])
+        new_d=booked+response_map.correction(case_raw+H@trial)
+        after=library_value(items,libraries,new_d,actual,lam,trial)
         accepted=bool(after<before-1e-8*max(1.,abs(before)))
         improvement=max(0.,before-after) if accepted else 0.
         state["history"].append(dict(outer=outer+1,
@@ -653,19 +652,13 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                       epsilon=float(np.mean(gaps)),
                       accepted=accepted,
                       added_schedules=sum(len(z) for z in libraries.values()),
-                      pdca_status=fitted["status"],
-                      pdca_objective=float(pdca_value),
-                      directional_objective=float(directional_value),
-                      directions_checked=direction_log["evaluated"],
-                      selected_update="directions" if
-                          directional_value<pdca_value else "pdca",
-                      inner=fitted["iterations"]))
+                      search=search))
         if accepted:
             theta=trial
             state["theta"]=theta.tolist()
         row=state["history"][-1]
         row["elapsed_seconds"]=round(time.perf_counter()-outer_started,3)
-        print(f"VF MM {outer+1}/{iterations}: "
+        print(f"VF_{optimizer.upper()} MM {outer+1}/{iterations}: "
               f"objective {before:.6f} -> {after:.6f}; "
               f"delta={improvement:.6f}, epsilon={row['epsilon']:.6f}, "
               f"accepted={accepted}; schedules={row['added_schedules']}; "
