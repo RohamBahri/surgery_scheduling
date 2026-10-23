@@ -206,8 +206,10 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
     path=folder/"case_policy.json"
     if path.exists():
         saved=json.loads(path.read_text())
-        if saved.get("link","nonmonotone")!=response_map.link:
-            raise ValueError("CASE checkpoint was fit with another response link")
+        if (saved.get("link","nonmonotone")!=response_map.link or
+                not np.isclose(saved.get("alpha",.8),response_map.alpha) or
+                not np.isclose(saved.get("h",30.),response_map.h)):
+            raise ValueError("CASE checkpoint fitted for another response scenario")
         if not np.isclose(saved.get("lambda_scale",1.),lambda_scale):
             raise ValueError("CASE checkpoint has a different L1 penalty scale")
         print("CASE: reusing fitted coefficients from",path,
@@ -251,7 +253,7 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
     save(path,dict(weights=w.tolist(),initial_objective=float(initial),
             objective=float(result["objective"]),lambda_case=float(lam),
             lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
-            alpha=.8,h=30.,cap=response_map.cap,
+            alpha=response_map.alpha,h=response_map.h,cap=response_map.cap,
             link=response_map.link,lambda_scale=lambda_scale))
     record_stage_time(folder,"case",time.perf_counter()-started)
     return w
@@ -259,11 +261,11 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
 
 def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
     """ONE frozen CASE draft per physical-room component, hash seed zero."""
-    data=ctx["fit"] if stage=="train" else ctx["held"]
+    data=ctx["fit"] if stage.startswith("train") else ctx["held"]
     n=len(data["booked"])
     baseline=response_map.reviewed(case_raw)
     draft=cache.solve(items,baseline,stage+"_case_draft",tie=True)
-    history=np.asarray(ctx["H"] if stage=="train" else ctx["H_eval"],float)
+    history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
     # The first two columns retain the original surgeon/procedure history
     # scores; old CASE congestion columns are explicitly discarded.
     s,q=history[:,0],history[:,1]
