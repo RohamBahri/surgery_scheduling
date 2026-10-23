@@ -176,6 +176,10 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     result=pdca(objective,start,radius=radius,outer=steps,
                 max_cuts=cuts,backend=backend)
     w=np.asarray(result["weights"],float)
+    print("CASE pDCA: initial",round(initial,6),
+          "final",round(float(result["objective"]),6),
+          "accepted steps",sum(row["accepted"] for row in result["iterations"]),
+          "status",result["status"],flush=True)
     save(path,dict(weights=w.tolist(),initial_objective=float(initial),
             objective=float(result["objective"]),lambda_case=float(lam),
             lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
@@ -367,7 +371,7 @@ def main():
     ap.add_argument("--vf-radius",type=float,default=64.)
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
-    ap.add_argument("--backend",choices=("gurobi","scipy"),default="gurobi")
+    ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
     args=ap.parse_args()
     if not args.context.exists():
         raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
