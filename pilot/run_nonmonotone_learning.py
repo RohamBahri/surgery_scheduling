@@ -204,7 +204,11 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     """One LAD initialization, followed by exact-epigraph CASE pDCA."""
     path=folder/"case_policy.json"
     if path.exists():
-        return np.asarray(json.loads(path.read_text())["weights"],float)
+        saved=json.loads(path.read_text())
+        print("CASE: reusing fitted coefficients from",path,
+              "objective",saved.get("initial_objective"),"->",
+              saved.get("objective"),flush=True)
+        return np.asarray(saved["weights"],float)
     started=time.perf_counter()
     data=ctx["fit"]
     X=np.asarray(data["X"],float)
