@@ -259,11 +259,11 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
 
 def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
     """ONE frozen CASE draft per physical-room component, hash seed zero."""
-    data=ctx["fit"] if stage=="train" else ctx["held"]
+    data=ctx["fit"] if stage.startswith("train") else ctx["held"]
     n=len(data["booked"])
     baseline=response_map.reviewed(case_raw)
     draft=cache.solve(items,baseline,stage+"_case_draft",tie=True)
-    history=np.asarray(ctx["H"] if stage=="train" else ctx["H_eval"],float)
+    history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
     # The first two columns retain the original surgeon/procedure history
     # scores; old CASE congestion columns are explicitly discarded.
     s,q=history[:,0],history[:,1]
