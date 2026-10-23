@@ -52,51 +52,85 @@ class ResponseDC:
     This handles display clipping, short bookings, and all rejection regions.
     """
 
-    def __init__(self, booked, alpha, h, cap):
+    def __init__(self, booked, alpha, h, cap, canonical_nominal=None):
         self.booked = np.asarray(booked, dtype=float)
         if self.booked.ndim != 1 or np.any(self.booked < 1):
             raise ValueError("Positive one-dimensional booked durations required")
         if not (0 < alpha <= 1 and h > 0 and cap > 0):
             raise ValueError("Invalid response or cap")
         self.alpha, self.h, self.cap = float(alpha), float(h), float(cap)
+        self.canonical_nominal = canonical_nominal
+        if canonical_nominal is not None:
+            a0, h0 = canonical_nominal
+            if not (0 < a0 <= 1 and h0 > 0):
+                raise ValueError("Invalid nominal response for minimum-magnitude display")
         self.lo = np.maximum(-self.cap, 1.0 - self.booked)
         self.hi = np.full_like(self.lo, self.cap)
-        self.offset = response(self.lo, alpha, h)
-        self.knots = np.full((len(self.lo), 6), np.inf)
-        self.positive = np.zeros_like(self.knots)
-        self.negative = np.zeros_like(self.knots)
-        q = 1.0 - alpha
 
-        def slope(t):
-            magnitude = abs(t)
-            if magnitude < h:
-                return alpha
-            if q > 0 and q * magnitude < h:
-                return -q
-            return 0.0
-
-        for i, lo in enumerate(self.lo):
-            hi = self.hi[i]
-            candidates = [float(lo), float(hi), -h, h]
+        def response_knots(a, threshold):
+            q = 1-a
+            values = [-threshold, threshold]
             if q > 0:
-                candidates += [-h / q, h / q]
-            knots = sorted(set(x for x in candidates if lo <= x <= hi))
-            slopes = [0.0]
-            slopes += [slope((a + b) / 2.0)
-                       for a, b in zip(knots[:-1], knots[1:])]
+                values += [-threshold/q, threshold/q]
+            return values
+
+        knots_for_cases, jumps_for_cases, offsets = [], [], []
+        for lo, hi in zip(self.lo, self.hi):
+            lo, hi = float(lo), float(hi)
+            def f(x):
+                displayed = np.clip(x, lo, hi)
+                if canonical_nominal is not None:
+                    a0, h0 = canonical_nominal
+                    displayed = response(displayed, a0, h0) / a0
+                return float(response(displayed, alpha, h))
+            values = [lo, hi]
+            if canonical_nominal is None:
+                values.extend(response_knots(alpha, h))
+            else:
+                a0, h0 = canonical_nominal
+                boundaries = [lo]+sorted(x for x in response_knots(a0,h0)
+                                          if lo < x < hi)+[hi]
+                values.extend(boundaries)
+                targets = [a0*x for x in response_knots(alpha,h)]
+                for x0,x1 in zip(boundaries[:-1],boundaries[1:]):
+                    y0=float(response(x0,a0,h0))
+                    y1=float(response(x1,a0,h0))
+                    if abs(y1-y0) < 1e-12:
+                        continue
+                    for target in targets:
+                        t=(target-y0)/(y1-y0)
+                        if 0 < t < 1:
+                            values.append(x0+t*(x1-x0))
+            values=sorted(x for x in values if lo <= x <= hi)
+            unique=[]
+            for x in values:
+                if not unique or x-unique[-1] > 1e-9:
+                    unique.append(x)
+            if len(unique)<2:
+                raise ValueError("Empty displayed-advice domain")
+            slopes=[0.0]
+            slopes += [(f(x1)-f(x0))/(x1-x0)
+                       for x0,x1 in zip(unique[:-1],unique[1:])]
             slopes += [0.0]
-            if len(knots) > 6:
-                raise AssertionError("Unexpected response breakpoint count")
-            for j, k in enumerate(knots):
-                jump = slopes[j + 1] - slopes[j]
-                self.knots[i, j] = k
-                self.positive[i, j] = max(jump, 0.0)
-                self.negative[i, j] = max(-jump, 0.0)
+            jumps=[slopes[j+1]-slopes[j] for j in range(len(unique))]
+            knots_for_cases.append(unique)
+            jumps_for_cases.append(jumps)
+            offsets.append(f(lo))
+        width=max(map(len,knots_for_cases))
+        self.knots=np.full((len(self.lo),width),np.inf)
+        self.positive=np.zeros_like(self.knots)
+        self.negative=np.zeros_like(self.knots)
+        for i,(knots,jumps) in enumerate(zip(knots_for_cases,jumps_for_cases)):
+            for j,(k,delta) in enumerate(zip(knots,jumps)):
+                self.knots[i,j]=k
+                self.positive[i,j]=max(delta,0.0)
+                self.negative[i,j]=max(-delta,0.0)
+        self.offset=np.asarray(offsets)
         self._check_shapes()
 
     def _check_shapes(self):
         assert self.positive.shape == self.negative.shape == self.knots.shape
-        assert self.positive.shape == (len(self.booked), 6)
+        assert self.positive.shape[0] == len(self.booked)
 
     def parts(self, raw):
         raw = np.asarray(raw, float)
@@ -111,9 +145,15 @@ class ResponseDC:
         dn = (active * self.negative).sum(axis=1)
         return positive, negative, dp, dn
 
-    def reviewed(self, raw):
+    def display(self, raw):
         u = np.clip(raw, self.lo, self.hi)
-        return self.booked + response(u, self.alpha, self.h)
+        if self.canonical_nominal is not None:
+            a0, h0 = self.canonical_nominal
+            u = response(u, a0, h0) / a0
+        return u
+
+    def reviewed(self, raw):
+        return self.booked + response(self.display(raw), self.alpha, self.h)
 
     def verify(self, raw, tol=1e-7):
         p, n, _, _ = self.parts(raw)
@@ -162,7 +202,7 @@ class DCObjective:
 
     def __init__(self, booked, X, base, scenarios, cap, *, mode,
                  actual=None, actual_bank=None, room_matrices=None,
-                 ridge=0.001, l1=0.0, regularize_from=None):
+                 ridge=0.001, l1=0.0, regularize_from=None, canonical_nominal=None):
         self.booked = np.asarray(booked, float)
         self.X = np.asarray(X, float)
         self.base = np.asarray(base, float)
@@ -177,7 +217,8 @@ class DCObjective:
             raise ValueError("At least one scenario required")
         weights = np.array([s.weight for s in self.scenarios], float)
         self.weights = weights / weights.sum()
-        self.maps = [ResponseDC(self.booked, s.alpha, s.h, cap)
+        self.canonical_nominal = canonical_nominal
+        self.maps = [ResponseDC(self.booked, s.alpha, s.h, cap, canonical_nominal)
                      for s in self.scenarios]
         self.cap = float(cap)
         self.ridge = float(ridge)
@@ -209,7 +250,8 @@ class DCObjective:
         return DCObjective(self.booked, self.X, self.base, self.scenarios,
                            self.cap, mode="VF", actual_bank=self.bank,
                            room_matrices=matrices, ridge=self.ridge,
-                           l1=self.l1, regularize_from=self.reference)
+                           l1=self.l1, regularize_from=self.reference,
+                           canonical_nominal=self.canonical_nominal)
 
     def parts(self, w):
         """Return G,H,subgradient G,subgradient H; both G,H are convex."""
@@ -272,7 +314,7 @@ class DCObjective:
             obj = DCObjective(self.booked, self.X, self.base, [s], self.cap,
                  mode=self.mode, actual=self.actual, actual_bank=self.bank,
                  room_matrices=None if self.mode == "CASE" else [self.rooms[k]],
-                 ridge=0., l1=0.)
+                 ridge=0., l1=0., canonical_nominal=self.canonical_nominal)
             vals.append(obj.value(w))
         return vals
 
@@ -402,7 +444,7 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 def mm_vf(items, booked, H, case_display, scenarios, actual_bank, cap,
           *, root, iterations=8, radius=32., ridge=.001,
           pdca_steps=20, max_cuts=60, seconds_per_plan=120.,
-          backend="gurobi", solve_plans=None):
+          backend="gurobi", solve_plans=None, canonical_nominal=None):
     """Outer exact-plan MM, inner full-response pDCA; resumable per iteration.
 
     solve_plans(items, durations, scenario_index, iteration) must return
@@ -427,14 +469,15 @@ def mm_vf(items, booked, H, case_display, scenarios, actual_bank, cap,
         d_by_scenario=[]
         rooms=[]
         for j,scenario in enumerate(scenarios):
-            mapping=ResponseDC(booked,scenario.alpha,scenario.h,cap)
+            mapping=ResponseDC(booked,scenario.alpha,scenario.h,cap,canonical_nominal)
             reviewed=mapping.reviewed(case_display+H@theta)
             d_by_scenario.append(reviewed)
             plan=solve_plans(items,reviewed,j,k)
             S,_=occupied_room_matrix(items,plan,len(booked))
             rooms.append(S)
         objective=DCObjective(booked,H,case_display,scenarios,cap,mode="VF",
-                              actual_bank=actual_bank,room_matrices=rooms,ridge=ridge)
+                              actual_bank=actual_bank,room_matrices=rooms,ridge=ridge,
+                              canonical_nominal=canonical_nominal)
         old=objective.value(theta)
         fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
                     max_cuts=max_cuts,backend=backend)
