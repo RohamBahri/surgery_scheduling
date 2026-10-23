@@ -88,7 +88,7 @@ def test_saturated_VF_touches_fixed_physical_schedules():
 def test_saturated_exact_case_qp_if_gurobi_available():
     gp=pytest.importorskip("gurobipy")
     from surgery.nonmonotone_learning import CaseConvexQP
-    b=np.linspace(1.,200.,18.)
+    b=np.linspace(1.,200.,18)
     a=np.maximum(1.,b+np.sin(b)*12.)
     X=np.column_stack([np.ones(len(b)),np.linspace(-4,4,len(b)),
                        np.linspace(0,1,len(b))])
