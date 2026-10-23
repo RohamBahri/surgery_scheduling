@@ -268,6 +268,24 @@ def work(ctx,root,args):
             return dict(attenuation_fraction=float(np.mean((a>30.)&(a<threshold))),
                         rejection_fraction=float(np.mean(a>=threshold)),
                         within_linear_fraction=float(np.mean(a<=30.)))
+        # Diagnostic only: a tied library selection prevents a simple
+        # unique-active-schedule stationarity claim. It never stops training.
+        tie_cases=0
+        from surgery.weekly_planner import evaluate as planned_cost
+        for key,c,rows in train:
+            costs=[planned_cost(c,z,vf_d[rows])["cost"]
+                   for z in state["libraries"][key]]
+            best_cost=min(costs)
+            distinct={tuple(state["libraries"][key][j])
+                      for j,value in enumerate(costs)
+                      if abs(value-best_cost)<=1e-6}
+            if len(distinct)>1:
+                tie_cases+=c.n
+        diag=dict(
+             case_weighted_tied_library_fraction=float(tie_cases/len(b)),
+             box_touching=bool(np.any(np.abs(chosen)>=args.vf_radius-1e-6)),
+             max_abs_increment=float(np.max(np.abs(chosen))))
+        save(root/"vf_termination_diagnostics.json",diag)
         save(root/"selected_policy.json",dict(method="CASE+VF",
                case_coeff=coef.tolist(),vf_theta=chosen.tolist(),
                lambda_case=json.loads((root/"case_policy.json").read_text())["lambda_case"],
@@ -278,6 +296,7 @@ def work(ctx,root,args):
                common_library_certificates=dict(BOOKED=booked_cert,
                       CASE=case_cert,VF=vf_cert),
                raw_score_regimes=dict(CASE=regimes(raw_case),VF=regimes(raw_vf)),
+               termination_diagnostics=diag,
                note="Absolute training bounds, not realized benefit guarantees"))
         return
     if args.stage=="evaluate":
