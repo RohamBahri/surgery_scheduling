@@ -78,6 +78,7 @@ def ray_points(theta,requested_smax,n_points):
 def scientific_fingerprint(root,args):
     file=root/"vf_ray_extension"/"run_contract.json"
     cfg=dict(
+        ray_implementation_sha256=_digest(__file__),
         parent_B_contract_sha256=_digest(root/"run_contract.json"),
         parent_C_extension_sha256=_digest(
             root/"response_extension"/"extension_contract.json"),
