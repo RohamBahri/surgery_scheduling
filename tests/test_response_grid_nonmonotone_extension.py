@@ -167,3 +167,24 @@ def test_extension_cli_help():
     result=subprocess.run(cmd,capture_output=True,text=True,timeout=25)
     assert result.returncode==0,result.stderr
     assert "--out" in result.stdout
+
+
+
+def test_nonmonotone_agrees_with_saturation_below_threshold():
+    from surgery.response_grid import Scenario
+    booked=np.array([1.,4.,30.,100.,250.])
+    displayed=np.array([-30.,-20.,0.,20.,30.])
+    for alpha in (.5,.8):
+        sat=Scenario("B","saturating",alpha,30.)
+        non=Scenario("C","nonmonotone",alpha,30.)
+        assert np.allclose(
+            implemented_from_display(booked,displayed,sat),
+            implemented_from_display(booked,displayed,non),
+            rtol=0,atol=1e-10)
+    # Mismatch can occur for the response-unaware NAIVE policy even when
+    # the scenario matches a particular CASE/VF training alpha,h.
+    far=np.array([150.])
+    assert (implemented_from_display(np.array([100.]),far,
+            Scenario("B","saturating",.8,30.))[0]==124.)
+    assert (implemented_from_display(np.array([100.]),far,
+            Scenario("C","nonmonotone",.8,30.))[0]==100.)
