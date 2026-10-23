@@ -157,7 +157,7 @@ def fit_naive(ctx,root):
     return weights
 
 
-def fit_family(ctx,root,cache,scenario,booked_plans):
+def fit_family(ctx,args,root,cache,scenario,booked_plans):
     """Fit a distinct CASE and VF under one saturation assumption only."""
     folder=root/"training"/scenario.name
     folder.mkdir(parents=True,exist_ok=True)
@@ -173,8 +173,8 @@ def fit_family(ctx,root,cache,scenario,booked_plans):
     model=mapping(booked,scenario)
     print(f"TRAIN {scenario.name}: CASE(B) lambda x1.0",flush=True)
     coeff=case_fit(ctx,items,model,folder,
-                   200 if False else args_dummy_case_steps(),  # replaced by injected settings
-                   160,"gurobi",100.,lambda_scale=CASE_LAMBDA_SCALE)
+                   args.case_steps,args.cuts,"gurobi",100.,
+                   lambda_scale=CASE_LAMBDA_SCALE)
     # All subsequent features are built from this scenario's CASE policy.
     raw=np.asarray(data["X"],float)@coeff
     verify_same_scenario(raw,booked,scenario)
@@ -192,8 +192,9 @@ def fit_family(ctx,root,cache,scenario,booked_plans):
     state=mm_vf(items,booked,H,raw,model,actual,
                 root=folder/"vf",lam=vf_lam,
                 initial_libraries=libraries,
-                iterations=30,radius=64.,pdca_steps=50,
-                max_cuts=160,backend="gurobi",
+                iterations=args.vf_outers,radius=64.,
+                pdca_steps=args.vf_pdca_steps,
+                max_cuts=args.cuts,backend="gurobi",
                 solve_plans=oracle,optimizer="pdca")
     theta=np.asarray(state["theta"],float)
     verify_same_scenario(raw+H@theta,booked,scenario)
@@ -209,10 +210,6 @@ def fit_family(ctx,root,cache,scenario,booked_plans):
     record_stage_time(root,"train_"+scenario.name,
                       time.perf_counter()-started)
     return fitted
-
-
-def args_dummy_case_steps():
-    raise RuntimeError("Unconfigured training parameter")
 
 
 def freeze_displays(ctx,root,cache,naive_weights,policies):
@@ -426,7 +423,7 @@ def main():
     booked=cache.solve(ctx["train"],
                        np.asarray(ctx["fit"]["booked"],float),
                        "train_booked",tie=True)
-    policies={s.name:fit_family(ctx,args.out,cache,s,booked)
+    policies={s.name:fit_family(ctx,args,args.out,cache,s,booked)
               for s in TRAIN_SCENARIOS}
     save(args.out/"selected_policies.json",dict(
         response_link="SATURATING_B",policies=policies,
