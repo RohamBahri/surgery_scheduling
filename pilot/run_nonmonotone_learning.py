@@ -282,12 +282,11 @@ def eval_2013(ctx,root,args,cache,selected):
     for key,comp,idx in items:
         for label,d in ds.items():
             rec=plans[label][key]
-            row=dict(component=key,site=comp.group,week=comp.monday,
+            row=dict(component=key,week=comp.monday,
                      cases=comp.n,method=label,complete=rec["complete"],
                      status=rec["status"],
                      cost=evaluate(comp,rec["assignment"],comp.actual)["cost"],
-                     mae=float(np.abs(comp.actual-d[idx]).sum()),
-                     assignment=rec["assignment"])
+                     mae=float(np.abs(comp.actual-d[idx]).sum()))
             rows.append(row)
     save(root/"evaluation_2013.json",dict(
          label="EXPLORATORY_REUSED_2013_DATA",
