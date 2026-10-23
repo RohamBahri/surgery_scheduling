@@ -426,48 +426,60 @@ def _solve_qp_cuts(objective, center, h_gradient, lower, upper, prox,
 
 def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
          max_cuts=60, tolerance=1e-5, backend="gurobi"):
-    """pDCA with certified exact-objective descent checks.
+    """Proximal DCA with exact CASE QP and verified objective descent.
 
-    Bounds are on coefficients, not on all casewise implemented durations.
-    Stopping at an iteration cap or a non-certified master is explicit.
+    CASE/Gurobi: reuse an exact convex epigraph QP, not an approximate
+    high-dimensional cutting-plane master. VF: use the small-dimensional
+    convex cutting-plane QP. An accepted step is NEVER discarded simply
+    because the inner cut budget was exhausted.
     """
-    x = np.asarray(start, float).copy()
-    radius = float(radius)
-    if radius <= 0 or outer < 1 or prox < 0:
-        raise ValueError("Invalid learning budget")
-    lower = np.full(len(x), -radius)
-    upper = np.full(len(x), radius)
-    if np.any(x < lower) or np.any(x > upper):
-        raise ValueError("Start outside coefficient box; do not silently project")
-    history = []
-    reason = "ITERATION_CAP"
-    for k in range(outer):
-        g, h, _, hg = objective.parts(x)
-        old = g-h
-        trial, inner = _solve_qp_cuts(objective,x,hg,lower,upper,prox,
-                       max_cuts=max_cuts,tolerance=tolerance,backend=backend)
-        value = objective.value(trial)
-        improved = bool(np.isfinite(value) and value < old-1e-8*max(1.,abs(old)))
-        history.append(dict(iteration=k+1,before=float(old),after=float(value),
-                            step_l2=float(np.linalg.norm(trial-x)),
-                            proximal_parameter=float(prox),
-                            accepted=improved,inner_status=inner["status"],
-                            inner_certified=inner["certified"],
-                            inner_gap=inner.get("gap"),
-                            cuts=len(inner["trace"])))
-        if improved:
-            x = trial
-        else:
-            reason = "NO_VERIFIED_DESCENT"
-            break
-        if inner["status"] != "INNER_CONVERGED":
-            reason = inner["status"]
-            break
+    x=np.asarray(start,float).copy()
+    radius=float(radius)
+    if radius<=0 or outer<1 or prox<0:
+        raise ValueError("Invalid pDCA settings")
+    lower=np.full(len(x),-radius)
+    upper=np.full(len(x),radius)
+    if np.any(x<lower) or np.any(x>upper):
+        raise ValueError("Initial coefficients outside their bounds")
+    solver=(CaseConvexQP(objective,lower,upper)
+            if objective.mode=="CASE" and backend=="gurobi" else None)
+    history=[]
+    reason="ITERATION_CAP"
+    try:
+        for k in range(outer):
+            g,h,_,hg=objective.parts(x)
+            old=g-h
+            if solver is not None:
+                trial,inner=solver.solve(x,hg,prox)
+            else:
+                trial,inner=_solve_qp_cuts(
+                    objective,x,hg,lower,upper,prox,
+                    max_cuts=max_cuts,tolerance=tolerance,backend=backend)
+            value=objective.value(trial)
+            improved=bool(np.isfinite(value)
+                     and value<old-1e-8*max(1.,abs(old)))
+            history.append(dict(
+                iteration=k+1,before=float(old),after=float(value),
+                accepted=improved,
+                step_l2=float(np.linalg.norm(trial-x)),
+                proximal_parameter=float(prox),
+                inner_status=inner["status"],
+                inner_certified=inner["certified"],
+                inner_gap=inner.get("gap"),
+                cuts=len(inner["trace"])))
+            if not improved:
+                reason="NO_VERIFIED_DESCENT"
+                break
+            x=np.asarray(trial,float)
+            # This is an objective-based stop, not a solver cut-cap gate.
+            if old-value < 1e-6*max(1.,abs(old)):
+                reason="RELATIVE_IMPROVEMENT"
+                break
+    finally:
+        if solver is not None:
+            solver.close()
     return dict(weights=x.tolist(),objective=objective.value(x),
                 status=reason,iterations=history,backend=backend)
-
-
-
 
 
 
