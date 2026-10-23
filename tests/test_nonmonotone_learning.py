@@ -199,3 +199,67 @@ def test_case_is_exactly_vf_at_zero_increment_for_all_cases():
     c.verify(base)
     assert np.allclose(
         b+response(c.display(base)),c.reviewed(base),atol=1e-8)
+
+
+
+def test_exact_case_qp_matches_convex_majorizer_when_licensed():
+    """Reconstruct the actual pDCA QP objective, including all floor hinges."""
+    gp=pytest.importorskip("gurobipy")
+    try:
+        m=gp.Model("license_probe")
+        m.Params.OutputFlag=0
+        x=m.addVar(lb=0.,ub=1.)
+        m.setObjective(x*x)
+        m.optimize()
+        m.dispose()
+    except gp.GurobiError as exc:
+        pytest.skip(str(exc))
+    from surgery.nonmonotone_learning import CaseConvexQP
+    rng=np.random.default_rng(77)
+    n,p=24,5
+    b=np.linspace(1.,150.,n)
+    X=np.column_stack([np.ones(n),rng.normal(size=(n,p-1))])
+    base=np.linspace(-160.,160.,n)
+    actual=b+rng.uniform(-30.,30.,n)
+    actual=np.maximum(1.,actual)
+    response_map=ResponseDC(b,.8,30.,180.,1.)
+    obj=DCObjective(b,X,base,response_map,mode="CASE",
+                    actual=actual,components=4,lam=.02,
+                    penalize=np.r_[0.,np.ones(p-1)])
+    center=np.array([2.,-3.,4.,1.,-2.])
+    gradient=obj.parts(center)[3]
+    solver=CaseConvexQP(obj,np.full(p,-40.),np.full(p,40.))
+    try:
+        trial,status=solver.solve(center,gradient,prox=.001)
+        assert status["certified"],status
+        G,_,_,_=obj.parts(trial)
+        reconstructed=G-gradient@trial+.0005*np.sum((trial-center)**2)
+        assert reconstructed==pytest.approx(
+            status["objective"],rel=1e-6,abs=1e-5)
+        assert np.isfinite(obj.value(trial))
+    finally:
+        solver.close()
+
+
+def test_vf_cut_cap_does_not_stop_accepted_progress(monkeypatch):
+    """A hit cut budget is not a spurious pDCA stopping condition."""
+    from surgery import nonmonotone_learning as nl
+    class QuadraticObjective:
+        mode="VF"
+        def parts(self,w):
+            return float(w@w),0.,2.*w,np.zeros_like(w)
+        def value(self,w):
+            return float(w@w)
+    calls=[]
+    def capped(obj,center,*args,**kwargs):
+        calls.append(len(calls))
+        return center*.5,dict(
+            status="INNER_CUT_CAP",trace=[dict(gap=1.)],
+            certified=False,gap=1.)
+    monkeypatch.setattr(nl,"_solve_qp_cuts",capped)
+    ans=nl.pdca(QuadraticObjective(),np.array([1.,2.]),
+                radius=10.,outer=3,backend="scipy")
+    assert len(calls)==3
+    assert len(ans["iterations"])==3
+    assert all(row["accepted"] for row in ans["iterations"])
+    assert ans["objective"]<1.
