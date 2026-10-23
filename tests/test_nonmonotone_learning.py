@@ -172,3 +172,30 @@ def test_runner_help_imports_without_training():
     assert out.returncode==0,out.stderr
     assert "evaluate" in out.stdout and "vf" in out.stdout
     assert "--scenario" not in out.stdout
+
+
+def test_case_lad_and_penalty_rules_on_small_instance():
+    from pilot.run_nonmonotone_learning import lad_start,train_lambda
+    X=np.array([[1.,-2.],[1.,-1.],[1.,0.],[1.,1.],[1.,2.]])
+    actual_error=4.+2.*X[:,1]
+    w,diag=lad_start(X,actual_error,lam=0.,components=1,box=30.)
+    assert diag["success"]
+    assert np.max(abs(X@w-actual_error))<1e-5
+    h=np.column_stack([np.ones(10),np.linspace(-2,2,10),
+                       np.zeros(10)])
+    # VF has no intercept, and lambda calibration includes column 1.
+    a=train_lambda(h,2,intercept=False)
+    b=train_lambda(h,2,intercept=True)
+    assert a>0 and b>0 and a!=pytest.approx(b)
+
+
+def test_case_is_exactly_vf_at_zero_increment_for_all_cases():
+    b=np.array([1.,2.,15.,50.,120.])
+    c=ResponseDC(b,.8,30.,180.,1.)
+    base=np.array([-180.,-40.,35.,85.,30.])
+    H=np.random.default_rng(19).normal(size=(5,5))
+    zero=np.zeros(5)
+    assert np.array_equal(c.reviewed(base),c.reviewed(base+H@zero))
+    c.verify(base)
+    assert np.allclose(
+        b+response(c.display(base)),c.reviewed(base),atol=1e-8)
