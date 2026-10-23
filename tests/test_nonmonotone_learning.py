@@ -289,7 +289,12 @@ def test_case_exact_qp_improves_with_70_shared_features():
                     actual=actual,components=12,lam=.002,
                     penalize=np.r_[0.,np.ones(p-1)])
     start=np.zeros(p)
-    result=pdca(obj,start,radius=40.,outer=4,backend="gurobi")
+    try:
+        result=pdca(obj,start,radius=40.,outer=4,backend="gurobi")
+    except gp.GurobiError as exc:
+        if "size-limited license" in str(exc).lower():
+            pytest.skip("70-feature regression requires full Gurobi license")
+        raise
     assert result["iterations"]
     assert all(r["inner_status"].startswith("CASE_QP_")
                for r in result["iterations"])
