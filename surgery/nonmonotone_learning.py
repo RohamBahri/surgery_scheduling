@@ -28,6 +28,15 @@ def response(u, alpha=.8, h=30.):
                 np.maximum(h-q*np.abs(u),0.))
 
 
+def response_saturating(u, alpha=.8, h=30.):
+    """Monotone B link: unrestricted raw score, saturated correction.
+
+    A raw score outside [-h,h] saturates; it NEVER constrains the shared
+    coefficients and NEVER attenuates the implemented correction.
+    """
+    return np.clip(alpha*np.asarray(u,float),-alpha*h,alpha*h)
+
+
 class ResponseDC:
     """Exact DC compiler for max{F(clip(u,-cap,cap)), floor-booked}.
 
@@ -40,7 +49,11 @@ class ResponseDC:
     f(u)=P(u)-N(u), with convex P,N. No binary response variables.
     """
 
-    def __init__(self, booked, alpha=.8, h=30., cap=180., floor=1.):
+    def __init__(self, booked, alpha=.8, h=30., cap=180., floor=1.,
+                 link="nonmonotone"):
+        if link not in ("nonmonotone","saturating"):
+            raise ValueError("Response link must be nonmonotone or saturating")
+        self.link=link
         self.booked=np.asarray(booked,float)
         if self.booked.ndim != 1 or np.any(self.booked <= 0):
             raise ValueError("Booked durations must be positive")
@@ -52,15 +65,17 @@ class ResponseDC:
         self.offset=np.empty_like(self.booked)
         all_knots=[];all_jumps=[]
         q=1-alpha
+        link_response=(response_saturating if link=="saturating" else response)
         for i,b in enumerate(self.booked):
             cutoff=floor-float(b)
             def actual(x):
-                return max(float(response(np.clip(x,-cap,cap),alpha,h)),cutoff)
-            base=[-cap,cap,-h,h,-h/q,h/q]
+                return max(float(link_response(np.clip(x,-cap,cap),alpha,h)),cutoff)
+            base=([-cap,cap,-h,h] if link=="saturating"
+                  else [-cap,cap,-h,h,-h/q,h/q])
             base=sorted(set(float(t) for t in base if -cap <= t <= cap))
             roots=list(base)
             for x0,x1 in zip(base[:-1],base[1:]):
-                y0=float(response(x0,alpha,h));y1=float(response(x1,alpha,h))
+                y0=float(link_response(x0,alpha,h));y1=float(link_response(x1,alpha,h))
                 if abs(y1-y0)<1.e-12:
                     continue
                 frac=(cutoff-y0)/(y1-y0)
@@ -102,7 +117,8 @@ class ResponseDC:
 
     def correction(self, raw):
         u=np.clip(np.asarray(raw,float),-self.cap,self.cap)
-        return np.maximum(response(u,self.alpha,self.h),self.floor-self.booked)
+        fn=response_saturating if self.link=="saturating" else response
+        return np.maximum(fn(u,self.alpha,self.h),self.floor-self.booked)
 
     def display(self, raw):
         """Smallest signed display inducing nominal implemented correction."""
@@ -119,7 +135,8 @@ class ResponseDC:
         displayed=self.display(raw)
         if np.any(np.abs(displayed)>np.minimum(self.cap,self.h)+1e-8):
             raise AssertionError("Canonical display exceeds increasing response branch")
-        adopted=np.maximum(response(displayed,self.alpha,self.h),
+        fn=response_saturating if self.link=="saturating" else response
+        adopted=np.maximum(fn(displayed,self.alpha,self.h),
                            self.floor-self.booked)
         if not np.allclose(adopted,correction,rtol=0,atol=1e-8):
             raise AssertionError("Minimum-magnitude display changes adopted booking")
