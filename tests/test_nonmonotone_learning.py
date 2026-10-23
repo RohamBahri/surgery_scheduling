@@ -353,3 +353,91 @@ def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
     assert sum(k.startswith("feature_") for k in records[0])==5
     assert float(records[1]["case_reviewed"]) == pytest.approx(
         m.reviewed(np.array([18.,-160.]))[1])
+
+
+
+def test_vf_pdca_and_vf_directions_are_separate_learning_algorithms(tmp_path):
+    from surgery.nonmonotone_learning import mm_vf
+    week=toy_week()
+    items=[("toy",week,np.arange(week.n))]
+    base=np.array([12.,-4.,40.])
+    H=np.array([[1.,0.],[.5,1.],[-1.,.7]])
+    response_map=ResponseDC(week.booked,.8,30.,180.,1.)
+    def planner(items,d,k):
+        return {"toy":dict(assignment=[0,0,0],bound=0.,
+                           complete=False,status="TIME_LIMIT")}
+    results={}
+    for method in ("pdca","directions"):
+        path=tmp_path/method
+        results[method]=mm_vf(items,week.booked,H,base,response_map,
+             week.actual,root=path,lam=.001,
+             initial_libraries={"toy":[[0,0,0],[0,1,1]]},
+             iterations=2,radius=16.,pdca_steps=3,max_cuts=25,
+             backend="scipy",solve_plans=planner,optimizer=method)
+        assert results[method]["optimizer"]==method
+        assert (path/"vf_library_progress.json").exists()
+        assert results[method]["libraries"]["toy"]
+        for row in results[method]["history"]:
+            if row["accepted"]:
+                assert row["delta"]>0.
+        assert "search" in results[method]["history"][0]
+    assert "directions_checked" in results["directions"]["history"][0]["search"]
+    assert "pdca_status" in results["pdca"]["history"][0]["search"]
+
+
+def test_shared_realized_cost_is_not_predicted_library_cost():
+    from surgery.nominal_shared import score,proxy
+    from surgery.nonmonotone_learning import planned_cost_fast
+    c=toy_week()
+    items=[("toy",c,np.arange(c.n))]
+    assignment=[0,0,0]
+    theta=np.array([2.,-3.])
+    rec={"toy":dict(assignment=assignment,complete=True)}
+    direct=score(items,rec,theta,.01)
+    expected=planned_cost_fast(c,assignment,c.actual)+.01*np.abs(theta).sum()
+    assert direct==pytest.approx(expected)
+    assert score(items,{"toy":dict(assignment=assignment,complete=False)},
+                 theta,.01) is None
+    libraries={"toy":[assignment,[0,1,1]]}
+    costs={"toy":[planned_cost_fast(c,z,c.actual)
+                  for z in libraries["toy"]]}
+    predicted=c.booked+np.array([30.,-20.,5.])
+    surrogate=proxy(items,libraries,predicted,costs,theta,.01)
+    j=min(range(2),key=lambda k:(planned_cost_fast(c,libraries["toy"][k],
+                                 predicted),tuple(libraries["toy"][k])))
+    assert surrogate==pytest.approx(costs["toy"][j]+.01*np.abs(theta).sum())
+
+
+def test_nominal_four_method_report_uses_five_way_common_coverage(tmp_path):
+    from pilot.run_nominal_four_methods import ARMS,report
+    import json
+    rows=[]
+    for key,week,cases in (("a","2013-01-07",3),("b","2013-01-14",2)):
+        for i,arm in enumerate(ARMS):
+            rows.append(dict(component=key,method=arm,week=week,
+                             cases=cases,complete=not(key=="b" and
+                                      arm=="VF_DIRECTIONS"),
+                             cost=float(10+i),mae=2.,idle_minutes=3.,
+                             overtime_minutes=4.))
+    (tmp_path/"evaluation_2013.json").write_text(json.dumps({"entries":rows}))
+    report(tmp_path)
+    out=json.loads((tmp_path/"summary.json").read_text())
+    assert out["common_certified_components"]==1
+    assert out["common_certified_cases"]==3
+    assert len(out["paired_cost_differences"])==7
+    assert out["VF_DIRECTIONS"]["cost_per_case"]==pytest.approx(12./3)
+    assert out["arm_coverage"]["VF_DIRECTIONS"]["certified_components"]==1
+
+
+def test_single_command_runner_cli_and_method_roster():
+    from pilot.run_nominal_four_methods import ARMS,CASE_L1_SCALE
+    assert ARMS==("BOOKED","CASE","VF_PDCA","VF_DIRECTIONS","SHARED")
+    assert CASE_L1_SCALE==pytest.approx(.75)
+    import subprocess,sys
+    from pathlib import Path
+    entry=Path(__file__).resolve().parents[1]/"pilot"/"run_nominal_four_methods.py"
+    run=subprocess.run([sys.executable,str(entry),"--help"],
+        cwd=entry.parents[1],capture_output=True,text=True,timeout=25)
+    assert run.returncode==0,run.stderr
+    assert "--shared-rounds" in run.stdout
+    assert "--plan-seconds" in run.stdout
