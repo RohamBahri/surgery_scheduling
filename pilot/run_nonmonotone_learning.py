@@ -282,17 +282,20 @@ def work(ctx,root,args):
                       args.cuts,args.backend,args.case_radius)
         if args.stage=="case":
             return
+        draft_started=time.perf_counter()
         case_raw=np.asarray(data["X"],float)@coef
         H,(mu,sd),case_draft=five_features(
                     ctx,train,case_raw,response_map,cache,"train")
         save(root/"vf_features.json",dict(mean=mu.tolist(),std=sd.tolist()))
         booked=cache.solve(train,b,"train_booked",tie=True)
+        record_stage_time(root,"draft_and_booked",time.perf_counter()-draft_started)
         if args.stage=="draft":
             return
         libraries={key:[booked[key]["assignment"],case_draft[key]["assignment"]]
                    for key,_,_ in train}
         # Feasible schedule certificates are retained on timeouts instead
         # of promoting an unfinished planner solve to "exact".
+        vf_started=time.perf_counter()
         vf_lam=train_lambda(H,len(train))
         def oracle(items,d,k):
             return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
@@ -310,6 +313,9 @@ def work(ctx,root,args):
                lambda_vf=float(vf_lam),cap=args.cap,alpha=.8,h=30.,
                train_components=len(train),train_cases=len(b),
                vf_status=state["status"]))
+        save_case_table(root/"cases_train.csv",data,case_raw,
+                        case_raw+H@chosen,H,response_map)
+        record_stage_time(root,"vf",time.perf_counter()-vf_started)
         return
     if args.stage=="evaluate":
         selected=json.loads((root/"selected_policy.json").read_text())
