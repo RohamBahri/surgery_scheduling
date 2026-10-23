@@ -511,9 +511,6 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
                    status="RUNNING")
     if not all(libraries.get(key) for key,_,_ in items):
         raise ValueError("Every component requires a feasible initial assignment")
-    dcase=np.asarray(booked,float)+response_map.correction(case_raw)
-    case_certificate=library_value(items,libraries,dcase,actual,lam,theta)
-    state.setdefault("case_initial_certificate",case_certificate)
     for outer in range(len(state["history"]),iterations):
         d=np.asarray(booked,float)+response_map.correction(case_raw+H@theta)
         candidates=solve_plans(items,d,outer)
