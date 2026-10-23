@@ -1,188 +1,123 @@
-# Non-monotone CASE + VF: research implementation (October 2026)
+# Nominal CASE and VF: full response + library MM/pDCA
 
-Branch: feature/nonmonotone-case-vf-mm. This is an additive research
-implementation. It does NOT overwrite the frozen October 2026
-objective-selection policies, comparison results, planner, or cohort.
+**Status:** research branch, draft PR #40. Old frozen artifacts and main remain unchanged.
 
-## Scientific contract
+## Agreed method
 
-1. **One displayed-advice policy.** CASE learns raw display scores X@w by
-   post-response asymmetric error with pDCA. VF keeps CASE fixed and learns
-   FIVE additional coefficients for s, q, congestion, s*congestion and
-   q*congestion. The provisional congestion plan is recomputed from the
-   newly learned CASE recommendations, once and without outcomes, using the
-   same three deterministic hash ties as the earlier design.
-2. **Non-monotone response.** For ANY unbounded shared raw display score,
-   each case clips its displayed advice independently to
-   [max(-c,1-booked),c]. The full response has an increasing adoption branch,
-   decreasing attenuation branch, and zero rejection branch. No shared
-   coefficient restriction is deduced from the intersection of individual
-   reachable intervals.
-3. **Minimum-magnitude actual display.** For a nominal response
-   (alpha0,h0), the operational display is
-   u = R_nom(clip(raw,...))/alpha0. This is the smallest-magnitude advice
-   generating that nominal adopted correction. Crucially, the SAME canonical
-   display enters every alternative response scenario DURING learning.
-   Thus the learned method is mathematically non-monotone as a function
-   of raw score, but its operational display does not show unnecessarily
-   extreme advice. This canonicalization is conditional on the nominated
-   response law; it does not make every scenario equally responsive.
-4. **Behavioral uncertainty.** A predeclared family of response scenarios
-   is pooled at equal weights by default, unless explicit weights are
-   specified. These are hypothetical, not surgeon-specific estimates from
-   UHN. No post-hoc real-surgeon profile assignment.
-5. **Two-stage planning.** New CASE -> exactly solved provisional physical
-   room/week assignments -> frozen five features -> VF display ->
-   scenario-specific response -> final EXACT primary planner in training.
-   Final evaluation uses the existing outcome-blind hash tie rule.
-6. **VF objective.** For each response scenario, the primary reduced planner
-   value Q(d) plus 2.75 times the sample stop loss E[(actual-d)+],
-   averaged over cases; one shared ridge coefficient penalty. The duration
-   scenario bank is FROZEN across coefficient iterations. No hindsight
-   outcomes enter the final deployed planner. The current residual donor
-   pool comes from the earlier training-only out-of-fold context, not from
-   unobserved surgeon adoption.
-7. **Optimizer.** For fixed schedules, the full clipped-response objective
-   is exactly G-H, with convex G and H. pDCA forms a supporting hyperplane
-   of H. The convex G-step uses a cutting-plane QP with globally valid
-   supporting hyperplanes. Gurobi supplies certified convex masters; the
-   difference G(candidate)-epigraph is checked and logged. Every accepted
-   CASE pDCA step reduces the exact unsmoothed CASE objective. Every
-   accepted VF inner pDCA step reduces its fixed-plan VF objective.
-   A VF outer step exactly minimizes Q at the incumbent, freezes each
-   scenario-specific room plan, and minimizes a touching upper majorizer.
-   Therefore every accepted VF outer step cannot increase the full TRAINING
-   VF objective. Local or iteration-cap termination is NOT global
-   optimality. A SciPy backend exists ONLY for small smoke tests.
-8. **Regularization differs from the previous frozen study.** CASE uses
-   coefficient ridge and L1; VF uses ridge on its five incremental display
-   coefficients. Previous regularization of deviations in implemented
-   duration is NOT retained, because that nonlinear term is not convex
-   in the displayed-advice coefficients. This is a declared new training
-   specification. Every cap policy is optimized and compared using its
-   fully recomputed same-form training VF objective.
-9. **Selection.** If multiple display caps are supplied, one cap and one
-   policy are selected using only the predeclared TRAINING VF objective.
-   No 2013 outcomes are used in that choice. Repeated study of 2013 means
-   subsequent evaluation is exploratory, not fresh external validation.
-10. **No-harm claims.** Scenario-averaged VF is NOT a true-cost no-harm
-    constraint. A scenario-wise surrogate bound does NOT imply a
-    scenario-wise realized scheduling improvement. This implementation
-    does not claim or silently enforce such a guarantee.
-11. **Feasibility and incomplete solvers.** Every planner call must certify
-    the complete primary or hash selection. An unresolved solve raises
-    an error, leaving its completed per-component cache intact. Incomplete
-    runs NEVER silently replace the learned policy with a baseline.
-12. **Operational limitations.** Retrospectively inferred rosters, linear
-    idle/overtime costs, potentially excessive room loads, synthetic
-    behavioral scenarios, and independence approximations in residual
-    draws remain limitations. This code is NOT a prospective clinical
-    scheduling system.
+BOOKED (zero display), CASE (response-aware), and VF (CASE plus five planning
+features) are the ONLY arms. Response is homogeneous nominal alpha=0.8, h=30.
+No sweep, response uncertainty, profiles, cap optimization, or direct SHARED
+method in this experiment.
 
-## Prerequisites
+CASE optimizes an unrestricted shared raw displayed-advice score Xw through
+the TRUE nonmonotone adoption/attenuation/rejection map, except a nominal
+UI cap of +/-180 minutes. The positive-duration floor f=1 is applied to the
+REVIEWED booking, not as a lower bound on displayed advice; the compiler
+includes extra breakpoints for floored cases. The operational display
+F_eff(raw)/alpha is the minimum-magnitude display giving the same nominal
+reviewed booking. Both CASE and VF optimize the raw score, not this
+canonicalized display.
 
-- A local checkout of RohamBahri/surgery_scheduling with this branch.
-- Python dependencies from requirements-lock.txt.
-- A valid, licensed Gurobi installation for production pDCA and exact
-  weekly planning.
-- The original workbook and the previously prepared, training-only
-  context.pkl from the October 2026 selection study. This implementation
-  reads that context and re-trains CASE and rebuilds congestion features;
-  it does NOT reuse the earlier fitted CASE coefficients or congestion
-  features as final policies.
+CASE's training objective is asymmetric post-response case error plus a
+training-derived L1 coefficient penalty. It is solved by proximal DCA with
+the exact convex/convex hinge decomposition and a convex cutting-plane QP,
+starting from LAD and from a converted prior CASE warm start. Every accepted
+step is checked against the exact unsmoothed objective.
 
-## If the old context.pkl is unavailable
+After CASE training, compute ONE fixed provisional plan per component using
+the deterministic hash-0 tie rule. Construct five standardized features:
+history surgeon spread, history procedure spread, provisional load deviation
+p = clip((load-480)/120,-2,2), and the two corresponding interactions.
+No circular final-plan feature updates. Freeze CASE and fit five VF
+incremental coefficients, initialized at zero, so VF(0) equals CASE.
 
-Generate ONLY the prerequisite context in a separate artifact directory.
-Do not rerun the entire old comparison and do not overwrite frozen
-objective-selection artifacts:
+VF optimizes the manuscript Section 4 full asymmetric training bound:
+mean by training COMPONENT of (minimum library J(z,reviewed duration) plus
+sum of 1.75*positive case error + 1.0*negative case error) with a
+training-only L1 penalty on VF coefficients. Every staffed roster block
+contributes idle cost even when unused. Initial schedule libraries contain
+original, BOOKED and CASE-draft feasible assignments. Each outer step
+requests new feasible planner incumbents, adds them, selects each library's
+cheapest schedule, then uses pDCA to improve the touching MM majorizer.
+A time-limited MIP can still add its feasible incumbent; missing dual
+bounds are replaced by the valid zero lower bound, NEVER by a false optimum.
+The run tracks Delta (certified library descent), epsilon (library minus
+planner dual bound), inner solver status, coefficients and full training
+certificate. MM does not certify global optimality or finite-run stationarity.
+
+## One important manuscript inconsistency
+
+The current weekly planner correctly accounts for all roster-block capacity,
+including unoccupied blocks. BUT the existing cohort builder constructs the
+list of physical room-day slots from rooms OBSERVED IN THAT WEEK, rather
+than the fixed training-derived median-count roster template described in
+the supplied implementation note. This new learner inherits the previous
+context. The roster difference remains unresolved; do not describe it as
+verified fixed-template planning. The branch does not silently change the
+planning cohort or eligibility to match a manuscript sentence.
+
+## Run
+
+    git fetch origin
+    git switch feature/nonmonotone-case-vf-mm
+    python -m pip install -r requirements-lock.txt
+    python -m pip install -e . --no-deps
+    python -m pytest -q tests/test_nonmonotone_learning.py
+
+Required prepared context:
+
+    artifacts/objective_selection_12h/objective_selection_2013/context.pkl
+
+If unavailable, create it WITHOUT rerunning all prior methods:
 
     python pilot/run_objective_selection.py \
       --stage setup \
       --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx \
-      --out artifacts/nonmonotone_context \
+      --out artifacts/new_context \
       --cores 10 --setup-solve-seconds 180
 
-Then use:
+Then use --context artifacts/new_context/objective_selection_2013/context.pkl.
 
-    --context artifacts/nonmonotone_context/objective_selection_2013/context.pkl
+Train only CASE first:
 
-This preliminary setup also uses the original CASE machinery to create
-training-only historical residual donors. The NEW CASE is fitted afterward
-by the non-monotone pDCA implementation. Keep the generated context's
-supporting directories; do not move or rename context.pkl alone.
-
-## Get the branch and run tests
-
-    git fetch origin
-    git switch feature/nonmonotone-case-vf-mm
-    python -m pytest -q tests/test_nonmonotone_learning.py
-
-## First small smoke test
-
-    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
     python pilot/run_nonmonotone_learning.py \
+      --stage case \
       --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-      --out artifacts/nonmonotone_smoke \
-      --caps 45 \
-      --scenario 0.8:30 \
-      --draws 8 --cores 2 --case-steps 2 --vf-outers 1 \
-      --vf-pdca-steps 2 --max-cuts 15 --plan-seconds 120
+      --out artifacts/nominal_case_vf_mm \
+      --case-steps 200 --cores 15 --backend gurobi
 
-NOTE: This checks the full TRAINING cohort even with small iteration caps;
-it is not a miniature synthetic instance, and the planner can remain
-computationally expensive. The SciPy pDCA backend is available for unit
-tests only. Gurobi is still required for all exact weekly plans.
+Continue to the draft and VF, using the SAME settings/output:
 
-## Full fit (no holdout)
-
-    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     caffeinate -i python pilot/run_nonmonotone_learning.py \
+      --stage vf \
       --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-      --out artifacts/nonmonotone_case_vf_v1 \
-      --caps 45 \
-      --scenario 0.8:30 \
-      --scenario 0.6:30 \
-      --scenario 0.4:30 \
-      --scenario 0.8:15 \
-      --draws 50 --cores 10 --plan-seconds 180 \
-      --case-steps 25 --vf-outers 8 --vf-pdca-steps 20 \
-      --max-cuts 60 --backend gurobi
+      --out artifacts/nominal_case_vf_mm \
+      --case-steps 200 --vf-outers 30 --vf-pdca-steps 50 \
+      --cuts 80 --cores 15 --plan-seconds 180 --backend gurobi
 
-The default --caps 45 and the four response scenarios above are explicit
-scientific settings, NOT calibrated adoption parameters. Set --caps 30 45
-if you want a prespecified cap comparison; this can nearly double training.
+You may use --stage all to fit CASE, draft and VF together. Finished
+CASE, feasible plans and VF outer steps are checkpointed. A changed source
+or science configuration should use a NEW output directory.
 
-Training saves: manifest.json, cap_45_0/case_pdca.json,
-five_feature_normalization.json, vf_mm_state.json, fitted_policy.json,
-and selected_policy.json. Primary and hash-optimal scheduling components
-are checkpointed with duration signatures under plans/. A changed scientific
-setting or source digest requires a NEW --out folder.
+Only AFTER training, retrospectively evaluate the three models:
 
-You may call the same command again to resume completed case/policy and
-component checkpoints. It will not replay completed certified planner
-subproblems with identical input durations.
+    python pilot/run_nonmonotone_learning.py \
+      --stage evaluate \
+      --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+      --out artifacts/nominal_case_vf_mm \
+      --case-steps 200 --vf-outers 30 --vf-pdca-steps 50 \
+      --cuts 80 --cores 15 --plan-seconds 180 --backend gurobi
 
-## Optional retrospective 2013 comparison (after freezing training)
+Outputs: case_policy.json, vf_features.json, plans/, vf_library_progress.json,
+selected_policy.json, evaluation_2013.json and summary.json.
 
-Add --evaluate to the IDENTICAL fitting command and --out folder.
-It writes retrospective_2013.json with exactly solved per-case realized
-modeled costs for BOOKED, CASE and VF under every response scenario. Every
-evaluated scenario uses the SAME displayed advice for the relevant method.
-The 2013 sample has already been examined repeatedly in this project,
-so label the result EXPLORATORY_REUSED_HOLDOUT.
+## Evidence still needed for manuscript
 
-## Do not claim yet
-
-- Full UHN run or licensed-Gurobi integration was executed by the authoring
-  environment; neither has happened here.
-- Global optimality of CASE or VF coefficients.
-- A stationary-point theorem at assignment or response kinks.
-- True-cost scenario-wise no-harm.
-- Causal improvement over historical UHN operations.
-- That the uncertain response distribution has been empirically identified.
-- That the existing scenario donors correspond to an out-of-fold prediction
-  distribution for the newly refitted CASE without extra validation.
-
-These limitations should be resolved or acknowledged before using the
-implementation as final journal evidence.
+A full UHN run has NOT been executed. The 2013 sample is reused and any
+result is exploratory, NOT an independently untouched confirmatory test.
+Record solver coverage, time, CASE starts, library certificates, epsilon
+gaps, pDCA cut gaps, and actual common-certified costs. Check line search,
+tied schedules and stationarity only as diagnostics: finite-run termination
+cannot establish full stationarity. The exact roster construction remains
+an explicit operational mismatch. This study does not estimate actual
+surgeon response parameters, and does not prove realized savings.
