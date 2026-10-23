@@ -200,7 +200,8 @@ def lad_start(X,errors,lam,components,box):
                  message=str(result.message)))
 
 
-def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
+def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
+             lambda_scale=1.):
     """One LAD initialization, followed by exact-epigraph CASE pDCA."""
     path=folder/"case_policy.json"
     if path.exists():
@@ -213,7 +214,9 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     data=ctx["fit"]
     X=np.asarray(data["X"],float)
     ncomp=len(items)
-    lam=train_lambda(X,ncomp,intercept=True)
+    if not 0<lambda_scale<=1.:
+        raise ValueError('CASE penalty scale must be in (0,1]')
+    lam=lambda_scale*train_lambda(X,ncomp,intercept=True)
     penalty=np.ones(X.shape[1]);penalty[0]=0.
     objective=DCObjective(data["booked"],X,np.zeros(len(X)),response_map,
            mode="CASE",actual=data["actual"],components=ncomp,
@@ -244,7 +247,8 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     save(path,dict(weights=w.tolist(),initial_objective=float(initial),
             objective=float(result["objective"]),lambda_case=float(lam),
             lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
-            alpha=.8,h=30.,cap=response_map.cap))
+            alpha=.8,h=30.,cap=response_map.cap,
+            lambda_scale=lambda_scale))
     record_stage_time(folder,"case",time.perf_counter()-started)
     return w
 
