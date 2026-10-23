@@ -6,7 +6,6 @@ Only deployed advice is canonicalized to its minimum-magnitude preimage.
 Optimization retains the full adoption / attenuation / rejection response.
 """
 from __future__ import annotations
-from dataclasses import dataclass
 import json
 from pathlib import Path
 
@@ -26,16 +25,6 @@ def response(u, alpha=.8, h=30.):
     q=1.-alpha
     return np.sign(u)*np.minimum(alpha*np.abs(u),
                 np.maximum(h-q*np.abs(u),0.))
-
-
-@dataclass(frozen=True)
-class Scenario:
-    alpha: float = .8
-    h: float = 30.
-
-    def __post_init__(self):
-        if not (0 < self.alpha < 1 and self.h > 0):
-            raise ValueError("Response requires 0<alpha<1 and h>0")
 
 
 class ResponseDC:
