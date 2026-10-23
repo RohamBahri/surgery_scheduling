@@ -76,7 +76,7 @@ def test_certified_ray_selects_lowest_training_direct_cost_on_grid(
     assert selection["direct_train_cost_per_component"]==pytest.approx(
         best["mean_cost_per_component"])
     first=len(cache.calls)
-    second=ray.optimize_ray(ctx,root,output,cache,B,dict(),arg)
+    second=ray.optimize_ray(ctx,root,output,cache,B,dict(case_coeff=[0.,0.]),arg)
     assert len(cache.calls)==first
     assert second["s"]==selection["s"]
 
