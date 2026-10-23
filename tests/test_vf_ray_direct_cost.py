@@ -65,7 +65,7 @@ def test_certified_ray_selects_lowest_training_direct_cost_on_grid(
     root=tmp_path/"old"
     output=tmp_path/"new"
     arg=SimpleNamespace(s_max=2.,grid_points=5)
-    selection=ray.optimize_ray(ctx,root,output,cache,B,dict(),arg)
+    selection=ray.optimize_ray(ctx,root,output,cache,B,dict(case_coeff=[0.,0.]),arg)
     vals=selection["training_ledger"]
     assert {0.,1.}.issubset(set(float(row["s"]) for row in vals))
     assert selection["grid_complete"]
@@ -98,7 +98,7 @@ def test_unresolved_planner_points_cannot_be_marked_grid_optimal(
                                B.alpha*2.,atol=.001)
             return {"toy":dict(complete=not changed,assignment=[0,0,0],
                                status="TIME_LIMIT" if changed else "OPTIMAL")}
-    picked=ray.optimize_ray(ctx,tmp_path,tmp_path/"ray",Partial(),B,{},SimpleNamespace(
+    picked=ray.optimize_ray(ctx,tmp_path,tmp_path/"ray",Partial(),B,dict(case_coeff=[0.,0.]),SimpleNamespace(
         s_max=2.,grid_points=5))
     assert not picked["grid_complete"]
     assert not picked["endpoints_certified"]
