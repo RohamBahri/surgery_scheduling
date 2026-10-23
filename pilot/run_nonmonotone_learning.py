@@ -25,7 +25,8 @@ from scipy.optimize import linprog
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from surgery.nonmonotone_learning import (
-    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, response)
+    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, response,
+    library_value)
 from surgery.weekly_planner import evaluate, loads
 
 
@@ -251,13 +252,33 @@ def work(ctx,root,args):
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
                  backend=args.backend,solve_plans=oracle)
         chosen=np.asarray(state["theta"],float)
+        vf_d=response_map.reviewed(case_raw+H@chosen)
+        case_d=response_map.reviewed(case_raw)
+        vf_cert=library_value(train,state["libraries"],vf_d,actual,
+                              vf_lam,chosen)
+        case_cert=library_value(train,state["libraries"],case_d,actual,
+                                vf_lam,np.zeros_like(chosen))
+        booked_cert=library_value(train,state["libraries"],b,actual,
+                                  0.,np.zeros_like(chosen))
+        raw_vf=np.clip(case_raw+H@chosen,-args.cap,args.cap)
+        raw_case=np.clip(case_raw,-args.cap,args.cap)
+        def regimes(raw):
+            a=np.abs(raw)
+            threshold=30./(1.-.8)
+            return dict(attenuation_fraction=float(np.mean((a>30.)&(a<threshold))),
+                        rejection_fraction=float(np.mean(a>=threshold)),
+                        within_linear_fraction=float(np.mean(a<=30.)))
         save(root/"selected_policy.json",dict(method="CASE+VF",
                case_coeff=coef.tolist(),vf_theta=chosen.tolist(),
                lambda_case=json.loads((root/"case_policy.json").read_text())["lambda_case"],
                lambda_vf=vf_lam,cap=args.cap,alpha=.8,h=30.,
                train_components=len(train),train_cases=len(b),
                certificate_history=state["history"],
-               vf_status=state["status"]))
+               vf_status=state["status"],
+               common_library_certificates=dict(BOOKED=booked_cert,
+                      CASE=case_cert,VF=vf_cert),
+               raw_score_regimes=dict(CASE=regimes(raw_case),VF=regimes(raw_vf)),
+               note="Absolute training bounds, not realized benefit guarantees"))
         return
     if args.stage=="evaluate":
         selected=json.loads((root/"selected_policy.json").read_text())
