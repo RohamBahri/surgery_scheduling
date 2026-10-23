@@ -85,7 +85,7 @@ def verify_same_scenario(raw,booked,scenario):
 
 
 def evaluation_policy_labels():
-    """The two fitted policy families, each trained under BOTH assumptions."""
+    """A distinct CASE and VF policy under each of four training scenarios."""
     result=[]
     for train in TRAIN_SCENARIOS:
         result.extend((f"CASE__{train.name}",f"VF__{train.name}"))
@@ -94,7 +94,7 @@ def evaluation_policy_labels():
 
 def check_grid():
     assert len(TRAIN_SCENARIOS)==4 and len(EVAL_SCENARIOS)==6
-    assert len({s.name for s in EVAL_SCENARIOS})==4
+    assert len({s.name for s in EVAL_SCENARIOS})==6
     assert set(TRAIN_SCENARIOS).issubset(set(EVAL_SCENARIOS))
     assert set(s.link for s in (*TRAIN_SCENARIOS,*EVAL_SCENARIOS))=={"saturating"}
     for s in EVAL_SCENARIOS:
