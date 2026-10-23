@@ -1,0 +1,19 @@
+name: Non-monotone learning unit tests
+on:
+  push:
+    branches:
+      - feature/nonmonotone-case-vf-mm
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  mathematical-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install numpy scipy pandas pytest
+      - run: python -m pytest -q tests/test_nonmonotone_learning.py
