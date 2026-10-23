@@ -244,6 +244,16 @@ def main():
     if settings.exists() and json.loads(settings.read_text())!=manifest:
         raise RuntimeError("Source or scientific settings changed: choose a new --out directory")
     save(settings,manifest)
+    worst_jobs=len(ctx["train"])*len(args.caps)*(
+        3+len(scenarios)*(args.vf_outers+1))
+    if args.evaluate:
+        worst_jobs+=len(ctx["eval"])*(3+1+2*len(scenarios))
+    print("PRE-FLIGHT: full-cohort study; up to",worst_jobs,
+          "planner-component requests before caching/analytic short-circuits;",
+          len(ctx["train"]),"training components;",
+          len(scenarios),"response scenarios;",
+          args.vf_outers,"VF outer steps. No subset is silently used.",
+          flush=True)
     cache=PlannerCache(args.out,args.cores,args.plan_seconds)
     X=np.asarray(fit["X"],float)
     b=np.asarray(fit["booked"],float)
