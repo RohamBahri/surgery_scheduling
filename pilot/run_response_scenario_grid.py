@@ -373,6 +373,36 @@ def summarize(ctx,root):
               f"{len(good)}/{len(keys)} components, {n} cases",flush=True)
     global_valid=set.intersection(*all_valid_sets)
     summary["all_scenarios_common_certified_components"]=len(global_valid)
+    if global_valid:
+        source=json.loads((root/"evaluation_cells"/EVAL_SCENARIOS[0].name/
+                           "BOOKED.json").read_text())["entries"]
+        common_cases=sum(r["cases"] for r in source
+                         if r["component"] in global_valid)
+        summary["all_scenarios_common_certified_cases"]=common_cases
+        # Fair between-response comparisons require this SAME denominator.
+        common_grid={}
+        for scenario in EVAL_SCENARIOS:
+            common_grid[scenario.name]={}
+            for method in METHODS:
+                rows=json.loads((root/"evaluation_cells"/scenario.name/
+                                 (method+".json")).read_text())["entries"]
+                included=[r for r in rows if r["component"] in global_valid]
+                common_grid[scenario.name][method]=dict(
+                    cost_per_case=sum(r["cost"] for r in included)/common_cases,
+                    mae_per_case=sum(r["mae_sum"] for r in included)/common_cases)
+        summary["global_common_grid"]=common_grid
+        path=root/"cost_grid_global_matched.csv"
+        temp=path.with_suffix(".tmp")
+        with temp.open("w",newline="") as handle:
+            writer=csv.writer(handle)
+            writer.writerow(["evaluation_scenario","alpha","h",
+                             "global_common_cases",*METHODS])
+            for scenario in EVAL_SCENARIOS:
+                writer.writerow([scenario.name,scenario.alpha,scenario.h,
+                   common_cases,
+                   *[common_grid[scenario.name][m]["cost_per_case"]
+                     for m in METHODS]])
+        temp.replace(path)
     save(root/"summary.json",summary)
     cost_path=root/"cost_grid.csv"
     mae_path=root/"mae_grid.csv"
