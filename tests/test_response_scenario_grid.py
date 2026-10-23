@@ -204,3 +204,22 @@ def test_naive_matches_asymmetric_prediction_loss_on_train_only(tmp_path,
     assert saved["nominal_response_used"] is False
     assert saved["objective"]==pytest.approx(0.,abs=1e-7)
     assert saved["solver_status"]==0
+
+
+
+def test_grid_contract_can_be_reloaded_without_false_setting_change(tmp_path):
+    from pilot import run_response_scenario_grid as grid
+    source=tmp_path/"context.pkl"
+    source.write_bytes(b"frozen demo input")
+    folder=tmp_path/"grid"
+    folder.mkdir()
+    args=SimpleNamespace(context=source,case_steps=200,vf_outers=30,
+         vf_pdca_steps=50,cuts=160,plan_seconds=180.,cores=15)
+    grid.contract(args,folder)
+    before=json.loads((folder/"run_contract.json").read_text())
+    grid.contract(args,folder)
+    after=json.loads((folder/"run_contract.json").read_text())
+    assert before==after
+    assert len(before["arms"])==10
+    assert len(before["train"])==4
+    assert len(before["evaluation"])==6
