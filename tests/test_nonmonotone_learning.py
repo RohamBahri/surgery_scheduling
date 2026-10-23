@@ -114,3 +114,30 @@ def test_mm_acceptance_is_majorizer_descent(tmp_path):
     for r in ans["history"]:
         if r["accepted"]:
             assert r["majorizer_after"] <= r["before"]+1e-7
+
+
+def test_gurobi_convex_cut_master_when_license_available():
+    """Exercise the production QP interface, not merely the SciPy fallback."""
+    gp=pytest.importorskip("gurobipy")
+    try:
+        m=gp.Model("test_license")
+        m.Params.OutputFlag=0
+        x=m.addVar(lb=0,ub=1)
+        m.setObjective(x*x)
+        m.optimize()
+        m.dispose()
+    except gp.GurobiError as exc:
+        pytest.skip("No usable Gurobi license on this runner: "+str(exc))
+    b=np.array([120.,100.,120.,100.])
+    a=np.array([107.,111.,105.,112.])
+    X=np.array([[1,0],[1,1],[1,-1],[1,2]],float)
+    obj=DCObjective(b,X,np.zeros(len(b)),[Scenario(.8,30)],45.,
+                    mode="CASE",actual=a,ridge=.001,
+                    canonical_nominal=(.8,30.))
+    start=np.zeros(2)
+    answer=pdca(obj,start,radius=40,outer=3,max_cuts=20,backend="gurobi")
+    assert obj.value(answer["weights"]) <= obj.value(start)+1e-7
+    for step in answer["iterations"]:
+        assert step["after"] <= step["before"]+1e-7 or not step["accepted"]
+        if step["inner_status"] == "INNER_CONVERGED":
+            assert step["inner_certified"]
