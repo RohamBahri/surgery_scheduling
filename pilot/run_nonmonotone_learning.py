@@ -107,11 +107,20 @@ class PlannerCache:
         return results
 
 
-def train_lambda(design,ncomp):
-    from surgery.weekly_training import training_lambda
-    # Old research's training-only multiplier, rescaled from mean per CASE
-    # to the manuscript's mean per planning component.
-    return training_lambda(np.asarray(design,float)) * len(design)/ncomp
+def train_lambda(design,ncomp,*,intercept=False):
+    """Same training-only 2.75*1.1 Rademacher penalty rule for each design.
+
+    Unlike the old generic helper, VF has NO intercept: all five policy
+    features must contribute to its lambda calibration.
+    """
+    design=np.asarray(design,float)
+    features=design[:,1:] if intercept else design
+    rng=np.random.default_rng(20261013)
+    maxima=[]
+    for _ in range(10):
+        signs=rng.choice((-1.,1.),size=(16,len(design)))
+        maxima.extend(np.max(np.abs(signs@features),axis=1))
+    return float(2.75*1.1*np.quantile(maxima,.9)/ncomp)
 
 
 def lad_start(X,errors,lam,components,box):
@@ -150,7 +159,7 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
     X=np.asarray(data["X"],float)
     n=len(X)
     ncomp=len(items)
-    lam=train_lambda(X,ncomp)
+    lam=train_lambda(X,ncomp,intercept=True)
     penalty=np.ones(X.shape[1]);penalty[0]=0.
     obj=DCObjective(data["booked"],X,np.zeros(n),response_map,
           mode="CASE",actual=data["actual"],components=ncomp,
