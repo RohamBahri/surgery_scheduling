@@ -184,3 +184,23 @@ def test_grid_runner_help():
     assert result.returncode==0,result.stderr
     assert "--vf-outers" in result.stdout
     assert "--plan-seconds" in result.stdout
+
+
+
+def test_naive_matches_asymmetric_prediction_loss_on_train_only(tmp_path,
+                                                                monkeypatch):
+    from pilot import run_response_scenario_grid as grid
+    c=toy()
+    residual=np.array([8.,13.,18.])
+    design=np.column_stack((np.ones(3),np.array([-1.,0.,1.])))
+    booked=c.booked.copy()
+    actual=booked+residual
+    ctx=dict(train=[("toy",c,np.arange(3))],
+             fit=dict(X=design,booked=booked,actual=actual))
+    monkeypatch.setattr(grid,"train_lambda",lambda X,n,**kw:0.)
+    coeff=grid.fit_naive(ctx,tmp_path)
+    assert np.allclose(design@coeff,residual,atol=1e-6)
+    saved=json.loads((tmp_path/"naive_policy.json").read_text())
+    assert saved["nominal_response_used"] is False
+    assert saved["objective"]==pytest.approx(0.,abs=1e-7)
+    assert saved["solver_status"]==0
