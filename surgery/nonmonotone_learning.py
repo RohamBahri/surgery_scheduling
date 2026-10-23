@@ -263,6 +263,86 @@ def _save(path,payload):
     tmp.replace(path)
 
 
+class CaseConvexQP:
+    """One reusable exact convex epigraph QP for the CASE pDCA steps.
+
+    At each step minimize G(w)-gradH(current)@w + prox/2*||w-current||^2.
+    Per-case hinge auxiliaries model P and N, and A>=max(e+N,P).
+    All hinge coefficients are nonnegative, so these inequalities provide
+    the EXACT convex G, not a cutting-plane approximation. Reuse the same
+    constraints and warm start throughout CASE learning.
+    """
+
+    def __init__(self, objective, lower, upper):
+        import gurobipy as gp
+        from gurobipy import GRB
+        if objective.mode != "CASE":
+            raise ValueError("Exact CASE QP is intended for CASE only")
+        self.gp=gp
+        self.GRB=GRB
+        self.objective=objective
+        m=gp.Model("case_pdca_exact_epigraph")
+        m.Params.OutputFlag=0
+        self.model=m
+        n,p=objective.n,objective.p
+        self.w=m.addMVar(p,lb=lower,ub=upper,name="weights")
+        raw=sparse.csr_matrix(objective.X) @ self.w + objective.base
+        P=0. * raw + objective.map.offset
+        N=0. * raw
+        # Sparse per-hinge embedding avoids artificial constraints on absent
+        # case-specific floor breakpoints and uses no response binaries.
+        for j in range(objective.map.knots.shape[1]):
+            wp=objective.map.positive[:,j]
+            wn=objective.map.negative[:,j]
+            active=np.flatnonzero((wp+wn)>0.)
+            if not len(active):
+                continue
+            hinge=m.addMVar(len(active),lb=0.,name=f"hinge_{j}")
+            m.addConstr(hinge >= raw[active]-objective.map.knots[active,j],
+                        name=f"hinge_lower_{j}")
+            rows=active
+            columns=np.arange(len(active))
+            shape=(n,len(active))
+            if np.any(wp[active]):
+                plus=sparse.csr_matrix((wp[active],(rows,columns)),shape=shape)
+                P=P+plus@hinge
+            if np.any(wn[active]):
+                minus=sparse.csr_matrix((wn[active],(rows,columns)),shape=shape)
+                N=N+minus@hinge
+        A=m.addMVar(n,lb=-GRB.INFINITY,name="case_envelope")
+        e=objective.actual-objective.booked
+        m.addConstr(A >= P,name="case_P")
+        m.addConstr(A >= e+N,name="case_e_plus_N")
+        absw=m.addMVar(p,lb=0.,name="abs_coeff")
+        m.addConstr(absw>=self.w)
+        m.addConstr(absw>=-self.w)
+        self.base_G=(KAPPA/objective.components)*A.sum() \
+            -C_UNDER*float(e.sum())/objective.components \
+            +objective.lam*(objective.penalize@absw)
+
+    def solve(self, center, gradient, prox):
+        center=np.asarray(center,float)
+        m=self.model
+        w=self.w
+        m.setObjective(self.base_G-gradient@w
+                 +(.5*prox)*((w-center)@(w-center)),
+                 self.GRB.MINIMIZE)
+        w.Start=center
+        m.optimize()
+        if not m.SolCount:
+            return center,dict(status="CASE_QP_NO_SOLUTION",
+                               certified=False,trace=[],solver_status=int(m.Status))
+        candidate=np.asarray(w.X,float)
+        ok=m.Status==self.GRB.OPTIMAL
+        return candidate,dict(status="CASE_QP_OPTIMAL" if ok else "CASE_QP_FEASIBLE",
+                              certified=bool(ok),trace=[],
+                              solver_status=int(m.Status),
+                              objective=float(m.ObjVal))
+
+    def close(self):
+        self.model.dispose()
+
+
 def _solve_qp_cuts(objective, center, h_gradient, lower, upper, prox,
                    *, max_cuts=60, tolerance=1e-5, backend="gurobi"):
     """Solve convex pDCA master using supporting cuts for G, not all case hinges.
