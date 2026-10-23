@@ -300,3 +300,56 @@ def test_case_exact_qp_improves_with_70_shared_features():
                for r in result["iterations"])
     assert result["objective"]<obj.value(start)-1e-3
     assert any(r["accepted"] for r in result["iterations"])
+
+
+
+def test_fast_planned_cost_matches_current_weekly_evaluate_exactly():
+    from surgery.nonmonotone_learning import planned_cost_fast
+    from surgery.weekly_planner import evaluate
+    c=toy_week()
+    rng=np.random.default_rng(2101)
+    for z in ([0,0,0],[0,1,1],[1,0,1],[1,1,1]):
+        for durations in (c.booked, c.actual, rng.uniform(1.,650.,size=c.n)):
+            expected=evaluate(c,z,durations)["cost"]
+            assert planned_cost_fast(c,z,durations)==pytest.approx(
+                expected,rel=0,abs=1e-9)
+
+
+def test_pdca_progress_jsonl_persists_iteration_diagnostics(tmp_path,capsys):
+    b=np.array([120.,100.,40.,15.])
+    X=np.array([[1.,0.],[1.,1.],[1.,-1.],[1.,2.]])
+    m=ResponseDC(b,.8,30.,180.,1.)
+    obj=DCObjective(b,X,np.zeros(len(b)),m,mode="CASE",
+                    actual=np.array([107.,111.,45.,12.]),
+                    components=1,lam=.001,penalize=np.array([0.,1.]))
+    file=tmp_path/"case_progress.jsonl"
+    ans=pdca(obj,np.zeros(2),radius=50.,outer=3,
+             max_cuts=35,backend="scipy",
+             progress_label="CASE",progress_path=file)
+    import json
+    lines=[json.loads(row) for row in file.read_text().splitlines()]
+    assert len(lines)==len(ans["iterations"])
+    assert all("elapsed_seconds" in row and "weights" in row
+               and "inner_status" in row for row in lines)
+    assert "CASE pDCA" in capsys.readouterr().out
+
+
+def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
+    from pilot.run_nonmonotone_learning import save_case_table
+    import csv
+    b=np.array([10.,100.])
+    X=np.ones((2,5))
+    m=ResponseDC(b,.8,30.,180.,1.)
+    data=dict(case_id=np.array([101,102]),booked=b,
+              actual=np.array([12.,90.]))
+    out=tmp_path/"train.csv"
+    save_case_table(out,data,np.array([18.,-160.]),
+                    np.array([35.,-90.]),X,m)
+    with out.open(newline="") as handle:
+        records=list(csv.DictReader(handle))
+    assert len(records)==2
+    assert "case_display" in records[0]
+    assert "vf_reviewed" in records[0]
+    assert sum(k.startswith("feature_") for k in records[0])==5
+    assert float(records[1]["case_reviewed"]) == pytest.approx(
+        m.reviewed(np.array([18.,-160.]))[1])
