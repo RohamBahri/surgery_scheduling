@@ -27,7 +27,7 @@ from pilot.run_nonmonotone_learning import (
     record_stage_time)
 from surgery.nonmonotone_learning import ResponseDC, response, mm_vf
 from surgery.nominal_shared import train_shared
-from surgery.weekly_planner import evaluate, loads
+from surgery.weekly_planner import evaluate as planner_evaluate, loads
 
 ARMS=("BOOKED","CASE","VF_PDCA","VF_DIRECTIONS","SHARED")
 CASE_L1_SCALE=.75
@@ -231,11 +231,7 @@ def evaluate(ctx,args,root,cache,selected):
 
 
 def evaluate_week(week,assignment):
-    return evaluate_cost(week,assignment,week.actual)
-
-
-def evaluate_cost(week,assignment,durations):
-    return evaluate(week,assignment,durations)
+    return planner_evaluate(week,assignment,week.actual)
 
 
 def report(root):
