@@ -163,3 +163,63 @@ def test_ray_canonical_policy_stays_s_max_one_endpoints():
     g=ray.ray_points(a,1.,13)
     assert len(g)==13
     assert g[0]==0. and g[-1]==1.
+
+
+
+def test_all_twelve_scenarios_full_fourteen_arm_matched_report(
+        tmp_path,monkeypatch):
+    """No original arm is recomputed when ray-only evaluation is appended."""
+    week=toy_week()
+    item=[("toy",week,np.arange(3))]
+    data=dict(booked=week.booked.copy(),actual=week.actual.copy(),
+              case_id=week.case_ids.copy())
+    ctx=dict(eval=item,held=data)
+    root=tmp_path/"old"
+    extroot=root/"response_extension"
+    out=root/"vf_ray_extension"
+    base=evaluate(week,[0,0,0],week.actual)
+    for sc in previous.ALL_SCENARIOS:
+        for arm in original.METHODS:
+            target=(root/"evaluation_cells" if sc.link=="saturating"
+                    else extroot/"evaluation_cells")
+            file=target/sc.name/(arm+".json")
+            file.parent.mkdir(parents=True,exist_ok=True)
+            row=dict(component="toy",site=week.group,week=week.monday,
+                     cases=3,method=arm,evaluation_scenario=sc.name,
+                     complete=True,planner_status="OPTIMAL",
+                     cost=float(base["cost"]),
+                     idle_minutes=float(base["idle"]),
+                     overtime_minutes=float(base["overtime"]),
+                     mae_sum=0.)
+            original.save(file,dict(method=arm,evaluation=vars(sc),
+                                    entries=[row]))
+    calls=[]
+    class FakeCache:
+        def solve(self,items,durations,tag,tie=False):
+            calls.append((tag,tie))
+            return {"toy":dict(complete=True,assignment=[0,0,0],
+                               status="OPTIMAL",bound=0.)}
+    frozen={"VF_RAY__"+s.name:np.array([0.,10.,-10.])
+            for s in TRAIN_SCENARIOS}
+    ray.evaluate_ray(ctx,root,out,FakeCache(),frozen)
+    assert len(calls)==48
+    report=ray.summarize(ctx,root,out)
+    saved=json.loads((out/"summary.json").read_text())
+    assert saved["global_matched_cases"]==3
+    assert saved["global_matched_components"]==1
+    assert len(saved["scenarios"])==12
+    assert len(saved["methods"])==14
+    for sc in saved["scenarios"].values():
+        assert len(sc["globally_matched_methods"])==14
+        assert len(sc["paired_contrasts"])==16
+    with (out/"cost_grid_global_matched.csv").open(newline="") as handle:
+        table=list(csv.DictReader(handle))
+    assert len(table)==12
+    assert "VF_RAY__SAT_A80_H30" in table[0]
+    original_bytes=(root/"evaluation_cells"/previous.B_SCENARIOS[0].name/
+                    "VF__SAT_A80_H30.json").read_bytes()
+    ray.evaluate_ray(ctx,root,out,FakeCache(),frozen)
+    assert len(calls)==48
+    assert original_bytes==(
+       root/"evaluation_cells"/previous.B_SCENARIOS[0].name/
+       "VF__SAT_A80_H30.json").read_bytes()
