@@ -1,193 +1,174 @@
-"""Mathematical regression tests for full-response CASE and VF MM."""
+"""Contracts for the single-nominal-response CASE and VF library-MM study."""
 import numpy as np
 import pytest
 from scipy import sparse
 
 from surgery.nonmonotone_learning import (
-    C_OVER, C_UNDER, KAPPA, TURNOVER, CAPACITY,
-    ResponseDC, Scenario, DCObjective, pdca, mm_vf, response,
-)
+    C_OVER, C_UNDER, ResponseDC, DCObjective, response, pdca,
+    room_matrix, library_value, mm_vf, choose_library_schedules)
 
 
-@pytest.mark.parametrize("alpha,h,cap",[(0.8,30,45),(.4,30,60),(.25,15,45),(1.,30,60)])
-@pytest.mark.parametrize("canonical", [None,(.8,30.)])
-def test_exact_response_dc_including_short_bookings_and_rejection(alpha,h,cap,canonical):
-    booked=np.array([2.,12.,45.,120.,560.])
-    mapping=ResponseDC(booked,alpha,h,cap,canonical)
-    rng=np.random.default_rng(134)
-    for u in (np.zeros(5),np.full(5,300.),np.full(5,-300.),
-              *[rng.uniform(-200,200,size=5) for _ in range(15)]):
-        mapping.verify(u,1e-7)
-        P,N,dP,dN=mapping.parts(u)
-        assert np.all(dP>=-1e-9)
-        assert np.all(dN>=-1e-9)
-        assert np.all(mapping.reviewed(u)>=1.-1e-9)
-        if canonical is not None:
-            a0,h0=canonical
-            lo=np.maximum(-cap,1.-booked)
-            original=np.clip(u,lo,cap)
-            display=mapping.display(u)
-            assert np.allclose(response(display,a0,h0),
-                               response(original,a0,h0),atol=1e-8)
-            assert np.all(abs(display)<=abs(original)+1e-9)
-
-
-def test_nonmonotone_response_is_not_replaced_by_saturation():
-    u=np.array([20.,30.,60.,150.,180.])
-    got=response(u,.8,30.)
-    assert got[0] == pytest.approx(16.)
-    assert got[1] == pytest.approx(24.)
-    assert got[2] == pytest.approx(18.)
-    assert got[3] == pytest.approx(0.)
-    assert got[4] == pytest.approx(0.)
-
-
-def test_case_decomposition_equals_actual_asymmetric_loss():
-    b=np.array([90.,120.,40.,15.])
-    a=np.array([70.,145.,65.,11.])
-    X=np.array([[1,0], [1,1], [1,-1], [1,2.]],float)
-    scenarios=[Scenario(.8,30),Scenario(.4,15)]
-    obj=DCObjective(b,X,np.zeros(4),scenarios,60.,mode="CASE",
-                    actual=a,ridge=0.,l1=0.,canonical_nominal=(.8,30.))
-    w=np.array([16.,-3.])
-    target=0.
-    for s in scenarios:
-        d=ResponseDC(b,s.alpha,s.h,60.,(.8,30.)).reviewed(X@w)
-        target+=(C_OVER*np.maximum(a-d,0)+C_UNDER*np.maximum(d-a,0)).sum()/len(b)/2
-    assert obj.value(w)==pytest.approx(target,rel=1e-9,abs=1e-8)
-
-
-def test_vf_decomposition_matches_fixed_plan_cost():
-    b=np.array([100.,145.,95.])
-    X=np.array([[1,0], [0,1], [-1,2]],float)
-    raw=np.array([40.,-40.,10.])
-    bank=np.array([[120.,153.,89.],[80.,160.,112.]])
-    S=sparse.csr_matrix([[1,1,0],[0,0,1]])
-    scenarios=[Scenario(.8,30),Scenario(.4,15)]
-    obj=DCObjective(b,X,raw,scenarios,45.,mode="VF",
-                    actual_bank=bank,room_matrices=[S,S],
-                    ridge=0.,canonical_nominal=(.8,30.))
-    w=np.array([5.,-2.])
-    expected=0.
-    for s in scenarios:
-        d=ResponseDC(b,s.alpha,s.h,45.,(.8,30.)).reviewed(raw+X@w)
-        loads=S@d+TURNOVER*(np.diff(S.indptr)-1)
-        cost=(KAPPA*np.maximum(bank-d[None,:],0).mean(axis=0).sum()
-              +TURNOVER*S.shape[0]+KAPPA*np.maximum(loads-CAPACITY,0).sum())
-        expected+=cost/len(b)/2
-    assert obj.value(w)==pytest.approx(expected,rel=1e-9,abs=1e-8)
-
-
-def test_scipy_smoke_pdca_case_exact_descent():
-    b=np.array([120.,100.,120.,100.])
-    a=np.array([107.,111.,105.,112.])
-    X=np.array([[1,0],[1,1],[1,-1],[1,2]],float)
-    obj=DCObjective(b,X,np.zeros(len(b)),[Scenario(.8,30)],45.,
-                    mode="CASE",actual=a,ridge=.001,
-                    canonical_nominal=(.8,30.))
-    initial=np.zeros(2)
-    ans=pdca(obj,initial,radius=40,outer=3,max_cuts=30,backend="scipy")
-    assert obj.value(ans["weights"])<=obj.value(initial)+1e-7
-    assert all(r["after"]<=r["before"]+1e-7 for r in ans["iterations"] if r["accepted"])
-
-
-def test_mm_acceptance_is_majorizer_descent(tmp_path):
+def toy_week():
     from surgery.weekly_data import Week
-    w=Week(group="TGH",monday="2012-01-02",slots=((0,"OR1"),),
-           case_ids=np.array([1,2,3]),surgeon_ids=("S1",),
-           surgeon=np.zeros(3,dtype=int),original=np.zeros(3,dtype=int),
-           allowed=((0,),),required_days=((0,),),
-           booked=np.array([100.,120.,140.]),actual=np.array([110.,140.,130.]),
-           added_days=())
-    calls=[]
-    def planner(items,durations,j,k):
-        calls.append((j,k))
-        return {"one":[0,0,0]}
-    s=[Scenario(.8,30)]
-    ans=mm_vf([("one",w,np.arange(3))],w.booked,
-              np.array([[1.],[0.5],[-1.]]),np.zeros(3),
-              s,np.array([[110.,145.,125.],[120.,100.,160.]]),45.,
-              root=tmp_path,iterations=2,pdca_steps=2,max_cuts=20,
-              backend="scipy",solve_plans=planner,
-              canonical_nominal=(.8,30.))
-    assert len(calls)>=1
-    for r in ans["history"]:
-        if r["accepted"]:
-            assert r["majorizer_after"] <= r["before"]+1e-7
+    return Week("TGH","2012-01-02",((0,"OR1"),(0,"OR2")),
+        np.array([101,102,103]),("S1",),
+        np.zeros(3,dtype=int),np.zeros(3,dtype=int),
+        ((0,1),),((0,),),
+        np.array([190.,180.,160.]),np.array([195.,175.,170.]),()).validate()
 
 
-def test_gurobi_convex_cut_master_when_license_available():
-    """Exercise the production QP interface, not merely the SciPy fallback."""
-    gp=pytest.importorskip("gurobipy")
-    try:
-        m=gp.Model("test_license")
-        m.Params.OutputFlag=0
-        x=m.addVar(lb=0,ub=1)
-        m.setObjective(x*x)
-        m.optimize()
-        m.dispose()
-    except gp.GurobiError as exc:
-        pytest.skip("No usable Gurobi license on this runner: "+str(exc))
-    b=np.array([120.,100.,120.,100.])
-    a=np.array([107.,111.,105.,112.])
-    X=np.array([[1,0],[1,1],[1,-1],[1,2]],float)
-    obj=DCObjective(b,X,np.zeros(len(b)),[Scenario(.8,30)],45.,
-                    mode="CASE",actual=a,ridge=.001,
-                    canonical_nominal=(.8,30.))
+def test_three_regime_response_not_inverse_clip():
+    u=np.array([0.,20.,30.,60.,150.,180.,-30.,-60.,-150.])
+    got=response(u)
+    assert np.allclose(got,[0,16,24,18,0,0,-24,-18,0])
+    assert np.sign(response(-60.))==-1.
+
+
+@pytest.mark.parametrize("cap",[20.,30.,180.])
+def test_exact_casewise_floor_breakpoint_compiler_and_minimum_display(cap):
+    b=np.array([1.,2.,3.,8.,12.,20.,40.,100.,560.])
+    m=ResponseDC(b,.8,30.,cap,1.)
+    rng=np.random.default_rng(22)
+    grid=np.linspace(-300,300,1201)
+    for scalar in grid:
+        m.verify(np.full(len(b),scalar))
+    for _ in range(30):
+        u=rng.uniform(-250,250,len(b))
+        m.verify(u)
+    assert np.all(m.reviewed(np.full(len(b),-50.))>=1.)
+    if cap==180.:
+        # For b=2, a strong negative raw display induces the FLOOR,
+        # not the old artificial display clipping to 1-b.
+        assert m.reviewed(np.full(len(b),-30.))[1]==pytest.approx(1.)
+        # A sufficiently extreme display is REJECTED, not shortened.
+        assert m.reviewed(np.full(len(b),-180.))[1]==pytest.approx(2.)
+    assert np.max(abs(m.display(np.full(len(b),100.))))<=30.+1e-9
+
+
+def test_case_exact_dc_identity_against_direct_asymmetric_loss():
+    booked=np.array([2.,40.,120.,100.,9.])
+    actual=np.array([3.,66.,105.,130.,12.])
+    X=np.array([[1.,-1.],[1.,1.],[1.,0.],[1.,2.],[1.,-.5]])
+    m=ResponseDC(booked,.8,30.,180.,1.)
+    mask=np.array([0.,1.])
+    obj=DCObjective(booked,X,np.zeros(len(booked)),m,mode="CASE",
+                    actual=actual,components=3,lam=.003,penalize=mask)
+    rng=np.random.default_rng(74)
+    for _ in range(20):
+        w=rng.uniform(-200,200,size=2)
+        d=m.reviewed(X@w)
+        err=actual-d
+        direct=(C_OVER*np.maximum(err,0).sum()+
+                C_UNDER*np.maximum(-err,0).sum())/3+.003*abs(w[1])
+        assert obj.value(w)==pytest.approx(direct,rel=1e-10,abs=1e-8)
+
+
+def test_vf_fixed_schedule_exact_dc_identity_includes_unused_roster():
+    c=toy_week()
+    items=[("toy",c,np.arange(c.n))]
+    z={"toy":[0,0,0]}
+    S,counts=room_matrix(items,z,c.n)
+    assert list(counts)==[3,0]
+    X=np.column_stack((np.ones(c.n),np.array([-1.,2.,0.])))
+    base=np.array([50.,-70.,170.])
+    m=ResponseDC(c.booked,.8,30.,180.,1.)
+    obj=DCObjective(c.booked,X,base,m,mode="VF",actual=c.actual,
+                    components=1,rooms=S,lam=.01)
+    rng=np.random.default_rng(15)
+    from surgery.weekly_planner import evaluate
+    for _ in range(20):
+        w=rng.uniform(-30,30,size=2)
+        d=m.reviewed(base+X@w)
+        error=c.actual-d
+        direct=(evaluate(c,z["toy"],d)["cost"]+
+                (C_OVER*np.maximum(error,0)+C_UNDER*np.maximum(-error,0)).sum()
+                +.01*np.abs(w).sum())
+        assert obj.value(w)==pytest.approx(direct,rel=1e-10,abs=1e-8)
+
+
+def test_library_majorizer_is_touching_and_global_upper_bound():
+    c=toy_week();items=[("toy",c,np.arange(c.n))]
+    libraries={"toy":[[0,0,0],[0,1,1]]}
+    X=np.column_stack((np.ones(c.n),np.array([1.,-1.,.5])))
+    raw=np.array([50.,-70.,80.])
+    m=ResponseDC(c.booked,.8,30.,180.,1.)
+    w=np.array([3.,-2.])
+    d=m.reviewed(raw+X@w)
+    selected=choose_library_schedules(items,libraries,d)
+    S,_=room_matrix(items,selected,c.n)
+    obj=DCObjective(c.booked,X,raw,m,mode="VF",actual=c.actual,
+                    components=1,rooms=S,lam=0.)
+    touch=library_value(items,libraries,d,c.actual,0.,w)
+    assert obj.value(w)==pytest.approx(touch,abs=1e-8)
+    rng=np.random.default_rng(12)
+    for _ in range(30):
+        trial=rng.uniform(-50,50,size=2)
+        future=m.reviewed(raw+X@trial)
+        assert library_value(items,libraries,future,c.actual,0.,trial) <= (
+               obj.value(trial)+1e-7)
+
+
+@pytest.mark.parametrize("backend",["scipy","gurobi"])
+def test_case_pdca_exact_objective_descent(backend):
+    if backend=="gurobi":
+        gp=pytest.importorskip("gurobipy")
+        try:
+            model=gp.Model();model.Params.OutputFlag=0
+            x=model.addVar(lb=0,ub=1)
+            model.setObjective(x*x);model.optimize();model.dispose()
+        except gp.GurobiError:
+            pytest.skip("No Gurobi license")
+    b=np.array([120.,100.,40.,15.])
+    a=np.array([107.,111.,45.,12.])
+    X=np.array([[1.,0.],[1.,1.],[1.,-1.],[1.,2.]])
+    m=ResponseDC(b,.8,30.,180.,1.)
+    obj=DCObjective(b,X,np.zeros(len(b)),m,mode="CASE",
+                    actual=a,components=1,lam=.001,
+                    penalize=np.array([0.,1.]))
     start=np.zeros(2)
-    answer=pdca(obj,start,radius=40,outer=3,max_cuts=20,backend="gurobi")
-    assert obj.value(answer["weights"]) <= obj.value(start)+1e-7
-    for step in answer["iterations"]:
-        assert step["after"] <= step["before"]+1e-7 or not step["accepted"]
-        if step["inner_status"] == "INNER_CONVERGED":
-            assert step["inner_certified"]
+    out=pdca(obj,start,radius=50.,outer=4,max_cuts=35,backend=backend)
+    assert obj.value(out["weights"]) <= obj.value(start)+1e-7
+    assert all(not row["accepted"] or row["after"] < row["before"]
+               for row in out["iterations"])
 
 
-def test_gurobi_exact_planner_plus_vf_mm_if_licensed(tmp_path):
-    """Small but real planner -> scenario response -> outer MM integration."""
-    gp=pytest.importorskip("gurobipy")
-    try:
-        m=gp.Model("vf_integration_license")
-        m.Params.OutputFlag=0
-        x=m.addVar(lb=0.,ub=1.)
-        m.setObjective(x*x)
-        m.optimize()
-        m.dispose()
-    except gp.GurobiError as exc:
-        pytest.skip("No licensed small Gurobi model: "+str(exc))
-    from surgery.weekly_data import Week
-    from surgery.anchored_weekly_solver import solve_week
-    week=Week("TGH","2012-01-02",((0,"OR1"),(0,"OR2")),
-        np.array([101,102,103]),("S1",),np.zeros(3,dtype=int),
-        np.zeros(3,dtype=int),((0,1),),((0,),),
-        np.array([190.,180.,160.]),np.array([195.,175.,170.]),())
-    week.validate()
-    tested=[]
-    def true_planner(items,durations,j,k):
-        a=solve_week(week,np.asarray(durations),seconds=20,threads=1,tie=False)
-        assert a.complete and a.assignment is not None
-        tested.append((j,k))
-        return {"block":a.assignment}
-    ans=mm_vf([("block",week,np.arange(3))],week.booked,
-              np.array([[1.],[0.5],[-0.25]]),
-              np.array([12.,-4.,8.]),[Scenario(.8,30)],
-              np.array([[205.,170.,166.],[185.,190.,175.]]),
-              45.,root=tmp_path,iterations=2,pdca_steps=2,
-              max_cuts=20,backend="gurobi",solve_plans=true_planner,
-              canonical_nominal=(.8,30.))
-    assert tested
-    assert all(not r["accepted"] or r["majorizer_after"] < r["before"]+1e-8
-               for r in ans["history"])
+@pytest.mark.parametrize("backend",["scipy","gurobi"])
+def test_library_mm_trains_and_keeps_feasible_timeout_incumbent(tmp_path,backend):
+    if backend=="gurobi":
+        gp=pytest.importorskip("gurobipy")
+        try:
+            mm=gp.Model();mm.Params.OutputFlag=0
+            v=mm.addVar(lb=0,ub=1);mm.setObjective(v*v)
+            mm.optimize();mm.dispose()
+        except gp.GurobiError:
+            pytest.skip("No Gurobi license")
+    week=toy_week()
+    items=[("toy",week,np.arange(week.n))]
+    m=ResponseDC(week.booked,.8,30.,180.,1.)
+    calls=[]
+    def oracle(items,d,k):
+        calls.append(k)
+        return {"toy":dict(assignment=[0,0,0],bound=0.,
+                           complete=False,status="TIME_LIMIT")}
+    results=mm_vf(items,week.booked,
+            np.array([[1.],[.5],[-1.]]),np.array([12.,-4.,40.]),
+            m,week.actual,root=tmp_path,lam=.001,
+            initial_libraries={"toy":[[0,0,0],[0,1,1]]},
+            iterations=2,pdca_steps=3,max_cuts=25,
+            backend=backend,solve_plans=oracle)
+    assert calls
+    for r in results["history"]:
+        if r["accepted"]:
+            assert r["delta"]>0.
+    assert results["libraries"]["toy"]
 
 
-def test_training_command_imports_and_has_help():
-    """The actual entrypoint must load under the pinned Gurobi environment."""
-    pytest.importorskip("gurobipy")
-    import subprocess
-    import sys
+def test_runner_help_imports_without_training():
+    import subprocess,sys
     from pathlib import Path
     entry=Path(__file__).resolve().parents[1]/"pilot"/"run_nonmonotone_learning.py"
-    proc=subprocess.run([sys.executable,str(entry),"--help"],
-                        cwd=entry.parents[1],capture_output=True,text=True,timeout=20)
-    assert proc.returncode==0,proc.stderr
-    assert "--context" in proc.stdout and "--scenario" in proc.stdout
+    out=subprocess.run([sys.executable,str(entry),"--help"],cwd=entry.parents[1],
+                       capture_output=True,text=True,timeout=25)
+    assert out.returncode==0,out.stderr
+    assert "evaluate" in out.stdout and "vf" in out.stdout
+    assert "--scenario" not in out.stdout
