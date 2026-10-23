@@ -1,60 +1,56 @@
-# Nominal CASE and VF: full response + library MM/pDCA
+# Nominal CASE + VF: full-response pDCA and schedule-library MM
 
-**Status:** research branch, draft PR #40. Old frozen artifacts and main remain unchanged.
+Implementation: draft PR #40; main and frozen earlier experiments are unchanged.
 
-## Agreed method
+## Scientific specification
 
-BOOKED (zero display), CASE (response-aware), and VF (CASE plus five planning
-features) are the ONLY arms. Response is homogeneous nominal alpha=0.8, h=30.
-No sweep, response uncertainty, profiles, cap optimization, or direct SHARED
-method in this experiment.
+Only BOOKED, CASE, and VF are compared. One nominal assumed surgeon
+response (alpha=0.8, h=30), not surgeon-specific or estimated, is used in
+both learning and evaluation. NO response-scenario banks, heterogeneity,
+robustness sweeps, or unrelated algorithm arms are in this run.
 
-CASE optimizes an unrestricted shared raw displayed-advice score Xw through
-the TRUE nonmonotone adoption/attenuation/rejection map, except a nominal
-UI cap of +/-180 minutes. The positive-duration floor f=1 is applied to the
-REVIEWED booking, not as a lower bound on displayed advice; the compiler
-includes extra breakpoints for floored cases. The operational display
-F_eff(raw)/alpha is the minimum-magnitude display giving the same nominal
-reviewed booking. Both CASE and VF optimize the raw score, not this
-canonicalized display.
+Use exactly the same historical UHN cohort, physical room-day roster and
+eligibility components as the latest SHARED/VF experiments. The old paper
+provides ONLY the VF envelope and pDCA/MM algorithm; it does not determine
+the roster. All room-day blocks are charged for idle capacity, including
+unused blocks. The planner and hash-0 deployment tie rule are reused.
 
-CASE's training objective is asymmetric post-response case error plus a
-training-derived L1 coefficient penalty. It is solved by proximal DCA with
-the exact convex/convex hinge decomposition and a convex cutting-plane QP,
-starting from LAD and from a converted prior CASE warm start. Every accepted
-step is checked against the exact unsmoothed objective.
+CASE learns an affine RAW displayed-advice score Xw through the full
+nonmonotone response (adoption, attenuation, rejection). The UI cap is
+180 minutes; a positive-duration floor is applied AFTER response. The
+operational displayed correction is the minimum-magnitude preimage of the
+learned effective revision under the nominal response. The shared policy
+weights are never constrained to a joint casewise reachable interval.
 
-After CASE training, compute ONE fixed provisional plan per component using
-the deterministic hash-0 tie rule. Construct five standardized features:
-history surgeon spread, history procedure spread, provisional load deviation
-p = clip((load-480)/120,-2,2), and the two corresponding interactions.
-No circular final-plan feature updates. Freeze CASE and fit five VF
-incremental coefficients, initialized at zero, so VF(0) equals CASE.
+CASE first solves training-only regularized LAD, then uses pDCA with an
+EXACT convex hinge-epigraph Gurobi QP, reused across iterations. This
+eliminates the approximate 70-variable cutting-plane master that was
+stalling on the component-normalized (~hundreds) objective. One LAD
+start is used, not a second initialization from old inverse-link CASE.
 
-VF optimizes the manuscript Section 4 full asymmetric training bound:
-mean by training COMPONENT of (minimum library J(z,reviewed duration) plus
-sum of 1.75*positive case error + 1.0*negative case error) with a
-training-only L1 penalty on VF coefficients. Every staffed roster block
-contributes idle cost even when unused. Initial schedule libraries contain
-original, BOOKED and CASE-draft feasible assignments. Each outer step
-requests new feasible planner incumbents, adds them, selects each library's
-cheapest schedule, then uses pDCA to improve the touching MM majorizer.
-A time-limited MIP can still add its feasible incumbent; missing dual
-bounds are replaced by the valid zero lower bound, NEVER by a false optimum.
-The run tracks Delta (certified library descent), epsilon (library minus
-planner dual bound), inner solver status, coefficients and full training
-certificate. MM does not certify global optimality or finite-run stationarity.
+Recompute ONE CASE provisional plan per component with hash seed 0 and
+freeze five new standardized features: historical surgeon spread,
+historical procedure spread, provisional block load deviation, and the
+two spread-by-congestion interactions.
 
-## One important manuscript inconsistency
+VF learns five shared display coefficients added to the frozen CASE
+score. At zero increment VF exactly equals CASE. The Section 4
+schedule-library surrogate is the minimum planned idle/overtime cost
+over stored feasible schedules PLUS the full asymmetric realized
+case-duration error envelope, normalized by eligibility component,
+with an L1 coefficient penalty.
 
-The current weekly planner correctly accounts for all roster-block capacity,
-including unoccupied blocks. BUT the existing cohort builder constructs the
-list of physical room-day slots from rooms OBSERVED IN THAT WEEK, rather
-than the fixed training-derived median-count roster template described in
-the supplied implementation note. This new learner inherits the previous
-context. The roster difference remains unresolved; do not describe it as
-verified fixed-template planning. The branch does not silently change the
-planning cohort or eligibility to match a manuscript sentence.
+VF starts its feasible schedule libraries with the BOOKED and CASE
+provisional assignments. At each outer iteration it adds planner
+incumbents (even if not certified optimal), chooses the least-cost
+library assignment, optimizes a TOUCHING MM majorizer through
+five-variable pDCA with convex cutting planes, and accepts only
+verified improvements. A cut-budget hit alone does NOT stop pDCA if
+the candidate improves. Record the per-iteration Delta and epsilon.
+Missing planner dual bounds use zero, a valid lower bound for
+nonnegative idle/overtime cost. None of this implies globally
+optimal learned coefficients, finite-run stationarity, or realized
+hospital savings.
 
 ## Run
 
@@ -64,60 +60,63 @@ planning cohort or eligibility to match a manuscript sentence.
     python -m pip install -e . --no-deps
     python -m pytest -q tests/test_nonmonotone_learning.py
 
-Required prepared context:
+Use a NEW output directory: older experiment results have a different
+CASE solver and scientific settings.
 
-    artifacts/objective_selection_12h/objective_selection_2013/context.pkl
-
-If unavailable, create it WITHOUT rerunning all prior methods:
-
-    python pilot/run_objective_selection.py \
-      --stage setup \
-      --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx \
-      --out artifacts/new_context \
-      --cores 10 --setup-solve-seconds 180
-
-Then use --context artifacts/new_context/objective_selection_2013/context.pkl.
-
-Train only CASE first:
+First run CASE alone:
 
     python pilot/run_nonmonotone_learning.py \
       --stage case \
       --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-      --out artifacts/nominal_case_vf_mm \
-      --case-steps 200 --cores 15 --backend gurobi
+      --out artifacts/case_vf_exact_qp_v1 \
+      --cores 15 --case-steps 200 --backend gurobi
 
-Continue to the draft and VF, using the SAME settings/output:
+The CASE file case_policy.json contains initial_objective,
+objective, the LAD status, pDCA descent history, and inner statuses.
+Confirm that pDCA actually improves CASE beyond its LAD initializer
+before interpreting any later CASE/VF comparison.
+
+Then train VF:
 
     caffeinate -i python pilot/run_nonmonotone_learning.py \
       --stage vf \
       --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-      --out artifacts/nominal_case_vf_mm \
+      --out artifacts/case_vf_exact_qp_v1 \
+      --cores 15 --plan-seconds 180 \
       --case-steps 200 --vf-outers 30 --vf-pdca-steps 50 \
-      --cuts 80 --cores 15 --plan-seconds 180 --backend gurobi
+      --cuts 80 --backend gurobi
 
-You may use --stage all to fit CASE, draft and VF together. Finished
-CASE, feasible plans and VF outer steps are checkpointed. A changed source
-or science configuration should use a NEW output directory.
-
-Only AFTER training, retrospectively evaluate the three models:
+After fitting is frozen, do the single nominal 2013 evaluation:
 
     python pilot/run_nonmonotone_learning.py \
       --stage evaluate \
       --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-      --out artifacts/nominal_case_vf_mm \
+      --out artifacts/case_vf_exact_qp_v1 \
+      --cores 15 --plan-seconds 180 \
       --case-steps 200 --vf-outers 30 --vf-pdca-steps 50 \
-      --cuts 80 --cores 15 --plan-seconds 180 --backend gurobi
+      --cuts 80 --backend gurobi
 
-Outputs: case_policy.json, vf_features.json, plans/, vf_library_progress.json,
-selected_policy.json, evaluation_2013.json and summary.json.
+Required context can be generated, if missing, with the prior
+objective-selection runner's --stage setup without rerunning
+old optimization comparisons.
 
-## Evidence still needed for manuscript
+## Only essential outputs
 
-A full UHN run has NOT been executed. The 2013 sample is reused and any
-result is exploratory, NOT an independently untouched confirmatory test.
-Record solver coverage, time, CASE starts, library certificates, epsilon
-gaps, pDCA cut gaps, and actual common-certified costs. Check line search,
-tied schedules and stationarity only as diagnostics: finite-run termination
-cannot establish full stationarity. The exact roster construction remains
-an explicit operational mismatch. This study does not estimate actual
-surgeon response parameters, and does not prove realized savings.
+case_policy.json (CASE coefficients, LAD and pDCA progress),
+vf_features.json (frozen train feature normalization),
+vf_library_progress.json (VF policy, libraries, Delta and epsilon),
+selected_policy.json (frozen CASE and VF coefficients),
+evaluation_2013.json (three-arm component-level outcomes), and
+summary.json (common certified coverage, cost/case, MAE/case,
+week-clustered paired cost bootstrap intervals and better/worse weeks).
+
+No response banks, alternative methods, response-regime breakdowns,
+cross-method library certificates, or extra termination gates.
+
+## Verification scope
+
+Small licensed-QP unit tests check the exact CASE epigraph formulation,
+response-floor/DC identities, fixed-plan objective equality, and
+monotone MM acceptance. These tests do NOT establish full-UHN Gurobi
+runtime or that CASE actually improves from LAD at 24,506 cases.
+The previously examined 2013 evaluation is exploratory.
