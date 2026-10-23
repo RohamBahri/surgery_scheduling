@@ -178,3 +178,16 @@ def test_gurobi_exact_planner_plus_vf_mm_if_licensed(tmp_path):
     assert tested
     assert all(not r["accepted"] or r["majorizer_after"] < r["before"]+1e-8
                for r in ans["history"])
+
+
+def test_training_command_imports_and_has_help():
+    """The actual entrypoint must load under the pinned Gurobi environment."""
+    pytest.importorskip("gurobipy")
+    import subprocess
+    import sys
+    from pathlib import Path
+    entry=Path(__file__).resolve().parents[1]/"pilot"/"run_nonmonotone_learning.py"
+    proc=subprocess.run([sys.executable,str(entry),"--help"],
+                        cwd=entry.parents[1],capture_output=True,text=True,timeout=20)
+    assert proc.returncode==0,proc.stderr
+    assert "--context" in proc.stdout and "--scenario" in proc.stdout
