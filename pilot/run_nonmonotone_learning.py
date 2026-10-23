@@ -25,7 +25,7 @@ from scipy.optimize import linprog
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from surgery.nonmonotone_learning import (
-    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, Scenario)
+    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, response)
 from surgery.weekly_planner import evaluate, loads
 from surgery.weekly_training import training_lambda
 
