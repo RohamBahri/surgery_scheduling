@@ -41,8 +41,8 @@ class ResponseDC:
 
     def __init__(self, booked, alpha=.8, h=30., cap=180., floor=1.):
         self.booked=np.asarray(booked,float)
-        if self.booked.ndim != 1 or np.any(self.booked < floor):
-            raise ValueError("Booked durations must exceed the positive-duration floor")
+        if self.booked.ndim != 1 or np.any(self.booked <= 0):
+            raise ValueError("Booked durations must be positive")
         self.alpha,self.h,self.cap,self.floor=map(float,(alpha,h,cap,floor))
         if not (0<alpha<1 and h>0 and cap>0 and floor>0):
             raise ValueError("Invalid nominal response")
