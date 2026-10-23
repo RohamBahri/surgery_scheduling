@@ -81,8 +81,8 @@ def directions(p):
 
 
 def train_shared(items, booked, H, case_raw, response_map, cache, *,
-                 root, vf_theta, lam, libraries, radius=64.,
-                 max_rounds=10, screen_size=128, shortlist=3):
+                 root, vf_thetas, lam, libraries, radius=64.,
+                 max_rounds=8, screen_size=96, shortlist=8):
     """Train one SHARED policy with exact full-training acceptance.
 
     All candidates are generated without knowing 2013 outcomes. Library
@@ -100,9 +100,8 @@ def train_shared(items, booked, H, case_raw, response_map, cache, *,
             return state
     else:
         state=dict(status="RUNNING",history=[],theta=None,score=None)
-    cands=[np.zeros(H.shape[1]),np.asarray(vf_theta,float)]
+    cands=[np.zeros(H.shape[1])]+[np.asarray(v,float) for v in vf_thetas]
     screening=subset(items,screen_size)
-    lookup={key:week for key,week,_ in items}
     # Validate every previously generated library assignment exactly once.
     # Library costing may then use the fast, mathematically identical cost.
     from surgery.weekly_planner import loads
@@ -122,7 +121,11 @@ def train_shared(items, booked, H, case_raw, response_map, cache, *,
 
     if state.get("theta") is None:
         seeds=[]
+        seeded=set()
         for candidate in cands:
+            if tag(candidate) in seeded:
+                continue
+            seeded.add(tag(candidate))
             results=solve(candidate,items,"shared_seed")
             exact=score(items,results,candidate,lam)
             seeds.append(dict(theta=candidate.tolist(),score=exact,
@@ -154,7 +157,7 @@ def train_shared(items, booked, H, case_raw, response_map, cache, *,
             objective=proxy(items,libraries,reviewed(x),realized,x,lam)
             trial.append((objective,x))
         trial.sort(key=lambda pair:pair[0])
-        # At least the top proxy candidates get actual hash-0 solves.
+        # Proxy never accepts a solution; actual hash-0 schedules screen.
         baseline_screen=solve(incumbent,screening,"shared_screen")
         base_screen=score(screening,baseline_screen,incumbent,lam)
         candidates=[]
