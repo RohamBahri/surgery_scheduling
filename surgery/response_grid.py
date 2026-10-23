@@ -25,14 +25,22 @@ class Scenario:
     alpha: float
     h: float = H
 
+# All scenarios have the monotone saturating B response link.
+# Training uses the two adoption rates and two meaningful display ranges.
 TRAIN_SCENARIOS=(
-    Scenario("SAT_80","saturating",.8),
-    Scenario("NONMONO_80","nonmonotone",.8),
+    Scenario("SAT_A50_H30","saturating",.5,30.),
+    Scenario("SAT_A50_H60","saturating",.5,60.),
+    Scenario("SAT_A80_H30","saturating",.8,30.),
+    Scenario("SAT_A80_H60","saturating",.8,60.),
 )
+# Evaluation also varies a narrower h=20 threshold, without retraining.
 EVAL_SCENARIOS=(
-    *TRAIN_SCENARIOS,
-    Scenario("SAT_50","saturating",.5),
-    Scenario("NONMONO_50","nonmonotone",.5),
+    Scenario("SAT_A50_H20","saturating",.5,20.),
+    Scenario("SAT_A50_H30","saturating",.5,30.),
+    Scenario("SAT_A50_H60","saturating",.5,60.),
+    Scenario("SAT_A80_H20","saturating",.8,20.),
+    Scenario("SAT_A80_H30","saturating",.8,30.),
+    Scenario("SAT_A80_H60","saturating",.8,60.),
 )
 
 
@@ -85,10 +93,10 @@ def evaluation_policy_labels():
 
 
 def check_grid():
-    assert len(TRAIN_SCENARIOS)==2 and len(EVAL_SCENARIOS)==4
+    assert len(TRAIN_SCENARIOS)==4 and len(EVAL_SCENARIOS)==6
     assert len({s.name for s in EVAL_SCENARIOS})==4
     assert set(TRAIN_SCENARIOS).issubset(set(EVAL_SCENARIOS))
-    assert set(s.link for s in TRAIN_SCENARIOS)=={"saturating","nonmonotone"}
+    assert set(s.link for s in (*TRAIN_SCENARIOS,*EVAL_SCENARIOS))=={"saturating"}
     for s in EVAL_SCENARIOS:
         if not (0<s.alpha<1 and s.h>0):
             raise ValueError("Invalid scenario")
