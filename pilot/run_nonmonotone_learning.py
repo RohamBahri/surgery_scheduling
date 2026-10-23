@@ -458,8 +458,20 @@ def main():
     args.out.mkdir(parents=True,exist_ok=True)
     contract=args.out/"run_contract.json"
     if contract.exists():
-        if json.loads(contract.read_text())!=settings:
+        previous=json.loads(contract.read_text())
+        scientific={k:v for k,v in settings.items() if k!="source"}
+        earlier={k:v for k,v in previous.items()
+                 if k not in ("source","source_history")}
+        if scientific!=earlier:
             raise ValueError("Scientific settings changed; choose a new --out directory")
+        if previous.get("source")!=settings["source"]:
+            history=previous.get("source_history",[])
+            if previous.get("source") is not None:
+                history.append(previous["source"])
+            settings["source_history"]=history
+            save(contract,settings)
+            print("Continuing completed CASE checkpoint after code-only "
+                  "speed/reporting revision (source history saved)",flush=True)
     else:
         save(contract,settings)
     print("UHN CASE/VF:",len(ctx["train"]),"train components;",
