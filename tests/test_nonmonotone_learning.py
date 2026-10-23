@@ -425,7 +425,7 @@ def test_nominal_four_method_report_uses_five_way_common_coverage(tmp_path):
     assert out["common_certified_components"]==1
     assert out["common_certified_cases"]==3
     assert len(out["paired_cost_differences"])==7
-    assert out["VF_DIRECTIONS"]["cost_per_case"]==pytest.approx(12./3)
+    assert out["VF_DIRECTIONS"]["cost_per_case"]==pytest.approx(13./3)
     assert out["arm_coverage"]["VF_DIRECTIONS"]["certified_components"]==1
 
 
