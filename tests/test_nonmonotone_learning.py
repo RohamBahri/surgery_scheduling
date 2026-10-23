@@ -26,7 +26,7 @@ def test_three_regime_response_not_inverse_clip():
 
 @pytest.mark.parametrize("cap",[20.,30.,180.])
 def test_exact_casewise_floor_breakpoint_compiler_and_minimum_display(cap):
-    b=np.array([1.,2.,3.,8.,12.,20.,40.,100.,560.])
+    b=np.array([.5,1.,2.,3.,8.,12.,20.,40.,100.,560.])
     m=ResponseDC(b,.8,30.,cap,1.)
     rng=np.random.default_rng(22)
     grid=np.linspace(-300,300,1201)
@@ -39,9 +39,9 @@ def test_exact_casewise_floor_breakpoint_compiler_and_minimum_display(cap):
     if cap==180.:
         # For b=2, a strong negative raw display induces the FLOOR,
         # not the old artificial display clipping to 1-b.
-        assert m.reviewed(np.full(len(b),-30.))[1]==pytest.approx(1.)
+        assert m.reviewed(np.full(len(b),-30.))[2]==pytest.approx(1.)
         # A sufficiently extreme display is REJECTED, not shortened.
-        assert m.reviewed(np.full(len(b),-180.))[1]==pytest.approx(2.)
+        assert m.reviewed(np.full(len(b),-180.))[2]==pytest.approx(2.)
     assert np.max(abs(m.display(np.full(len(b),100.))))<=30.+1e-9
 
 
