@@ -27,7 +27,6 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from surgery.nonmonotone_learning import (
     ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, response)
 from surgery.weekly_planner import evaluate, loads
-from surgery.weekly_training import training_lambda
 
 
 def save(path,obj):
@@ -109,6 +108,7 @@ class PlannerCache:
 
 
 def train_lambda(design,ncomp):
+    from surgery.weekly_training import training_lambda
     # Old research's training-only multiplier, rescaled from mean per CASE
     # to the manuscript's mean per planning component.
     return training_lambda(np.asarray(design,float)) * len(design)/ncomp
