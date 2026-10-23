@@ -369,6 +369,8 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
         value = objective.value(trial)
         improved = bool(np.isfinite(value) and value < old-1e-8*max(1.,abs(old)))
         history.append(dict(iteration=k+1,before=float(old),after=float(value),
+                            step_l2=float(np.linalg.norm(trial-x)),
+                            proximal_parameter=float(prox),
                             accepted=improved,inner_status=inner["status"],
                             inner_certified=inner["certified"],
                             inner_gap=inner.get("gap"),
