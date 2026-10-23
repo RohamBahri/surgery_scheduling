@@ -25,8 +25,7 @@ from scipy.optimize import linprog
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from surgery.nonmonotone_learning import (
-    ResponseDC, DCObjective, C_OVER, C_UNDER, mm_vf, pdca, response,
-    library_value)
+    ResponseDC, DCObjective, mm_vf, pdca, response)
 from surgery.weekly_planner import evaluate, loads
 
 
@@ -152,45 +151,37 @@ def lad_start(X,errors,lam,components,box):
 
 
 def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius):
+    """One LAD initialization, followed by exact-epigraph CASE pDCA."""
     path=folder/"case_policy.json"
     if path.exists():
-        rec=json.loads(path.read_text())
-        return np.asarray(rec["weights"],float)
+        return np.asarray(json.loads(path.read_text())["weights"],float)
     data=ctx["fit"]
     X=np.asarray(data["X"],float)
-    n=len(X)
     ncomp=len(items)
     lam=train_lambda(X,ncomp,intercept=True)
     penalty=np.ones(X.shape[1]);penalty[0]=0.
-    obj=DCObjective(data["booked"],X,np.zeros(n),response_map,
-          mode="CASE",actual=data["actual"],components=ncomp,
-          lam=lam,penalize=penalty)
-    # Existing response-aware CASE fit serves as one warm start, not as
-    # the new model's fitted weights (its historical link was inverse).
-    old=np.asarray(data["case_w"],float)/response_map.alpha
-    old=np.clip(old,-radius,radius)
-    starts=[("old_inverse_case",old)]
-    lad,diagnostic=lad_start(X,np.asarray(data["actual"])-data["booked"],
-                            lam,ncomp,radius)
-    if lad is not None:
-        starts.insert(0,("regularized_LAD",lad))
-    logs=[]
-    best=(float("inf"),None)
-    for name,start in starts:
-        rec=pdca(obj,start,radius=radius,outer=steps,max_cuts=cuts,
-                 backend=backend)
-        weight=np.asarray(rec["weights"],float)
-        score=obj.value(weight)
-        logs.append(dict(start=name,objective=score,
-                         status=rec["status"],history=rec["iterations"]))
-        if score<best[0]:
-            best=score,weight
-    w=best[1]
-    save(path,dict(weights=w.tolist(),objective=float(best[0]),
-                   lambda_case=lam,initialization=diagnostic,
-                   starts=logs,alpha=response_map.alpha,h=response_map.h,
-                   cap=response_map.cap,uses_true_nonmonotone_response=True))
+    objective=DCObjective(data["booked"],X,np.zeros(len(X)),response_map,
+           mode="CASE",actual=data["actual"],components=ncomp,
+           lam=lam,penalize=penalty)
+    start,lad=lad_start(X,np.asarray(data["actual"])-data["booked"],
+                        lam,ncomp,radius)
+    if start is None:
+        # No unrelated, inverse-link CASE policy is used as a substitute.
+        # The explicit zero fallback keeps the experiment running and is
+        # recorded so a failed LAD solve cannot be mistaken for a LAD start.
+        print("CASE LAD incomplete; starting pDCA at zero:",lad["message"],
+              flush=True)
+        start=np.zeros(X.shape[1])
+    initial=objective.value(start)
+    result=pdca(objective,start,radius=radius,outer=steps,
+                max_cuts=cuts,backend=backend)
+    w=np.asarray(result["weights"],float)
+    save(path,dict(weights=w.tolist(),initial_objective=float(initial),
+            objective=float(result["objective"]),lambda_case=float(lam),
+            lad=lad,pdca_status=result["status"],pdca_history=result["iterations"],
+            alpha=.8,h=30.,cap=response_map.cap))
     return w
+
 
 
 def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
@@ -237,10 +228,8 @@ def work(ctx,root,args):
         booked=cache.solve(train,b,"train_booked",tie=True)
         if args.stage=="draft":
             return
-        libraries={key:[entry["assignment"],case_draft[key]["assignment"],
-                        list(map(int,c.original))]
-                   for key,c,_ in train
-                   for entry in [booked[key]]}
+        libraries={key:[booked[key]["assignment"],case_draft[key]["assignment"]]
+                   for key,_,_ in train}
         # Feasible schedule certificates are retained on timeouts instead
         # of promoting an unfinished planner solve to "exact".
         vf_lam=train_lambda(H,len(train))
@@ -252,52 +241,14 @@ def work(ctx,root,args):
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
                  backend=args.backend,solve_plans=oracle)
         chosen=np.asarray(state["theta"],float)
-        vf_d=response_map.reviewed(case_raw+H@chosen)
-        case_d=response_map.reviewed(case_raw)
-        vf_cert=library_value(train,state["libraries"],vf_d,actual,
-                              vf_lam,chosen)
-        case_cert=library_value(train,state["libraries"],case_d,actual,
-                                vf_lam,np.zeros_like(chosen))
-        booked_cert=library_value(train,state["libraries"],b,actual,
-                                  0.,np.zeros_like(chosen))
-        raw_vf=np.clip(case_raw+H@chosen,-args.cap,args.cap)
-        raw_case=np.clip(case_raw,-args.cap,args.cap)
-        def regimes(raw):
-            a=np.abs(raw)
-            threshold=30./(1.-.8)
-            return dict(attenuation_fraction=float(np.mean((a>30.)&(a<threshold))),
-                        rejection_fraction=float(np.mean(a>=threshold)),
-                        within_linear_fraction=float(np.mean(a<=30.)))
-        # Diagnostic only: a tied library selection prevents a simple
-        # unique-active-schedule stationarity claim. It never stops training.
-        tie_cases=0
-        from surgery.weekly_planner import evaluate as planned_cost
-        for key,c,rows in train:
-            costs=[planned_cost(c,z,vf_d[rows])["cost"]
-                   for z in state["libraries"][key]]
-            best_cost=min(costs)
-            distinct={tuple(state["libraries"][key][j])
-                      for j,value in enumerate(costs)
-                      if abs(value-best_cost)<=1e-6}
-            if len(distinct)>1:
-                tie_cases+=c.n
-        diag=dict(
-             case_weighted_tied_library_fraction=float(tie_cases/len(b)),
-             box_touching=bool(np.any(np.abs(chosen)>=args.vf_radius-1e-6)),
-             max_abs_increment=float(np.max(np.abs(chosen))))
-        save(root/"vf_termination_diagnostics.json",diag)
-        save(root/"selected_policy.json",dict(method="CASE+VF",
-               case_coeff=coef.tolist(),vf_theta=chosen.tolist(),
-               lambda_case=json.loads((root/"case_policy.json").read_text())["lambda_case"],
-               lambda_vf=vf_lam,cap=args.cap,alpha=.8,h=30.,
+        save(root/"selected_policy.json",dict(
+               method="CASE+VF",case_coeff=coef.tolist(),
+               vf_theta=chosen.tolist(),
+               lambda_case=json.loads(
+                    (root/"case_policy.json").read_text())["lambda_case"],
+               lambda_vf=float(vf_lam),cap=args.cap,alpha=.8,h=30.,
                train_components=len(train),train_cases=len(b),
-               certificate_history=state["history"],
-               vf_status=state["status"],
-               common_library_certificates=dict(BOOKED=booked_cert,
-                      CASE=case_cert,VF=vf_cert),
-               raw_score_regimes=dict(CASE=regimes(raw_case),VF=regimes(raw_vf)),
-               termination_diagnostics=diag,
-               note="Absolute training bounds, not realized benefit guarantees"))
+               vf_status=state["status"]))
         return
     if args.stage=="evaluate":
         selected=json.loads((root/"selected_policy.json").read_text())
@@ -369,26 +320,14 @@ def report(ctx,root):
                cost_per_case=sum(entry[method]["cost"] for entry in eligible)/N,
                mae_per_case=sum(entry[method]["mae"] for entry in eligible)/N)
     if N:
-        sites={}
         weekdata={}
         for entry in eligible:
-            location=entry["BOOKED"]["site"]
             monday=entry["BOOKED"]["week"]
-            loc=sites.setdefault(location,dict(cases=0,costs={m:0. for m in methods}))
-            wk=weekdata.setdefault(monday,dict(cases=0,costs={m:0. for m in methods}))
-            cases=entry["BOOKED"]["cases"]
-            loc["cases"]+=cases;wk["cases"]+=cases
+            wk=weekdata.setdefault(
+                 monday,dict(cases=0,costs={m:0. for m in methods}))
+            wk["cases"]+=entry["BOOKED"]["cases"]
             for name in methods:
-                value=entry[name]["cost"]
-                loc["costs"][name]+=value
-                wk["costs"][name]+=value
-        output["by_site"]={loc:dict(cases=x["cases"],
-                            cost_per_case={m:x["costs"][m]/x["cases"]
-                                           for m in methods})
-                            for loc,x in sites.items()}
-        output["changed_assignment_fraction"]=float(np.mean([
-            entry["CASE"]["assignment"]!=entry["VF"]["assignment"]
-            for entry in eligible]))
+                wk["costs"][name]+=entry[name]["cost"]
         weeks=sorted(weekdata)
         denom=np.array([weekdata[t]["cases"] for t in weeks],float)
         rng=np.random.default_rng(20261022)
@@ -408,13 +347,6 @@ def report(ctx,root):
                   equal_weeks=int(np.sum(vector==0)),
                   resamples=10000)
         output["paired_cost_differences"]=differences
-    selected=root/"selected_policy.json"
-    if selected.exists():
-        policy=json.loads(selected.read_text())
-        output["training_common_library_certificates"]=policy.get(
-            "common_library_certificates")
-        output["training_raw_score_regimes"]=policy.get("raw_score_regimes")
-        output["vf_status"]=policy.get("vf_status")
     save(root/"summary.json",output)
     print(json.dumps({k:v for k,v in output.items()
                       if not k.endswith("_uncertified")},indent=2),flush=True)
