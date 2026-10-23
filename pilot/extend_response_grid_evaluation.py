@@ -196,7 +196,10 @@ def extension_contract(root,training_contract,display_csv):
     folder=root/"response_extension"
     folder.mkdir(parents=True,exist_ok=True)
     settings=dict(
+        extension_code_sha256=file_hash(__file__),
         source_training_contract_sha256=file_hash(root/"run_contract.json"),
+        frozen_policies_sha256=file_hash(root/"selected_policies.json"),
+        naive_policy_sha256=file_hash(root/"naive_policy.json"),
         training_scenarios=[vars(s) for s in TRAIN_SCENARIOS],
         old_B_eval_scenarios=[vars(s) for s in B_SCENARIOS],
         new_C_eval_scenarios=[vars(s) for s in C_SCENARIOS],
