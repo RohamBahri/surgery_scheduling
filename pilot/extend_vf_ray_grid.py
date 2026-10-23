@@ -450,7 +450,16 @@ def main():
     previous.ensure_B_results(ctx,args.out,cache,frozen)
     folder_C=previous.extension_contract(args.out,prior,
               args.out/"frozen_advice"/"evaluation_displays.csv")
-    previous.evaluate_C(ctx,args.out,folder_C,cache,frozen)
+    missing_C=[(sc.name,m) for sc in previous.C_SCENARIOS
+               for m in grid.METHODS
+               if not (folder_C/"evaluation_cells"/sc.name/(m+".json")).exists()]
+    if missing_C:
+        print(f"Completing {len(missing_C)} unfinished original C cells",
+              flush=True)
+        previous.evaluate_C(ctx,args.out,folder_C,cache,frozen)
+    else:
+        print("Reusing all 60 C cells without altering previous results",
+              flush=True)
     output=args.out/"vf_ray_extension"
     output.mkdir(parents=True,exist_ok=True)
     scientific_fingerprint(args.out,args)
