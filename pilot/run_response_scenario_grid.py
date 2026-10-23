@@ -27,9 +27,11 @@ for var in ("OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","OMP_NUM_THREADS"):
     os.environ[var]="1"
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import numpy as np
+from scipy import sparse
+from scipy.optimize import linprog
 
 from pilot.run_nonmonotone_learning import (
-    PlannerCache,case_fit,five_features,train_lambda,lad_start,save,
+    PlannerCache,case_fit,five_features,train_lambda,save,
     record_stage_time,_plan_job)
 from surgery.nonmonotone_learning import mm_vf
 from surgery.response_grid import (
@@ -136,26 +138,55 @@ class ContentCache(PlannerCache):
 
 
 def fit_naive(ctx,root):
-    """The single response-unaware asymmetric-duration-error LAD policy."""
+    """Response-unaware asymmetric quantile regression, fit ONCE.
+
+    Same under/over-duration error cost (1.75/1), L1 penalty calibration
+    and coefficient box as CASE; assumes Xw is adopted directly and
+    ignores surgeon response. Deployment is still subjected to the
+    actual saturation scenario.
+    """
     file=root/"naive_policy.json"
     if file.exists():
         return np.asarray(json.loads(file.read_text())["weights"],float)
     started=time.perf_counter()
-    X=np.asarray(ctx["fit"]["X"],float)
+    X=sparse.csr_matrix(np.asarray(ctx["fit"]["X"],float))
     booked=np.asarray(ctx["fit"]["booked"],float)
     actual=np.asarray(ctx["fit"]["actual"],float)
-    lam=train_lambda(X,len(ctx["train"]),intercept=True)
-    weights,result=lad_start(X,actual-booked,lam,len(ctx["train"]),100.)
-    if weights is None:
-        raise RuntimeError("NAIVE train-only LAD LP failed: "+repr(result))
+    residual=actual-booked
+    n,p=X.shape
+    ncomp=len(ctx["train"])
+    lam=train_lambda(X.toarray(),ncomp,intercept=True)
+    I=sparse.eye(n,format="csr")
+    E=sparse.eye(p,format="csr")
+    Znn=sparse.csr_matrix((n,n))
+    Znp=sparse.csr_matrix((n,p))
+    Zpn=sparse.csr_matrix((p,n))
+    # Variables [w, positive error, negative error, abs(w)].
+    # positive error >= residual-Xw; negative error >= Xw-residual.
+    A=sparse.vstack((
+        sparse.hstack((-X,-I,Znn,Znp)),
+        sparse.hstack((X,Znn,-I,Znp)),
+        sparse.hstack((E,Zpn,Zpn,-E)),
+        sparse.hstack((-E,Zpn,Zpn,-E))
+    ),format="csr")
+    rhs=np.r_[-residual,residual,np.zeros(2*p)]
+    objective=np.r_[np.zeros(p),np.full(n,1.75/ncomp),
+                    np.full(n,1./ncomp),
+                    np.r_[0.,np.full(p-1,lam)]]
+    ans=linprog(objective,A_ub=A,b_ub=rhs,
+        bounds=[(-100.,100.)]*p+[(0,None)]*(2*n+p),
+        method="highs",options={"time_limit":900.})
+    if not ans.success:
+        raise RuntimeError("NAIVE asymmetric LP not certified: "+str(ans.message))
+    weights=np.asarray(ans.x[:p],float)
     save(file,dict(weights=weights.tolist(),lambda_naive=float(lam),
-                   lad=result,nominal_response_used=False,
-                   trained_with_2013=False,
-                   display_rule="clip(Xw,-180,180) without inverse response"))
+                   objective=float(ans.fun),solver_status=int(ans.status),
+                   trained_with_2013=False,nominal_response_used=False,
+                   error_loss="1.75*underprediction + 1.0*overprediction",
+                   display_rule="clip(Xw,-180,180) without response inverse"))
     record_stage_time(root,"naive",time.perf_counter()-started)
-    print(f"NAIVE: regularized LAD trained, lambda={lam:.6f}",flush=True)
+    print(f"NAIVE: asymmetric LP certified; lambda={lam:.6f}",flush=True)
     return weights
-
 
 def fit_family(ctx,args,root,cache,scenario,booked_plans):
     """Fit a distinct CASE and VF under one saturation assumption only."""
