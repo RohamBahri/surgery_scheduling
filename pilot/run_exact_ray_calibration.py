@@ -442,40 +442,75 @@ def run(args):
     complete=bool(len(results)==len(items) and all(
           r['status'] in ('EXACT_ENUMERATION','NUMERIC_PARTITION')
           for r in results.values()))
-    if complete:
-        candidate=merge_global(results,upper)
+    fully_partitioned={key:r for key,r in results.items()
+          if r.get('status') in ('EXACT_ENUMERATION','NUMERIC_PARTITION')}
+    report['globally_partitioned_components']=len(fully_partitioned)
+    report['unresolved_components']=[
+          str(key) for key,week,rows in items if str(key) not in fully_partitioned]
+    report['global_ray_optimality_certified']=False
+    report['selected_from_partial_training_partition']=not complete
+    if fully_partitioned:
+        candidate=merge_global(fully_partitioned,upper)
+        # This is the minimum of the *reported partitions only*. When some
+        # components are unresolved it is merely a training-based proposal.
         report['partition_minimizer']=candidate
+        report['partial_candidate_component_count']=len(fully_partitioned)
+        report['global_ray_optimality_certified']=bool(
+            complete and candidate['exact_arithmetic_certificate'])
         if len(items)==len(ctx['train']):
             step=float(candidate['best_s'])
             durations=model.reviewed(raw+step*p)
-            plans=cache.solve(ctx['train'],durations,
-                     f'cpro_{scenario.name}_candidate',tie=True)
-            if all(rec['complete'] for rec in plans.values()):
+            # Independent, longer budget for VERIFYING a frozen candidate.
+            # Never changes the original training model or coefficients.
+            deployment_cache=base.ContentCache(root,args.cores,
+                                              args.deployment_seconds)
+            plans=deployment_cache.solve(ctx['train'],durations,
+                 f'cpro_{scenario.name}_candidate_verified',tie=True)
+            unresolved_planner=[str(key) for key in plans
+                                if not plans[key]['complete']]
+            report['deployment_unresolved_components']=unresolved_planner
+            if not unresolved_planner:
                 actual_total=sum(schedule_evaluate(week,
                     plans[key]['assignment'],week.actual)['cost']
                     for key,week,rows in ctx['train'])
                 report['certified_float_deployment_cost']=actual_total
-                report['candidate_cost_agreement']=abs(
-                    actual_total-float(candidate['best_total_cost']))<1e-5
                 report['deployment_all_certified']=True
-                report['can_evaluate_2013']=report['candidate_cost_agreement']
-                if not report['candidate_cost_agreement']:
-                    report['status']='UNRESOLVED_GLOBAL_NUMERIC_MISMATCH'
+                if complete:
+                    report['candidate_cost_agreement']=abs(
+                        actual_total-float(candidate['best_total_cost']))<1e-5
+                    report['can_evaluate_2013']=report['candidate_cost_agreement']
+                    report['status']=(candidate['interpretation']
+                      if report['candidate_cost_agreement']
+                      else 'UNRESOLVED_GLOBAL_NUMERIC_MISMATCH')
                 else:
-                    report['status']=candidate['interpretation']
+                    report['candidate_cost_agreement']=None
+                    report['can_evaluate_2013']=True
+                    report['status']='EXPLORATORY_PARTIAL_CALIBRATION'
+                    report['caution_partial']=(
+                        'Candidate selected on the reported component '
+                        'partitions only; all 3362 training component '
+                        'assignments were separately verified at this s. '
+                        'This provides a valid realized training cost, '
+                        'NOT a global ray optimality certificate.')
             else:
                 report['status']='UNRESOLVED_DEPLOYMENT_AT_SELECTED_STEP'
+                report['can_evaluate_2013']=False
         else:
             report['status']='PILOT_ONLY_NOT_FULL_TRAINING'
     else:
-        report['status']='UNRESOLVED_COMPONENTS_OR_WALL_BUDGET'
+        report['status']='UNRESOLVED_NO_COMPLETE_COMPONENT_PARTITIONS'
+    if not complete:
+        report['global_gap_status']='NOT_PROVED_UNRESOLVED_COMPONENTS'
+        report['unconditional_global_lower_bound']=unconditional_lb
     atomic_json(out/'summary.json',report)
     print('COMPLETE:',report['status'],counts,flush=True)
     if args.evaluate and report.get('can_evaluate_2013',False):
-        evaluate(ctx,root,out,scenario,policy,cache,float(report['partition_minimizer']['best_s']))
+        eval_cache=base.ContentCache(root,args.cores,args.deployment_seconds)
+        evaluate(ctx,root,out,scenario,policy,eval_cache,
+                 float(report['partition_minimizer']['best_s']))
     elif args.evaluate:
-        print('Cannot perform defensible evaluation: missing full training '
-              'deployment certificate or candidate inconsistency',flush=True)
+        print('2013 evaluation skipped: no completely certified '
+              'training deployment at the selected step',flush=True)
 
 
 def evaluate(ctx,root,out,train,policy,cache,step):
@@ -602,6 +637,8 @@ def main():
     ap.add_argument('--vf-pdca-steps',type=int,default=50)
     ap.add_argument('--cuts',type=int,default=160)
     ap.add_argument('--component-seconds',type=float,default=150.)
+    ap.add_argument('--deployment-seconds',type=float,default=600.,
+                    help='Independent per-week budget for candidate deployment verification')
     ap.add_argument('--separation-seconds',type=float,default=10.)
     ap.add_argument('--boundary-seconds',type=float,default=30.)
     ap.add_argument('--wall-minutes',type=float,default=600.)
