@@ -195,3 +195,16 @@ def test_fixed_rational_boundary_checks(monkeypatch):
     monkeypatch.setattr(oracle,'point_preferred',preferred)
     assert oracle.point_verify(Q(1,3),z,z)[0]=='NUMERIC_PASS'
     assert trace==[('P1',Q(1,3)),('P3',Q(1,3))]
+
+def test_full_runner_does_not_shadow_hashlib():
+    """Regression for Python UnboundLocalError after data/cache preparation."""
+    import inspect
+    import symtable
+    from pilot import run_exact_ray_calibration as runner
+
+    source=inspect.getsource(runner)
+    scope=symtable.symtable(source,runner.__file__,"exec")
+    run_scope=next(block for block in scope.get_children()
+                   if block.get_name()=="run")
+    assert run_scope.lookup("hashlib").is_global()
+    assert not run_scope.lookup("hashlib").is_local()
