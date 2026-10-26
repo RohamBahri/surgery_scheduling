@@ -12,7 +12,7 @@ under exact MILP oracles. UNRESOLVED is never reported as certified.
 """
 from __future__ import annotations
 import argparse
-from concurrent.futures import ProcessPoolExecutor,as_completed
+from concurrent.futures import ProcessPoolExecutor,wait,FIRST_COMPLETED
 from fractions import Fraction as Q
 from multiprocessing import get_context
 import hashlib
@@ -57,7 +57,7 @@ def worker(job):
     """No shared Gurobi model. Each component is independently checkpointable."""
     (key,week,raw,projection,alpha,h,upper,initial,
        seconds,solve_seconds,mu,max_rounds,max_cells,max_schedules,
-       exact_limit,boundary_seconds,verify_boundaries)=job
+       exact_limit,boundary_seconds,verify_boundaries,prior_state)=job
     c=RationalComponent.from_week(week,raw,projection,alpha,h,Q(upper))
     started=time.monotonic()
     try:
@@ -67,7 +67,7 @@ def worker(job):
             max_rounds=max_rounds,max_cells=max_cells,
             max_schedules=max_schedules,exhaustive_limit=exact_limit,
             boundary_seconds=boundary_seconds,
-            verify_boundaries=verify_boundaries)
+            verify_boundaries=verify_boundaries,resume=prior_state)
     except Exception as ex:
         answer=dict(status='UNRESOLVED',reason='EXCEPTION',
                     error=f'{type(ex).__name__}: {ex}')
@@ -82,6 +82,11 @@ def worker(job):
             answer['full_ray_relaxation']=dict(
                 unconditional_lower_bound=0.,error=str(ex))
     answer['component']=str(key)
+    answer['solver_revision']='cpro_full_v2'
+    answer['solver_budgets']=dict(component_seconds=seconds,
+             separation_seconds=solve_seconds,
+             max_rounds=max_rounds,max_cells=max_cells,
+             max_schedules=max_schedules,exact_limit=exact_limit)
     answer['n_cases']=week.n
     answer['n_slots']=week.k
     answer['elapsed_seconds']=round(time.monotonic()-started,3)
@@ -151,6 +156,43 @@ def merge_global(component_reports,upper):
         upper=upper)
 
 
+def cached_grid_seeds(ctx,root,scenario,cache,raw,p,model):
+    """Load feasible historical VF-RAY assignments without launching solves.
+
+    Exact byte-compatible duration signatures and tie/solver settings are
+    required before reusing a content-addressed planner result.
+    """
+    import numpy as np
+    folder=root/'vf_ray_extension'/'training'/scenario.name
+    files=sorted(folder.glob('s_*.json'))
+    steps=[]
+    for path in files:
+        row=json.loads(path.read_text())
+        s=float(row['s'])
+        if np.isfinite(s) and s>=0:
+            steps.append(s)
+    steps=sorted(set(steps))
+    seeds={str(key):[] for key,week,rows in ctx['train']}
+    hits=0
+    for s in steps:
+        d=model.reviewed(raw+s*p)
+        for key,week,rows in ctx['train']:
+            v=np.ascontiguousarray(np.asarray(d[rows],float),dtype='<f8')
+            ident=base.sha_bytes(str(key).encode()+v.tobytes()+
+                repr((cache.seconds,True,'hash_seed_0')).encode())
+            file=cache.root/'content_addressed'/(ident+'.json')
+            if not file.exists():continue
+            saved=json.loads(file.read_text())
+            if saved.get('signature')!=ident:continue
+            assignment=saved.get('result',{}).get('assignment')
+            if assignment is not None:
+                seeds[str(key)].append(tuple(map(int,assignment)))
+                hits+=1
+    print(f'VF-RAY cache seeds: {len(steps)} historic ray points, '
+          f'{hits} component assignments reused, 0 new ray solves',flush=True)
+    return seeds
+
+
 def prepare(ctx,root,args,scenario):
     """Do not retrain a policy or use evaluation data for ray selection."""
     policy_set=json.loads((root/'selected_policies.json').read_text())
@@ -190,8 +232,10 @@ def run(args):
     if scenario is None:raise ValueError('Unknown B training scenario')
     root=args.out
     verify_existing(root,args)
-    out=root/('cpro_'+scenario.name)
+    out=root/('cpro_full_'+scenario.name)
     out.mkdir(parents=True,exist_ok=True)
+    # Budget limits affect runtime, never the mathematical policy definition.
+    # Results record their own solver budgets and checkpoint provenance.
     contract=dict(source_sha256=digest(__file__),
          rational_source_sha256=digest(Path(__file__).resolve().parents[1]/'surgery'/'parametric_ray.py'),
          mip_source_sha256=digest(Path(__file__).resolve().parents[1]/'surgery'/'parametric_ray_mip.py'),
@@ -199,15 +243,42 @@ def run(args):
          original_contract_sha256=digest(root/'run_contract.json'),
          original_policies_sha256=digest(root/'selected_policies.json'),
          scenario=vars(scenario),intrinsic_domain=True,
-         numerical_mu=args.mu,per_component_seconds=args.component_seconds,
-         separation_seconds=args.separation_seconds,boundary_seconds=args.boundary_seconds,
-         max_rounds=args.max_rounds,max_cells=args.max_cells,
-         max_schedules=args.max_schedules,exact_limit=args.exact_limit,
-         verify_boundaries=not args.skip_boundary_verification)
+         numerical_mu=args.mu,exact_limit=args.exact_limit,
+         verify_boundaries=not args.skip_boundary_verification,
+         solver_revision='cpro_full_v2')
     file=out/'run_contract.json'
-    if file.exists() and json.loads(file.read_text())!=contract:
-        raise ValueError('Changed numerical/scientific specification; use a distinct output root')
-    if not file.exists():atomic_json(file,contract)
+    if file.exists():
+        previous=json.loads(file.read_text())
+        if previous!=contract:
+            old_style='per_component_seconds' in previous
+            if old_style:
+                # One-way migration from original budget-pinned contract.
+                # Preserve fixed data, response model, tolerances and
+                # rational inputs. Old NUMERIC_PARTITION checkpoints are
+                # automatically invalidated by solver_revision mismatch.
+                science=('rational_source_sha256','context_sha256',
+                         'original_contract_sha256','original_policies_sha256',
+                         'scenario','intrinsic_domain','numerical_mu',
+                         'exact_limit','verify_boundaries')
+                if any(previous.get(k)!=contract.get(k) for k in science):
+                    raise ValueError('Original contract has different scientific inputs')
+                print('Migrating legacy contract: removing runtime budgets; '
+                      'old numeric component partitions will be recomputed',
+                      flush=True)
+                atomic_json(file,contract)
+            else:
+                changed={k for k in set(previous)|set(contract)
+                         if previous.get(k)!=contract.get(k)}
+                untouched=(not (out/'intrinsic_domain.json').exists()
+                           and not (out/'summary.json').exists()
+                           and not any((out/'components').glob('*.json')))
+                if changed=={'source_sha256'} and untouched:
+                    atomic_json(file,contract)
+                else:
+                    raise ValueError('Changed scientific/code specification; '
+                                     'use a distinct output root')
+    else:
+        atomic_json(file,contract)
     with args.context.open('rb') as handle:ctx=pickle.load(handle)
     print(f'Train components={len(ctx["train"])}',flush=True)
     raw,p,upper,model,cache,policy=prepare(ctx,root,args,scenario)
@@ -237,58 +308,129 @@ def run(args):
                      'train_'+scenario.name+'_case_draft',tie=True)
     vf=cache.solve(items,model.reviewed(raw+p),
                    'cpro_'+scenario.name+'_plain_vf',tie=True)
+    ray_seeds=cached_grid_seeds(ctx,root,scenario,cache,raw,p,model)
     folder=out/'components'
     folder.mkdir(parents=True,exist_ok=True)
-    import hashlib
     def path_for(key):
         return folder/(hashlib.sha256(str(key).encode()).hexdigest()+'.json')
     results={}
     tasks=[]
     for key,week,rows in items:
         path=path_for(key)
+        prior=None
         if path.exists():
             saved=json.loads(path.read_text())
-            if saved.get('component')!=str(key):raise ValueError('Stale component cache')
-            if saved.get('status')!='UNRESOLVED':
+            if saved.get('component')!=str(key):
+                raise ValueError('Stale component cache')
+            revision_ok=(saved.get('solver_revision')=='cpro_full_v2')
+            exact=(saved.get('status')=='EXACT_ENUMERATION')
+            resolved=(saved.get('status') in ('NUMERIC_PARTITION',
+                                              'EXACT_ENUMERATION'))
+            if exact or (revision_ok and resolved):
                 results[str(key)]=saved
                 continue
-            print(f'{key}: retrying unresolved component checkpoint',flush=True)
+            if revision_ok and not args.retry_unresolved:
+                results[str(key)]=saved
+                continue
+            if revision_ok and saved.get('status')=='UNRESOLVED':
+                prior=saved
+            print(f'{key}: retrying unresolved or legacy numeric checkpoint',
+                  flush=True)
         seeds=[]
         for bank in (booked,case,vf):
             if bank[key].get('assignment') is not None:
                 seeds.append(tuple(bank[key]['assignment']))
+        seeds.extend(ray_seeds[str(key)])
         tasks.append((str(key),week,raw[rows],p[rows],scenario.alpha,
-                 scenario.h,str(upper),seeds,
-                 args.component_seconds,args.separation_seconds,args.mu,
-                 args.max_rounds,args.max_cells,args.max_schedules,
-                 args.exact_limit,args.boundary_seconds,
-                 not args.skip_boundary_verification))
-    print(f'{len(results)} cached components; {len(tasks)} new',flush=True)
+                scenario.h,str(upper),seeds,
+                args.component_seconds,args.separation_seconds,args.mu,
+                args.max_rounds,args.max_cells,args.max_schedules,
+                args.exact_limit,args.boundary_seconds,
+                not args.skip_boundary_verification,prior))
+    # Hard components first, with a rolling worker queue. This avoids batch
+    # barriers and gives reliable wall-time cancellation of unstarted work.
+    def difficulty(job):
+        week=job[1]
+        choices=sum(len(week.allowed[int(s)]) for s in week.surgeon)
+        return (week.n,choices,week.k)
+    tasks.sort(key=difficulty,reverse=True)
+    print(f'{len(results)} cached components; {len(tasks)} queued '
+          '(largest first, no batch barrier)',flush=True)
     start=time.monotonic()
+    def commit(result):
+        key,res=result
+        atomic_json(path_for(key),res)
+        results[key]=json.loads(path_for(key).read_text())
     if args.cores==1:
-        outputs=(worker(t) for t in tasks)
-        for i,(key,res) in enumerate(outputs,1):
-            atomic_json(path_for(key),res)
-            results[key]=json.loads(path_for(key).read_text())
-            if i%25==0 or i==len(tasks):
-                print(f'{i}/{len(tasks)} {res["status"]}',flush=True)
-            if time.monotonic()-start>args.wall_minutes*60:
-                print('Global wall budget exhausted: checkpointed partial run',flush=True)
+        for i,task in enumerate(tasks,1):
+            if time.monotonic()-start>=args.wall_minutes*60:
+                print('Global wall budget exhausted; checkpointed partial run',
+                      flush=True)
                 break
+            commit(worker(task))
+            if i%25==0 or i==len(tasks):
+                print(f'Checkpointed {len(results)}/{len(items)} components',
+                      flush=True)
     elif tasks:
-        # Submit bounded batches; never leave thousands of queued processes
-        # running after the global wall budget has been exceeded.
-        with ProcessPoolExecutor(max_workers=args.cores,
-                 mp_context=get_context('spawn')) as pool:
-            for off in range(0,len(tasks),max(args.cores,1)):
-                if time.monotonic()-start>args.wall_minutes*60:break
-                futures=[pool.submit(worker,task)
-                         for task in tasks[off:off+args.cores]]
-                for f in as_completed(futures):
-                    key,res=f.result()
-                    atomic_json(path_for(key),res)
-                    results[key]=json.loads(path_for(key).read_text())
-                print(f'Checkpointed {len(results)}/{len(items)} components',flush=True)
+        pool=ProcessPoolExecutor(max_workers=args.cores,
+                   mp_context=get_context('spawn'))
+        pending={}
+        remaining=iter(tasks)
+        timed_out=False
+        def replenish():
+            while len(pending)<2*args.cores:
+                try:job=next(remaining)
+                except StopIteration:break
+                pending[pool.submit(worker,job)]=job
+        try:
+            replenish()
+            while pending:
+                left=args.wall_minutes*60-(time.monotonic()-start)
+                if left<=0:
+                    timed_out=True
+                    break
+                done,_=wait(tuple(pending),timeout=min(left,10.),
+                            return_when=FIRST_COMPLETED)
+                for future in done:
+                    job=pending.pop(future)
+                    try:
+                        outcome=future.result()
+                    except Exception as ex:
+                        outcome=(job[0],dict(
+                          status='UNRESOLVED',reason='WORKER_EXCEPTION',
+                          component=job[0],n_cases=job[1].n,
+                          error=f'{type(ex).__name__}: {ex}',
+                          solver_revision='cpro_full_v2',
+                          solver_budgets=dict(component_seconds=args.component_seconds,
+                                              separation_seconds=args.separation_seconds)))
+                    commit(outcome)
+                if done:
+                    replenish()
+                    if len(results)%25==0 or not pending:
+                        print(f'Checkpointed {len(results)}/{len(items)} '
+                              f'components; {len(pending)} active/queued',
+                              flush=True)
+        finally:
+            # Cancel unstarted work, let active bounded jobs finish, and keep
+            # their completed results even when the global clock expired.
+            pool.shutdown(wait=True,cancel_futures=timed_out)
+            if timed_out:
+                for future,job in pending.items():
+                    if future.cancelled() or not future.done():
+                        continue
+                    try:
+                        outcome=future.result()
+                    except Exception as ex:
+                        outcome=(job[0],dict(
+                            status='UNRESOLVED',reason='WORKER_EXCEPTION',
+                            component=job[0],n_cases=job[1].n,
+                            error=f'{type(ex).__name__}: {ex}',
+                            solver_revision='cpro_full_v2'))
+                    commit(outcome)
+        if timed_out:
+            print('Global wall budget reached; all completed active jobs '
+                  'checkpointed; unstarted work remains for the next run',
+                  flush=True)
     counts={}
     for res in results.values():
         counts[res['status']]=counts.get(res['status'],0)+1
@@ -314,40 +456,75 @@ def run(args):
     complete=bool(len(results)==len(items) and all(
           r['status'] in ('EXACT_ENUMERATION','NUMERIC_PARTITION')
           for r in results.values()))
-    if complete:
-        candidate=merge_global(results,upper)
+    fully_partitioned={key:r for key,r in results.items()
+          if r.get('status') in ('EXACT_ENUMERATION','NUMERIC_PARTITION')}
+    report['globally_partitioned_components']=len(fully_partitioned)
+    report['unresolved_components']=[
+          str(key) for key,week,rows in items if str(key) not in fully_partitioned]
+    report['global_ray_optimality_certified']=False
+    report['selected_from_partial_training_partition']=not complete
+    if fully_partitioned:
+        candidate=merge_global(fully_partitioned,upper)
+        # This is the minimum of the *reported partitions only*. When some
+        # components are unresolved it is merely a training-based proposal.
         report['partition_minimizer']=candidate
+        report['partial_candidate_component_count']=len(fully_partitioned)
+        report['global_ray_optimality_certified']=bool(
+            complete and candidate['exact_arithmetic_certificate'])
         if len(items)==len(ctx['train']):
             step=float(candidate['best_s'])
             durations=model.reviewed(raw+step*p)
-            plans=cache.solve(ctx['train'],durations,
-                     f'cpro_{scenario.name}_candidate',tie=True)
-            if all(rec['complete'] for rec in plans.values()):
+            # Independent, longer budget for VERIFYING a frozen candidate.
+            # Never changes the original training model or coefficients.
+            deployment_cache=base.ContentCache(root,args.cores,
+                                              args.deployment_seconds)
+            plans=deployment_cache.solve(ctx['train'],durations,
+                 f'cpro_{scenario.name}_candidate_verified',tie=True)
+            unresolved_planner=[str(key) for key in plans
+                                if not plans[key]['complete']]
+            report['deployment_unresolved_components']=unresolved_planner
+            if not unresolved_planner:
                 actual_total=sum(schedule_evaluate(week,
                     plans[key]['assignment'],week.actual)['cost']
                     for key,week,rows in ctx['train'])
                 report['certified_float_deployment_cost']=actual_total
-                report['candidate_cost_agreement']=abs(
-                    actual_total-float(candidate['best_total_cost']))<1e-5
                 report['deployment_all_certified']=True
-                report['can_evaluate_2013']=report['candidate_cost_agreement']
-                if not report['candidate_cost_agreement']:
-                    report['status']='UNRESOLVED_GLOBAL_NUMERIC_MISMATCH'
+                if complete:
+                    report['candidate_cost_agreement']=abs(
+                        actual_total-float(candidate['best_total_cost']))<1e-5
+                    report['can_evaluate_2013']=report['candidate_cost_agreement']
+                    report['status']=(candidate['interpretation']
+                      if report['candidate_cost_agreement']
+                      else 'UNRESOLVED_GLOBAL_NUMERIC_MISMATCH')
                 else:
-                    report['status']=candidate['interpretation']
+                    report['candidate_cost_agreement']=None
+                    report['can_evaluate_2013']=True
+                    report['status']='EXPLORATORY_PARTIAL_CALIBRATION'
+                    report['caution_partial']=(
+                        'Candidate selected on the reported component '
+                        'partitions only; all 3362 training component '
+                        'assignments were separately verified at this s. '
+                        'This provides a valid realized training cost, '
+                        'NOT a global ray optimality certificate.')
             else:
                 report['status']='UNRESOLVED_DEPLOYMENT_AT_SELECTED_STEP'
+                report['can_evaluate_2013']=False
         else:
             report['status']='PILOT_ONLY_NOT_FULL_TRAINING'
     else:
-        report['status']='UNRESOLVED_COMPONENTS_OR_WALL_BUDGET'
+        report['status']='UNRESOLVED_NO_COMPLETE_COMPONENT_PARTITIONS'
+    if not complete:
+        report['global_gap_status']='NOT_PROVED_UNRESOLVED_COMPONENTS'
+        report['unconditional_global_lower_bound']=unconditional_lb
     atomic_json(out/'summary.json',report)
     print('COMPLETE:',report['status'],counts,flush=True)
     if args.evaluate and report.get('can_evaluate_2013',False):
-        evaluate(ctx,root,out,scenario,policy,cache,float(report['partition_minimizer']['best_s']))
+        eval_cache=base.ContentCache(root,args.cores,args.deployment_seconds)
+        evaluate(ctx,root,out,scenario,policy,eval_cache,
+                 float(report['partition_minimizer']['best_s']))
     elif args.evaluate:
-        print('Cannot perform defensible evaluation: missing full training '
-              'deployment certificate or candidate inconsistency',flush=True)
+        print('2013 evaluation skipped: no completely certified '
+              'training deployment at the selected step',flush=True)
 
 
 def evaluate(ctx,root,out,train,policy,cache,step):
@@ -473,18 +650,23 @@ def main():
     ap.add_argument('--vf-outers',type=int,default=30)
     ap.add_argument('--vf-pdca-steps',type=int,default=50)
     ap.add_argument('--cuts',type=int,default=160)
-    ap.add_argument('--component-seconds',type=float,default=90.)
-    ap.add_argument('--separation-seconds',type=float,default=7.)
-    ap.add_argument('--boundary-seconds',type=float,default=30.)
-    ap.add_argument('--wall-minutes',type=float,default=120.)
+    ap.add_argument('--component-seconds',type=float,default=150.)
+    ap.add_argument('--deployment-seconds',type=float,default=600.,
+                    help='Independent per-week budget for candidate deployment verification')
+    ap.add_argument('--separation-seconds',type=float,default=10.)
+    ap.add_argument('--boundary-seconds',type=float,default=30.,
+                    help='Deprecated, ignored; retained for CLI compatibility')
+    ap.add_argument('--wall-minutes',type=float,default=600.)
     ap.add_argument('--mu',type=float,default=1e-6)
     ap.add_argument('--max-rounds',type=int,default=25)
-    ap.add_argument('--max-cells',type=int,default=500)
+    ap.add_argument('--max-cells',type=int,default=1500)
     ap.add_argument('--max-schedules',type=int,default=120)
     ap.add_argument('--exact-limit',type=int,default=64)
     ap.add_argument('--pilot-components',type=int,default=0,
                     help='First N training components only, for resource audits')
     ap.add_argument('--skip-boundary-verification',action='store_true')
+    ap.add_argument('--retry-unresolved',action='store_true',
+                    help='Retry previously unresolved component checkpoints')
     ap.add_argument('--dry-run',action='store_true')
     ap.add_argument('--evaluate',action='store_true')
     args=ap.parse_args()

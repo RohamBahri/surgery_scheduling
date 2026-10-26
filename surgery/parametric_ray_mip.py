@@ -138,6 +138,9 @@ class NumericOracle:
         elif kind=='h1':
             m.addConstr(h0==b0)
             m.addConstr(h1<=b1-1)
+        elif kind=='collision':
+            m.addConstr(h0==b0)
+            m.addConstr(h1==b1)
         elif kind=='lex':
             m.addConstr(h0==b0)
             m.addConstr(h1==b1)
@@ -148,61 +151,233 @@ class NumericOracle:
             m.addConstr(gp.quicksum(x[k,j] for j in preceding)==1)
         else:raise ValueError(kind)
 
-    def preferred(self,a,b,y,z):
-        """P3: search ALL lex-preferred disjuncts, not just first hash.
+    def _same_hash_collision(self,a,b,y,z,*,point=None):
+        """One MILP to rule out all lexicographic fallback variants.
 
-        A strictly interior rationally rechecked witness adds a schedule.
-        A Gurobi upper bound rho<=mu is only a numerical pass.
+        If numerically infeasible, no distinct competitor can have BOTH
+        hashes equal. This is only a floating-point screening result, never
+        an exact-arithmetic infeasibility certificate.
         """
         import gurobipy as gp
         from gurobipy import GRB
-        variants=[('h0',None),('h1',None)]+[
-            ('lex',k) for k in range(self.c.n)
-            if any(j<z[k] for j in self.c.allowed[k])]
+        m=None
+        try:
+            if point is None:
+                m,x,param,cost=self._problem(a,b,sense='min')
+                rhs=self._reference(a,b,y,param)+self._tau_reference(a,b,y,param)
+            else:
+                m,x,cost=self._point_problem(point)
+                q=self.c.cost(y,self.c.durations(point))
+                rhs=float(q+self.c.tolerance(q))
+            m.addConstr(cost<=rhs+self.mu)
+            self._preference_constraints(m,x,z,'collision')
+            m.addConstr(gp.quicksum(x[i,z[i]] for i in range(self.c.n))<=self.c.n-1)
+            m.setObjective(0.,GRB.MINIMIZE)
+            m.optimize()
+            if m.Status==GRB.INFEASIBLE:
+                return ('NUMERIC_NONE',None,dict(status='COLLISION_NUMERIC_INFEASIBLE'))
+            if m.SolCount:
+                trial=self._winner(x)
+                probe=Q.from_float(float(param.X)) if point is None else point
+                if (self.c.feasible(trial) and
+                        (a<probe<b if point is None else True)):
+                    duration=self.c.durations(probe)
+                    q=self.c.cost(y,duration)
+                    if (self.c.hash(trial,0)==self.c.hash(z,0) and
+                        self.c.hash(trial,1)==self.c.hash(z,1) and
+                        self.c.cost(trial,duration)<=q+self.c.tolerance(q)):
+                        if self.c.preference(trial)<self.c.preference(z):
+                            return ('ADD',trial,dict(kind='COLLISION',s=str(probe)))
+                        return ('POSSIBLE',None,dict(status='COLLISION_EXISTS'))
+            # Unknown or numerically spurious: MUST NOT skip lex tests.
+            return ('POSSIBLE',None,dict(status='COLLISION_NOT_RULED_OUT',
+                                        gurobi_status=str(m.Status)))
+        except (ArithmeticError,OverflowError) as exc:
+            return ('POSSIBLE',None,dict(error=str(exc)))
+        finally:
+            if m is not None:m.dispose()
+
+    def preferred(self,a,b,y,z):
+        """Parametric P3 with a single same-hash precheck before lex search.
+
+        Skipping lex after a numeric-infeasible collision test is only a
+        NUMERIC_PASS, never an exact-arithmetic certificate.
+        """
+        from gurobipy import GRB
         reports=[]
-        for kind,k in variants:
-            m=None
-            try:
-                m,x,s,cost=self._problem(a,b,sense='max')
-                margin=m.addVar(lb=0.,ub=float((b-a)/2),name='interior_rho')
-                m.addConstr(s>=float(a)+margin)
-                m.addConstr(s<=float(b)-margin)
-                m.addConstr(cost<=self._reference(a,b,y,s)+
-                            self._tau_reference(a,b,y,s))
-                self._preference_constraints(m,x,z,kind,k)
-                m.setObjective(margin,GRB.MAXIMIZE)
-                m.optimize()
-                if m.SolCount:
-                    candidate=self._winner(x)
-                    step=Q.from_float(float(s.X))
-                    if a<step<b and self.c.feasible(candidate):
-                        duration=self.c.durations(step)
-                        q=self.c.cost(y,duration)
-                        if (self.c.preference(candidate)<self.c.preference(z)
-                           and self.c.cost(candidate,duration)<=q+self.c.tolerance(q)):
-                            return ('ADD',candidate,dict(
-                               kind='P3',stage=kind,index=k,
-                               exact_witness_s=str(step),
-                               exact_witness_cost=str(self.c.cost(candidate,duration))))
-                if m.Status==GRB.INFEASIBLE:
-                    # Numerical infeasibility is NOT a rational certificate.
-                    reports.append(dict(stage=kind,index=k,
-                                        status='GUROBI_INFEASIBLE_NOT_EXACT'))
-                    continue
-                ub=float(m.ObjBound) if m.SolCount or m.Status==GRB.TIME_LIMIT else None
-                if m.Status==GRB.OPTIMAL and ub is not None and ub<=self.mu:
-                    reports.append(dict(stage=kind,index=k,upper_rho=ub,
-                                        status='NUMERIC_PASS'))
-                    continue
-                return ('UNRESOLVED',None,dict(kind='P3',stage=kind,index=k,
-                                              bound=ub,status=str(m.Status)))
-            except (ArithmeticError,OverflowError) as exc:
-                return ('UNRESOLVED',None,dict(kind='P3',stage=kind,
-                                             error=str(exc)))
-            finally:
-                if m is not None:m.dispose()
+        # Hash comparisons are cheap and typically settle the entire order.
+        for kind,k in [('h0',None),('h1',None)]:
+            state,trial,info=self._preferred_variant(a,b,y,z,kind,k)
+            if state=='ADD':return (state,trial,info)
+            if state!='NUMERIC_PASS':return (state,trial,info)
+            reports.append(info)
+        if any(any(j<z[k] for j in self.c.allowed[k]) for k in range(self.c.n)):
+            state,trial,check=self._same_hash_collision(a,b,y,z)
+            reports.append(check)
+            if state=='ADD':return ('ADD',trial,check)
+            if state!='NUMERIC_NONE':
+                for k in range(self.c.n):
+                    if not any(j<z[k] for j in self.c.allowed[k]):continue
+                    state,trial,info=self._preferred_variant(a,b,y,z,'lex',k)
+                    if state=='ADD':return (state,trial,info)
+                    if state!='NUMERIC_PASS':return (state,trial,info)
+                    reports.append(info)
         return ('NUMERIC_PASS',None,dict(kind='P3',checks=reports,NOT_EXACT=True))
 
+    def _preferred_variant(self,a,b,y,z,kind,k):
+        from gurobipy import GRB
+        m=None
+        try:
+            m,x,s,cost=self._problem(a,b,sense='max')
+            margin=m.addVar(lb=0.,ub=float((b-a)/2),name='interior_rho')
+            m.addConstr(s>=float(a)+margin)
+            m.addConstr(s<=float(b)-margin)
+            m.addConstr(cost<=self._reference(a,b,y,s)+
+                        self._tau_reference(a,b,y,s)+self.mu)
+            self._preference_constraints(m,x,z,kind,k)
+            m.setObjective(margin,GRB.MAXIMIZE)
+            m.optimize()
+            if m.SolCount:
+                candidate=self._winner(x)
+                step=Q.from_float(float(s.X))
+                if a<step<b and self.c.feasible(candidate):
+                    duration=self.c.durations(step)
+                    q=self.c.cost(y,duration)
+                    if (self.c.preference(candidate)<self.c.preference(z)
+                        and self.c.cost(candidate,duration)<=q+self.c.tolerance(q)):
+                        return ('ADD',candidate,dict(
+                            kind='P3',stage=kind,index=k,exact_witness_s=str(step)))
+            if m.Status==GRB.INFEASIBLE:
+                return ('NUMERIC_PASS',None,dict(
+                    stage=kind,index=k,status='GUROBI_INFEASIBLE_NOT_EXACT'))
+            ub=float(m.ObjBound) if m.SolCount or m.Status==GRB.TIME_LIMIT else None
+            if m.Status==GRB.OPTIMAL and ub is not None and ub<=self.mu:
+                return ('NUMERIC_PASS',None,dict(
+                    stage=kind,index=k,upper_rho=ub,status='NUMERIC_PASS'))
+            return ('UNRESOLVED',None,dict(
+                kind='P3',stage=kind,index=k,bound=ub,status=str(m.Status)))
+        except (ArithmeticError,OverflowError) as exc:
+            return ('UNRESOLVED',None,dict(kind='P3',stage=kind,error=str(exc)))
+        finally:
+            if m is not None:m.dispose()
+
+    def _point_problem(self,step):
+        """Fixed-rational-point scheduling MILP; NO s*x products."""
+        from surgery.anchored_weekly_solver import _model
+        from surgery.weekly_planner import _cost
+        m,x,used,by_room=_model(self.week,self.seconds,1)
+        m.Params.OutputFlag=0
+        m.Params.MIPGap=0
+        m.Params.MIPGapAbs=0
+        m.Params.TimeLimit=self.seconds
+        m.Params.FeasibilityTol=1e-9
+        m.Params.IntFeasTol=1e-9
+        m.Params.OptimalityTol=1e-9
+        d=[float(v) for v in self.c.durations(step)]
+        cost=_cost(m,x,used,by_room,d,exact=False,name='point_cost')
+        return m,x,cost
+
+    def point_primary(self,step,y):
+        """Point P1: verified rational witness or numerical primal/dual check."""
+        from gurobipy import GRB
+        m=None
+        try:
+            m,x,cost=self._point_problem(step)
+            m.setObjective(cost,GRB.MINIMIZE)
+            m.optimize()
+            d=self.c.durations(step)
+            q=self.c.cost(y,d)
+            if m.SolCount:
+                challenger=self._winner(x)
+                if self.c.feasible(challenger):
+                    improvement=self.c.cost(challenger,d)-q
+                    if improvement<0:
+                        return ('ADD',challenger,dict(
+                            kind='POINT_P1',s=str(step),delta=str(improvement)))
+            lb=float(m.ObjBound) if m.SolCount or m.Status==GRB.TIME_LIMIT else None
+            if m.Status==GRB.OPTIMAL and lb is not None and lb>=float(q)-self.mu:
+                return ('NUMERIC_PASS',None,dict(
+                    kind='POINT_P1',bound=lb,NOT_EXACT=True))
+            return ('UNRESOLVED',None,dict(
+                kind='POINT_P1',status=str(m.Status),bound=lb))
+        except (ArithmeticError,OverflowError) as exc:
+            return ('UNRESOLVED',None,dict(kind='POINT_P1',error=str(exc)))
+        finally:
+            if m is not None:m.dispose()
+
+    def point_preferred(self,step,y,z):
+        """Point P3: exact-input comparison, numerically solved fixed MIPs.
+
+        At a cost/tolerance crossing, a verified rational challenger is
+        admitted; a numerical infeasibility is only NUMERIC_PASS.
+        """
+        from gurobipy import GRB
+        import numpy as np
+        reports=[]
+        for kind,k in [('h0',None),('h1',None)]:
+            state,trial,info=self._point_variant(step,y,z,kind,k)
+            if state=='ADD':return (state,trial,info)
+            if state!='NUMERIC_PASS':return (state,trial,info)
+            reports.append(info)
+        if any(any(j<z[k] for j in self.c.allowed[k]) for k in range(self.c.n)):
+            state,trial,info=self._same_hash_collision(Q(0),self.c.upper,y,z,
+                                                       point=step)
+            reports.append(info)
+            if state=='ADD':return ('ADD',trial,info)
+            if state!='NUMERIC_NONE':
+                for k in range(self.c.n):
+                    if not any(j<z[k] for j in self.c.allowed[k]):continue
+                    state,trial,info=self._point_variant(step,y,z,'lex',k)
+                    if state=='ADD':return (state,trial,info)
+                    if state!='NUMERIC_PASS':return (state,trial,info)
+                    reports.append(info)
+        return ('NUMERIC_PASS',None,dict(kind='POINT_P3',checks=reports,NOT_EXACT=True))
+
+    def _point_variant(self,step,y,z,kind,k):
+        from gurobipy import GRB
+        import numpy as np
+        m=None
+        try:
+            m,x,cost=self._point_problem(step)
+            d=self.c.durations(step)
+            q=self.c.cost(y,d)
+            bound=q+self.c.tolerance(q)
+            # Numeric RHS is outward-rounded. This is not an exact proof.
+            safe=float(np.nextafter(float(bound),np.inf))+self.mu
+            m.addConstr(cost<=safe)
+            self._preference_constraints(m,x,z,kind,k)
+            m.setObjective(0.,GRB.MINIMIZE)
+            m.optimize()
+            if m.SolCount:
+                challenger=self._winner(x)
+                if (self.c.feasible(challenger)
+                    and self.c.preference(challenger)<self.c.preference(z)
+                    and self.c.cost(challenger,d)<=bound):
+                    return ('ADD',challenger,dict(
+                        kind='POINT_P3',stage=kind,index=k,s=str(step)))
+                return ('UNRESOLVED',None,dict(
+                    kind='POINT_P3',stage=kind,index=k,
+                    reason='NUMERIC_FALSE_FEASIBLE_AT_BOUNDARY'))
+            if m.Status==GRB.INFEASIBLE:
+                return ('NUMERIC_PASS',None,dict(
+                    kind='POINT_P3',stage=kind,index=k,NOT_EXACT=True))
+            return ('UNRESOLVED',None,dict(
+                kind='POINT_P3',stage=kind,index=k,status=str(m.Status)))
+        except (ArithmeticError,OverflowError) as exc:
+            return ('UNRESOLVED',None,dict(
+                kind='POINT_P3',stage=kind,error=str(exc)))
+        finally:
+            if m is not None:m.dispose()
+
+    def point_verify(self,step,y,z):
+        p1,u,info=self.point_primary(step,y)
+        if p1!='NUMERIC_PASS':return (p1,u,info)
+        d=self.c.durations(step)
+        q=self.c.cost(y,d)
+        if self.c.cost(z,d)>q+self.c.tolerance(q):
+            return ('UNRESOLVED',None,dict(
+                kind='POINT_P2',reason='LIBRARY_INELIGIBLE',s=str(step)))
+        return self.point_preferred(step,y,z)
 
     def interval_lower_bound(self,a,b,reference_schedules,anchor=None):
         """Numerical MILP bound on deployed REALIZED cost over a full interval.
@@ -267,124 +442,154 @@ def discover_component(component,week,initial_schedules,*,
                        seconds=180.,separation_seconds=5.,mu=1e-6,
                        max_rounds=20,max_cells=500,max_schedules=50,
                        exhaustive_limit=64,boundary_seconds=10.,
-                       verify_boundaries=True):
-    """Complete method for small components; bounded numerical MILP discovery for large.
+                       verify_boundaries=True,resume=None):
+    """Finite schedule discovery with numerical MILP separation.
 
-    Exhaustive method gives a genuine exact-arithmetic reference certificate.
-    Larger results are NUMERICALLY_CHECKED, never EXACT. Missing proofs are
-    UNRESOLVED; no unverified intervals are silently discarded.
+    Add ALL rationally verified witnesses in a pass, instead of restarting
+    at the first. Retain completed P1/P2/P3 regions over their subintervals
+    if their reference and selected schedules are unchanged. Incomplete
+    attempts carry resumable libraries and certificates. Numeric Gurobi
+    passes are NEVER promoted to rational exact certificates.
     """
     started=time.monotonic()
-    # Do not enumerate an unsafe combinatorial explosion.
     combinations=1
     for row in component.allowed:
         combinations*=len(row)
         if combinations>exhaustive_limit:break
     if combinations<=exhaustive_limit:
         try:
-            result=component.exact_exhaustive(max_schedules=exhaustive_limit,
+            return component.exact_exhaustive(max_schedules=exhaustive_limit,
                                                max_cells=max_cells)
-            return result
         except RuntimeError:
             pass
     oracle=NumericOracle(component,week,seconds=separation_seconds,mu=mu)
     library={tuple(z) for z in initial_schedules if component.feasible(tuple(z))}
+    records=[]
+    certificates=[]
+    if isinstance(resume,dict):
+        state=resume.get('resume_state',{})
+        # The calling runner rejects checkpoints from incompatible models.
+        for assignment in state.get('library',[]):
+            z=tuple(map(int,assignment))
+            if component.feasible(z):library.add(z)
+        for cell in state.get('certificates',[]):
+            try:
+                a,b=Q(cell['a']),Q(cell['b'])
+                y,z=tuple(cell['y']),tuple(cell['z'])
+                if a<b and 0<=a and b<=component.upper and component.feasible(y) and component.feasible(z):
+                    certificates.append(dict(a=str(a),b=str(b),y=list(y),z=list(z)))
+            except (KeyError,TypeError,ValueError,ZeroDivisionError):
+                continue
+        records=list(state.get('discoveries',[]))
     if not library:
         return dict(status='UNRESOLVED',reason='No feasible initial schedules')
-    discoveries=[]
+    def finished(reason,**extra):
+        return dict(status='UNRESOLVED',reason=reason,library_size=len(library),
+                    discoveries=records,
+                    resume_state=dict(library=[list(z) for z in sorted(library)],
+                                      certificates=certificates,discoveries=records),
+                    **extra)
+    def remaining():
+        return time.monotonic()-started < seconds
+    def covering(a,b,y,z):
+        return any(Q(row['a'])<=a and b<=Q(row['b'])
+                   and tuple(row['y'])==tuple(y)
+                   and tuple(row['z'])==tuple(z)
+                   for row in certificates)
     for rnd in range(max_rounds):
-        if time.monotonic()-started>seconds:
-            return dict(status='UNRESOLVED',reason='COMPONENT_WALL',
-                       library_size=len(library),discoveries=discoveries)
-        if len(library)>max_schedules:
-            return dict(status='UNRESOLVED',reason='LIBRARY_LIMIT',
-                       library_size=len(library),discoveries=discoveries)
+        if not remaining():return finished('COMPONENT_WALL',rounds=rnd)
+        if len(library)>max_schedules:return finished('LIBRARY_LIMIT',rounds=rnd)
         try:
             cuts=component.library_partition(tuple(sorted(library)),max_cells)
         except (RuntimeError,OverflowError) as ex:
-            return dict(status='UNRESOLVED',reason='PARTITION_LIMIT',error=str(ex),
-                       library_size=len(library),discoveries=discoveries)
+            return finished('PARTITION_LIMIT',error=str(ex),rounds=rnd)
         cells=[]
-        added=False
+        added=set()
+        uncertainty=None
         for a,b in zip(cuts,cuts[1:]):
-            if time.monotonic()-started>seconds:
-                return dict(status='UNRESOLVED',reason='COMPONENT_WALL',
-                           library_size=len(library),discoveries=discoveries)
+            if not remaining():
+                return finished('COMPONENT_WALL',rounds=rnd)
             try:
                 y,z,j=component.cell(tuple(sorted(library)),a,b)
             except AssertionError as ex:
-                return dict(status='UNRESOLVED',reason='AFFINE_PARTITION',error=str(ex))
+                return finished('AFFINE_PARTITION',error=str(ex))
+            if covering(a,b,y,z):
+                cells.append(dict(a=a,b=b,z=z,real=j,
+                                  status='NUMERICAL_REGION_REUSED'))
+                continue
             if not oracle.eligibility(a,b,y,z):
-                return dict(status='UNRESOLVED',reason='P2_REFERENCE_FAILURE',
-                           a=str(a),b=str(b))
+                uncertainty=dict(reason='P2_REFERENCE_FAILURE',a=str(a),b=str(b))
+                continue
             first,u,info=oracle.primary(a,b,y)
             if first=='ADD':
                 if u in library:
-                    return dict(status='UNRESOLVED',reason='P1_DUPLICATE_WITNESS')
-                library.add(u)
-                discoveries.append(info)
-                added=True
-                break
+                    return finished('P1_DUPLICATE_WITNESS',a=str(a),b=str(b))
+                if u not in added:
+                    added.add(tuple(u))
+                    records.append(info)
+                continue
             if first!='NUMERIC_PASS':
-                return dict(status='UNRESOLVED',reason='P1_NOT_CERTIFIED',
-                           detail=info,a=str(a),b=str(b),
-                           library_size=len(library))
+                if uncertainty is None:
+                    uncertainty=dict(reason='P1_NOT_CERTIFIED',detail=info,
+                                     a=str(a),b=str(b))
+                continue
             third,u,info3=oracle.preferred(a,b,y,z)
             if third=='ADD':
                 if u in library:
-                    return dict(status='UNRESOLVED',reason='P3_DUPLICATE_WITNESS')
-                library.add(u)
-                discoveries.append(info3)
-                added=True
-                break
+                    return finished('P3_DUPLICATE_WITNESS',a=str(a),b=str(b))
+                if u not in added:
+                    added.add(tuple(u))
+                    records.append(info3)
+                continue
             if third!='NUMERIC_PASS':
-                return dict(status='UNRESOLVED',reason='P3_NOT_CERTIFIED',
-                           detail=info3,a=str(a),b=str(b),
-                           library_size=len(library))
+                if uncertainty is None:
+                    uncertainty=dict(reason='P3_NOT_CERTIFIED',detail=info3,
+                                     a=str(a),b=str(b))
+                continue
+            certificates.append(dict(a=str(a),b=str(b),
+                                     y=list(y),z=list(z)))
             cells.append(dict(a=a,b=b,z=z,real=j,
                               status='NUMERICAL_REGION_ONLY'))
-        if added:continue
-        # Interior separation is complete to solver tolerance. Exact
-        # boundary rays are handled distinctly, never via s+delta.
+        if added:
+            # All rationally checked witnesses in this pass are valid. The
+            # changed restricted partition is rebuilt in the next round.
+            library.update(added)
+            if len(library)>max_schedules:
+                return finished('LIBRARY_LIMIT',rounds=rnd+1)
+            continue
+        if uncertainty is not None:
+            return finished(uncertainty.pop('reason'),**uncertainty,rounds=rnd+1)
+        # Interior separation is complete to solver tolerance.
         boundaries=[]
-        for s in cuts:
-            proposed,q,actual=component.follower(s,tuple(library))
-            row=dict(s=s,z=proposed,real=actual,
+        for step in cuts:
+            if not remaining():
+                return finished('BOUNDARY_WALL',rounds=rnd+1)
+            proposed,q,actual=component.follower(step,tuple(library))
+            row=dict(s=step,z=proposed,real=actual,
                      status='UNVERIFIED_FULL_PLANNER')
             if verify_boundaries:
-                from surgery.anchored_weekly_solver import solve_week
-                try:
-                    if time.monotonic()-started>seconds:
-                        return dict(status='UNRESOLVED',reason='BOUNDARY_WALL',
-                                    library_size=len(library))
-                    deployed=solve_week(week,[float(v) for v in
-                        component.durations(s)],seconds=boundary_seconds,
-                        threads=1,tie=True,hash_seed=0)
-                    if not deployed.complete or deployed.assignment is None:
-                        return dict(status='UNRESOLVED',
-                                    reason='BOUNDARY_DEPLOYMENT_NOT_CERTIFIED',
-                                    s=str(s),planner_status=deployed.status)
-                    observed=tuple(deployed.assignment)
-                    if observed!=proposed:
-                        if observed not in library and component.feasible(observed):
-                            library.add(observed)
-                            discoveries.append(dict(kind='BOUNDARY_ADDED',
-                                                    s=str(s)))
-                            added=True
-                            break
-                        return dict(status='UNRESOLVED',
-                                    reason='BOUNDARY_NUMERICAL_MISMATCH',
-                                    s=str(s),library=proposed,planner=observed)
-                    row['status']='NUMERICALLY_CHECKED_ANCHORED'
-                except (ArithmeticError,OverflowError) as exc:
-                    return dict(status='UNRESOLVED',reason='BOUNDARY_FLOAT',
-                                s=str(s),error=str(exc))
+                y=min(library,key=lambda v:(component.cost(v,component.durations(step)),v))
+                state,u,info=oracle.point_verify(step,y,proposed)
+                if state=='ADD':
+                    if u in library:
+                        return finished('POINT_DUPLICATE_WITNESS',s=str(step))
+                    if u not in added:
+                        added.add(tuple(u))
+                        records.append(info)
+                    continue
+                if state!='NUMERIC_PASS':
+                    return finished('BOUNDARY_POINT_NOT_CERTIFIED',s=str(step),
+                                    detail=info,rounds=rnd+1)
+                row['status']='NUMERICALLY_CHECKED_POINT_NOT_EXACT'
             boundaries.append(row)
-        if added:continue
+        if added:
+            library.update(added)
+            if len(library)>max_schedules:
+                return finished('LIBRARY_LIMIT',rounds=rnd+1)
+            continue
         state=('NUMERIC_PARTITION' if verify_boundaries else
                'NUMERIC_PARTITION_BOUNDARIES_UNVERIFIED')
         return dict(status=state,cells=cells,boundaries=boundaries,
-                    library_size=len(library),discoveries=discoveries,
-                    rounds=rnd+1)
-    return dict(status='UNRESOLVED',reason='ROUND_LIMIT',
-                library_size=len(library),discoveries=discoveries)
+                    library_size=len(library),discoveries=records,
+                    rounds=rnd+1,verified_cell_count=len(certificates))
+    return finished('ROUND_LIMIT',rounds=max_rounds)
