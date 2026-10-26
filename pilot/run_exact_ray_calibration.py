@@ -203,8 +203,7 @@ def run(args):
          separation_seconds=args.separation_seconds,boundary_seconds=args.boundary_seconds,
          max_rounds=args.max_rounds,max_cells=args.max_cells,
          max_schedules=args.max_schedules,exact_limit=args.exact_limit,
-         verify_boundaries=not args.skip_boundary_verification,
-        retry_unresolved=args.retry_unresolved)
+         verify_boundaries=not args.skip_boundary_verification)
     file=out/'run_contract.json'
     if file.exists() and json.loads(file.read_text())!=contract:
         raise ValueError('Changed numerical/scientific specification; use a distinct output root')
