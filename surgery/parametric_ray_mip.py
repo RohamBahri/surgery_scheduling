@@ -169,7 +169,7 @@ class NumericOracle:
                 m,x,cost=self._point_problem(point)
                 q=self.c.cost(y,self.c.durations(point))
                 rhs=float(q+self.c.tolerance(q))
-            m.addConstr(cost<=rhs)
+            m.addConstr(cost<=rhs+self.mu)
             self._preference_constraints(m,x,z,'collision')
             m.addConstr(gp.quicksum(x[i,z[i]] for i in range(self.c.n))<=self.c.n-1)
             m.setObjective(0.,GRB.MINIMIZE)
@@ -233,7 +233,7 @@ class NumericOracle:
             m.addConstr(s>=float(a)+margin)
             m.addConstr(s<=float(b)-margin)
             m.addConstr(cost<=self._reference(a,b,y,s)+
-                        self._tau_reference(a,b,y,s))
+                        self._tau_reference(a,b,y,s)+self.mu)
             self._preference_constraints(m,x,z,kind,k)
             m.setObjective(margin,GRB.MAXIMIZE)
             m.optimize()
@@ -343,7 +343,7 @@ class NumericOracle:
             q=self.c.cost(y,d)
             bound=q+self.c.tolerance(q)
             # Numeric RHS is outward-rounded. This is not an exact proof.
-            safe=float(np.nextafter(float(bound),np.inf))
+            safe=float(np.nextafter(float(bound),np.inf))+self.mu
             m.addConstr(cost<=safe)
             self._preference_constraints(m,x,z,kind,k)
             m.setObjective(0.,GRB.MINIMIZE)
