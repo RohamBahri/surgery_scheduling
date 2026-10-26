@@ -154,7 +154,7 @@ def test_exhaustive_respects_surgeday_retention():
 
 def test_same_hash_precheck_skips_costly_lex_variants(monkeypatch):
     from surgery.parametric_ray_mip import NumericOracle
-    c=fixture();z=c.schedules()[0];calls=[]
+    c=fixture();z=c.schedules()[-1];calls=[]
     oracle=NumericOracle(c,None,seconds=1.)
     def variant(a,b,y,z,kind,k):
         calls.append((kind,k))
@@ -170,7 +170,7 @@ def test_same_hash_precheck_skips_costly_lex_variants(monkeypatch):
 
 def test_lex_fallback_still_checked_when_collision_possible(monkeypatch):
     from surgery.parametric_ray_mip import NumericOracle
-    c=fixture();z=c.schedules()[0];calls=[]
+    c=fixture();z=c.schedules()[-1];calls=[]
     oracle=NumericOracle(c,None,seconds=1.)
     def variant(a,b,y,z,kind,k):
         calls.append((kind,k))
