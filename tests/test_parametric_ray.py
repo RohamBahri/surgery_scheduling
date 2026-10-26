@@ -150,3 +150,48 @@ def test_exhaustive_respects_surgeday_retention():
     result=c.exact_exhaustive()
     assert result['value']<=c.follower(0,schedules)[2]
     assert result['value']<=c.follower(1,schedules)[2]
+
+
+def test_same_hash_precheck_skips_costly_lex_variants(monkeypatch):
+    from surgery.parametric_ray_mip import NumericOracle
+    c=fixture();z=c.schedules()[0];calls=[]
+    oracle=NumericOracle(c,None,seconds=1.)
+    def variant(a,b,y,z,kind,k):
+        calls.append((kind,k))
+        return ('NUMERIC_PASS',None,dict(kind=kind))
+    def collision(a,b,y,z,*,point=None):
+        calls.append(('collision',None))
+        return ('NUMERIC_NONE',None,dict(status='COLLISION_NUMERIC_INFEASIBLE'))
+    monkeypatch.setattr(oracle,'_preferred_variant',variant)
+    monkeypatch.setattr(oracle,'_same_hash_collision',collision)
+    assert oracle.preferred(Q(0),c.upper,z,z)[0]=='NUMERIC_PASS'
+    assert calls==[('h0',None),('h1',None),('collision',None)]
+
+
+def test_lex_fallback_still_checked_when_collision_possible(monkeypatch):
+    from surgery.parametric_ray_mip import NumericOracle
+    c=fixture();z=c.schedules()[0];calls=[]
+    oracle=NumericOracle(c,None,seconds=1.)
+    def variant(a,b,y,z,kind,k):
+        calls.append((kind,k))
+        return ('NUMERIC_PASS',None,{})
+    monkeypatch.setattr(oracle,'_preferred_variant',variant)
+    monkeypatch.setattr(oracle,'_same_hash_collision',
+        lambda *a,**kw:('POSSIBLE',None,dict(status='COLLISION_EXISTS')))
+    assert oracle.preferred(Q(0),c.upper,z,z)[0]=='NUMERIC_PASS'
+    assert calls[:2]==[('h0',None),('h1',None)]
+    assert any(kind=='lex' for kind,_ in calls)
+
+
+def test_fixed_rational_boundary_checks(monkeypatch):
+    from surgery.parametric_ray_mip import NumericOracle
+    c=fixture();z=c.schedules()[0];trace=[]
+    oracle=NumericOracle(c,None,seconds=1.)
+    def primary(step,y):
+        trace.append(('P1',step));return ('NUMERIC_PASS',None,{})
+    def preferred(step,y,z):
+        trace.append(('P3',step));return ('NUMERIC_PASS',None,{})
+    monkeypatch.setattr(oracle,'point_primary',primary)
+    monkeypatch.setattr(oracle,'point_preferred',preferred)
+    assert oracle.point_verify(Q(1,3),z,z)[0]=='NUMERIC_PASS'
+    assert trace==[('P1',Q(1,3)),('P3',Q(1,3))]
