@@ -84,7 +84,7 @@ def worker(job):
     answer['component']=str(key)
     answer['solver_revision']='cpro_full_v2'
     answer['solver_budgets']=dict(component_seconds=seconds,
-             separation_seconds=solve_seconds,boundary_seconds=boundary_seconds,
+             separation_seconds=solve_seconds,
              max_rounds=max_rounds,max_cells=max_cells,
              max_schedules=max_schedules,exact_limit=exact_limit)
     answer['n_cases']=week.n
@@ -654,7 +654,8 @@ def main():
     ap.add_argument('--deployment-seconds',type=float,default=600.,
                     help='Independent per-week budget for candidate deployment verification')
     ap.add_argument('--separation-seconds',type=float,default=10.)
-    ap.add_argument('--boundary-seconds',type=float,default=30.)
+    ap.add_argument('--boundary-seconds',type=float,default=30.,
+                    help='Deprecated, ignored; retained for CLI compatibility')
     ap.add_argument('--wall-minutes',type=float,default=600.)
     ap.add_argument('--mu',type=float,default=1e-6)
     ap.add_argument('--max-rounds',type=int,default=25)
