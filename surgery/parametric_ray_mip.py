@@ -522,7 +522,9 @@ def discover_component(component,week,initial_schedules,*,
                 continue
             first,u,info=oracle.primary(a,b,y)
             if first=='ADD':
-                if u not in library:
+                if u in library:
+                    return finished('P1_DUPLICATE_WITNESS',a=str(a),b=str(b))
+                if u not in added:
                     added.add(tuple(u))
                     records.append(info)
                 continue
@@ -533,7 +535,9 @@ def discover_component(component,week,initial_schedules,*,
                 continue
             third,u,info3=oracle.preferred(a,b,y,z)
             if third=='ADD':
-                if u not in library:
+                if u in library:
+                    return finished('P3_DUPLICATE_WITNESS',a=str(a),b=str(b))
+                if u not in added:
                     added.add(tuple(u))
                     records.append(info3)
                 continue
@@ -567,7 +571,9 @@ def discover_component(component,week,initial_schedules,*,
                 y=min(library,key=lambda v:(component.cost(v,component.durations(step)),v))
                 state,u,info=oracle.point_verify(step,y,proposed)
                 if state=='ADD':
-                    if u not in library:
+                    if u in library:
+                        return finished('POINT_DUPLICATE_WITNESS',s=str(step))
+                    if u not in added:
                         added.add(tuple(u))
                         records.append(info)
                     continue
