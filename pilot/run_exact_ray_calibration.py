@@ -205,9 +205,26 @@ def run(args):
          max_schedules=args.max_schedules,exact_limit=args.exact_limit,
          verify_boundaries=not args.skip_boundary_verification)
     file=out/'run_contract.json'
-    if file.exists() and json.loads(file.read_text())!=contract:
-        raise ValueError('Changed numerical/scientific specification; use a distinct output root')
-    if not file.exists():atomic_json(file,contract)
+    if file.exists():
+        previous=json.loads(file.read_text())
+        if previous!=contract:
+            changed={key for key in (set(previous)|set(contract))
+                     if previous.get(key)!=contract.get(key)}
+            # A pre-run crash may have written only run_contract.json.
+            # Permit replacement of its *source hash only* if no science
+            # outputs or component checkpoints have been written.
+            untouched=(not (out/'intrinsic_domain.json').exists()
+                       and not (out/'summary.json').exists()
+                       and not any((out/'components').glob('*.json')))
+            if changed=={'source_sha256'} and untouched:
+                print('Refreshing code hash after pre-run crash; no component results exist',
+                      flush=True)
+                atomic_json(file,contract)
+            else:
+                raise ValueError('Changed numerical/scientific specification; '
+                                 'use a distinct output root')
+    else:
+        atomic_json(file,contract)
     with args.context.open('rb') as handle:ctx=pickle.load(handle)
     print(f'Train components={len(ctx["train"])}',flush=True)
     raw,p,upper,model,cache,policy=prepare(ctx,root,args,scenario)
@@ -239,7 +256,6 @@ def run(args):
                    'cpro_'+scenario.name+'_plain_vf',tie=True)
     folder=out/'components'
     folder.mkdir(parents=True,exist_ok=True)
-    import hashlib
     def path_for(key):
         return folder/(hashlib.sha256(str(key).encode()).hexdigest()+'.json')
     results={}
