@@ -208,3 +208,73 @@ def test_full_runner_does_not_shadow_hashlib():
                    if block.get_name()=="run")
     assert run_scope.lookup("hashlib").is_global()
     assert not run_scope.lookup("hashlib").is_local()
+
+
+def test_multi_witness_round_collects_all_before_rebuilding(monkeypatch):
+    """A round can add several independent P1 witnesses on distinct cells."""
+    from surgery import parametric_ray_mip as mod
+
+    class Toy:
+        upper=Q(1)
+        allowed=((0,1),(0,1))
+        def feasible(self,z):return len(z)==2 and set(z)<={0,1}
+        def library_partition(self,lib,max_cells):
+            return [Q(0),Q(1,2),Q(1)]
+        def cell(self,lib,a,b):
+            return (0,0),(0,0),Q(1)
+        def follower(self,step,lib):
+            return (0,0),Q(0),Q(1)
+        def durations(self,s):return (Q(1),Q(1))
+        def cost(self,z,d):return Q(0)
+        def tolerance(self,q):return Q(1,500)
+
+    calls=[]
+    class Oracle:
+        def __init__(self,*args,**kwargs):pass
+        def eligibility(self,*args):return True
+        def primary(self,a,b,y):
+            calls.append(('p1',a))
+            if len(calls)<=2:
+                return ('ADD',(1,0) if a==0 else (0,1),{})
+            return ('NUMERIC_PASS',None,{})
+        def preferred(self,*args):
+            return ('NUMERIC_PASS',None,{})
+        def point_verify(self,*args):
+            return ('NUMERIC_PASS',None,{})
+    monkeypatch.setattr(mod,'NumericOracle',Oracle)
+    answer=mod.discover_component(
+        Toy(),None,[(0,0)],max_rounds=2,max_schedules=10,
+        max_cells=10,exhaustive_limit=1,seconds=20,
+        verify_boundaries=True)
+    assert answer['status']=='NUMERIC_PARTITION'
+    assert answer['rounds']==2
+    assert answer['library_size']==3
+    assert len(calls)==4
+
+
+def test_cached_grid_assignments_are_reused_without_solves(tmp_path):
+    import json
+    import numpy as np
+    from types import SimpleNamespace
+    from pilot import run_exact_ray_calibration as runner
+    from pilot import run_response_scenario_grid as base
+    from surgery.response_grid import TRAIN_SCENARIOS
+    sc=next(s for s in TRAIN_SCENARIOS if s.name=='SAT_A80_H30')
+    root=tmp_path
+    ray=root/'vf_ray_extension'/'training'/sc.name
+    ray.mkdir(parents=True)
+    (ray/'s_000.json').write_text(json.dumps({'s':1.0}))
+    cache=SimpleNamespace(root=root/'plans',seconds=180.)
+    folder=cache.root/'content_addressed'
+    folder.mkdir(parents=True)
+    durations=np.array([1.],float)
+    ident=base.sha_bytes(
+        b'item'+np.ascontiguousarray(durations,dtype='<f8').tobytes()+
+        repr((180.,True,'hash_seed_0')).encode())
+    (folder/(ident+'.json')).write_text(json.dumps(dict(
+        signature=ident,result=dict(assignment=[0],complete=True))))
+    ctx={'train':[('item',None,np.array([0],dtype=int))]}
+    model=SimpleNamespace(reviewed=lambda raw:np.asarray(raw,float))
+    seeds=runner.cached_grid_seeds(ctx,root,sc,cache,
+                                   np.array([0.]),np.array([1.]),model)
+    assert seeds['item']==[(0,)]
