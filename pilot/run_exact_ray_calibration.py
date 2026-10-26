@@ -411,12 +411,26 @@ def run(args):
                               f'components; {len(pending)} active/queued',
                               flush=True)
         finally:
-            # Cancel tasks not started. Active jobs have their own component
-            # wall budget; wait for these bounded jobs to exit cleanly.
+            # Cancel unstarted work, let active bounded jobs finish, and keep
+            # their completed results even when the global clock expired.
             pool.shutdown(wait=True,cancel_futures=timed_out)
+            if timed_out:
+                for future,job in pending.items():
+                    if future.cancelled() or not future.done():
+                        continue
+                    try:
+                        outcome=future.result()
+                    except Exception as ex:
+                        outcome=(job[0],dict(
+                            status='UNRESOLVED',reason='WORKER_EXCEPTION',
+                            component=job[0],n_cases=job[1].n,
+                            error=f'{type(ex).__name__}: {ex}',
+                            solver_revision='cpro_full_v2'))
+                    commit(outcome)
         if timed_out:
-            print('Global wall budget reached; unfinished tasks remain '
-                  'checkpoint-safe for the next invocation',flush=True)
+            print('Global wall budget reached; all completed active jobs '
+                  'checkpointed; unstarted work remains for the next run',
+                  flush=True)
     counts={}
     for res in results.values():
         counts[res['status']]=counts.get(res['status'],0)+1
