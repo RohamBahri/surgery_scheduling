@@ -190,7 +190,7 @@ def run(args):
     if scenario is None:raise ValueError('Unknown B training scenario')
     root=args.out
     verify_existing(root,args)
-    out=root/('cpro_'+scenario.name)
+    out=root/('cpro_full_'+scenario.name)
     out.mkdir(parents=True,exist_ok=True)
     contract=dict(source_sha256=digest(__file__),
          rational_source_sha256=digest(Path(__file__).resolve().parents[1]/'surgery'/'parametric_ray.py'),
@@ -203,7 +203,8 @@ def run(args):
          separation_seconds=args.separation_seconds,boundary_seconds=args.boundary_seconds,
          max_rounds=args.max_rounds,max_cells=args.max_cells,
          max_schedules=args.max_schedules,exact_limit=args.exact_limit,
-         verify_boundaries=not args.skip_boundary_verification)
+         verify_boundaries=not args.skip_boundary_verification,
+        retry_unresolved=args.retry_unresolved)
     file=out/'run_contract.json'
     if file.exists() and json.loads(file.read_text())!=contract:
         raise ValueError('Changed numerical/scientific specification; use a distinct output root')
@@ -249,10 +250,10 @@ def run(args):
         if path.exists():
             saved=json.loads(path.read_text())
             if saved.get('component')!=str(key):raise ValueError('Stale component cache')
-            if saved.get('status')!='UNRESOLVED':
+            if saved.get('status')!='UNRESOLVED' or not args.retry_unresolved:
                 results[str(key)]=saved
                 continue
-            print(f'{key}: retrying unresolved component checkpoint',flush=True)
+            print(f'{key}: explicitly retrying unresolved component checkpoint',flush=True)
         seeds=[]
         for bank in (booked,case,vf):
             if bank[key].get('assignment') is not None:
@@ -473,18 +474,20 @@ def main():
     ap.add_argument('--vf-outers',type=int,default=30)
     ap.add_argument('--vf-pdca-steps',type=int,default=50)
     ap.add_argument('--cuts',type=int,default=160)
-    ap.add_argument('--component-seconds',type=float,default=90.)
-    ap.add_argument('--separation-seconds',type=float,default=7.)
+    ap.add_argument('--component-seconds',type=float,default=150.)
+    ap.add_argument('--separation-seconds',type=float,default=10.)
     ap.add_argument('--boundary-seconds',type=float,default=30.)
-    ap.add_argument('--wall-minutes',type=float,default=120.)
+    ap.add_argument('--wall-minutes',type=float,default=600.)
     ap.add_argument('--mu',type=float,default=1e-6)
     ap.add_argument('--max-rounds',type=int,default=25)
-    ap.add_argument('--max-cells',type=int,default=500)
+    ap.add_argument('--max-cells',type=int,default=1500)
     ap.add_argument('--max-schedules',type=int,default=120)
     ap.add_argument('--exact-limit',type=int,default=64)
     ap.add_argument('--pilot-components',type=int,default=0,
                     help='First N training components only, for resource audits')
     ap.add_argument('--skip-boundary-verification',action='store_true')
+    ap.add_argument('--retry-unresolved',action='store_true',
+                    help='Retry previously unresolved component checkpoints')
     ap.add_argument('--dry-run',action='store_true')
     ap.add_argument('--evaluate',action='store_true')
     args=ap.parse_args()
