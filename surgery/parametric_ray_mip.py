@@ -442,118 +442,148 @@ def discover_component(component,week,initial_schedules,*,
                        seconds=180.,separation_seconds=5.,mu=1e-6,
                        max_rounds=20,max_cells=500,max_schedules=50,
                        exhaustive_limit=64,boundary_seconds=10.,
-                       verify_boundaries=True):
-    """Complete method for small components; bounded numerical MILP discovery for large.
+                       verify_boundaries=True,resume=None):
+    """Finite schedule discovery with numerical MILP separation.
 
-    Exhaustive method gives a genuine exact-arithmetic reference certificate.
-    Larger results are NUMERICALLY_CHECKED, never EXACT. Missing proofs are
-    UNRESOLVED; no unverified intervals are silently discarded.
+    Add ALL rationally verified witnesses in a pass, instead of restarting
+    at the first. Retain completed P1/P2/P3 regions over their subintervals
+    if their reference and selected schedules are unchanged. Incomplete
+    attempts carry resumable libraries and certificates. Numeric Gurobi
+    passes are NEVER promoted to rational exact certificates.
     """
     started=time.monotonic()
-    # Do not enumerate an unsafe combinatorial explosion.
     combinations=1
     for row in component.allowed:
         combinations*=len(row)
         if combinations>exhaustive_limit:break
     if combinations<=exhaustive_limit:
         try:
-            result=component.exact_exhaustive(max_schedules=exhaustive_limit,
+            return component.exact_exhaustive(max_schedules=exhaustive_limit,
                                                max_cells=max_cells)
-            return result
         except RuntimeError:
             pass
     oracle=NumericOracle(component,week,seconds=separation_seconds,mu=mu)
     library={tuple(z) for z in initial_schedules if component.feasible(tuple(z))}
+    records=[]
+    certificates=[]
+    if isinstance(resume,dict):
+        state=resume.get('resume_state',{})
+        # The calling runner rejects checkpoints from incompatible models.
+        for assignment in state.get('library',[]):
+            z=tuple(map(int,assignment))
+            if component.feasible(z):library.add(z)
+        for cell in state.get('certificates',[]):
+            try:
+                a,b=Q(cell['a']),Q(cell['b'])
+                y,z=tuple(cell['y']),tuple(cell['z'])
+                if a<b and 0<=a and b<=component.upper and component.feasible(y) and component.feasible(z):
+                    certificates.append(dict(a=str(a),b=str(b),y=list(y),z=list(z)))
+            except (KeyError,TypeError,ValueError,ZeroDivisionError):
+                continue
+        records=list(state.get('discoveries',[]))
     if not library:
         return dict(status='UNRESOLVED',reason='No feasible initial schedules')
-    discoveries=[]
+    def finished(reason,**extra):
+        return dict(status='UNRESOLVED',reason=reason,library_size=len(library),
+                    discoveries=records,
+                    resume_state=dict(library=[list(z) for z in sorted(library)],
+                                      certificates=certificates,discoveries=records),
+                    **extra)
+    def remaining():
+        return time.monotonic()-started < seconds
+    def covering(a,b,y,z):
+        return any(Q(row['a'])<=a and b<=Q(row['b'])
+                   and tuple(row['y'])==tuple(y)
+                   and tuple(row['z'])==tuple(z)
+                   for row in certificates)
     for rnd in range(max_rounds):
-        if time.monotonic()-started>seconds:
-            return dict(status='UNRESOLVED',reason='COMPONENT_WALL',
-                       library_size=len(library),discoveries=discoveries)
-        if len(library)>max_schedules:
-            return dict(status='UNRESOLVED',reason='LIBRARY_LIMIT',
-                       library_size=len(library),discoveries=discoveries)
+        if not remaining():return finished('COMPONENT_WALL',rounds=rnd)
+        if len(library)>max_schedules:return finished('LIBRARY_LIMIT',rounds=rnd)
         try:
             cuts=component.library_partition(tuple(sorted(library)),max_cells)
         except (RuntimeError,OverflowError) as ex:
-            return dict(status='UNRESOLVED',reason='PARTITION_LIMIT',error=str(ex),
-                       library_size=len(library),discoveries=discoveries)
+            return finished('PARTITION_LIMIT',error=str(ex),rounds=rnd)
         cells=[]
-        added=False
+        added=set()
+        uncertainty=None
         for a,b in zip(cuts,cuts[1:]):
-            if time.monotonic()-started>seconds:
-                return dict(status='UNRESOLVED',reason='COMPONENT_WALL',
-                           library_size=len(library),discoveries=discoveries)
+            if not remaining():
+                return finished('COMPONENT_WALL',rounds=rnd)
             try:
                 y,z,j=component.cell(tuple(sorted(library)),a,b)
             except AssertionError as ex:
-                return dict(status='UNRESOLVED',reason='AFFINE_PARTITION',error=str(ex))
+                return finished('AFFINE_PARTITION',error=str(ex))
+            if covering(a,b,y,z):
+                cells.append(dict(a=a,b=b,z=z,real=j,
+                                  status='NUMERICAL_REGION_REUSED'))
+                continue
             if not oracle.eligibility(a,b,y,z):
-                return dict(status='UNRESOLVED',reason='P2_REFERENCE_FAILURE',
-                           a=str(a),b=str(b))
+                uncertainty=dict(reason='P2_REFERENCE_FAILURE',a=str(a),b=str(b))
+                continue
             first,u,info=oracle.primary(a,b,y)
             if first=='ADD':
-                if u in library:
-                    return dict(status='UNRESOLVED',reason='P1_DUPLICATE_WITNESS')
-                library.add(u)
-                discoveries.append(info)
-                added=True
-                break
+                if u not in library:
+                    added.add(tuple(u))
+                    records.append(info)
+                continue
             if first!='NUMERIC_PASS':
-                return dict(status='UNRESOLVED',reason='P1_NOT_CERTIFIED',
-                           detail=info,a=str(a),b=str(b),
-                           library_size=len(library))
+                if uncertainty is None:
+                    uncertainty=dict(reason='P1_NOT_CERTIFIED',detail=info,
+                                     a=str(a),b=str(b))
+                continue
             third,u,info3=oracle.preferred(a,b,y,z)
             if third=='ADD':
-                if u in library:
-                    return dict(status='UNRESOLVED',reason='P3_DUPLICATE_WITNESS')
-                library.add(u)
-                discoveries.append(info3)
-                added=True
-                break
+                if u not in library:
+                    added.add(tuple(u))
+                    records.append(info3)
+                continue
             if third!='NUMERIC_PASS':
-                return dict(status='UNRESOLVED',reason='P3_NOT_CERTIFIED',
-                           detail=info3,a=str(a),b=str(b),
-                           library_size=len(library))
+                if uncertainty is None:
+                    uncertainty=dict(reason='P3_NOT_CERTIFIED',detail=info3,
+                                     a=str(a),b=str(b))
+                continue
+            certificates.append(dict(a=str(a),b=str(b),
+                                     y=list(y),z=list(z)))
             cells.append(dict(a=a,b=b,z=z,real=j,
                               status='NUMERICAL_REGION_ONLY'))
-        if added:continue
-        # Interior separation is complete to solver tolerance. Exact
-        # boundary rays are handled distinctly, never via s+delta.
+        if added:
+            # All rationally checked witnesses in this pass are valid. The
+            # changed restricted partition is rebuilt in the next round.
+            library.update(added)
+            if len(library)>max_schedules:
+                return finished('LIBRARY_LIMIT',rounds=rnd+1)
+            continue
+        if uncertainty is not None:
+            return finished(uncertainty.pop('reason'),**uncertainty,rounds=rnd+1)
+        # Interior separation is complete to solver tolerance.
         boundaries=[]
         for step in cuts:
-            if time.monotonic()-started>seconds:
-                return dict(status='UNRESOLVED',reason='BOUNDARY_WALL',
-                            library_size=len(library))
+            if not remaining():
+                return finished('BOUNDARY_WALL',rounds=rnd+1)
             proposed,q,actual=component.follower(step,tuple(library))
             row=dict(s=step,z=proposed,real=actual,
                      status='UNVERIFIED_FULL_PLANNER')
             if verify_boundaries:
-                # Exact input point, fixed-duration MIPs. In particular, do
-                # not ask the floating deployed planner to decide a cost-line
-                # intersection with a rounded ray multiplier.
-                y=min(library,key=lambda z:(component.cost(z,component.durations(step)),z))
+                y=min(library,key=lambda v:(component.cost(v,component.durations(step)),v))
                 state,u,info=oracle.point_verify(step,y,proposed)
                 if state=='ADD':
-                    if u in library:
-                        return dict(status='UNRESOLVED',
-                                    reason='POINT_DUPLICATE_WITNESS',s=str(step))
-                    library.add(u)
-                    discoveries.append(info)
-                    added=True
-                    break
+                    if u not in library:
+                        added.add(tuple(u))
+                        records.append(info)
+                    continue
                 if state!='NUMERIC_PASS':
-                    return dict(status='UNRESOLVED',
-                                reason='BOUNDARY_POINT_NOT_CERTIFIED',
-                                s=str(step),detail=info)
+                    return finished('BOUNDARY_POINT_NOT_CERTIFIED',s=str(step),
+                                    detail=info,rounds=rnd+1)
                 row['status']='NUMERICALLY_CHECKED_POINT_NOT_EXACT'
             boundaries.append(row)
-        if added:continue
+        if added:
+            library.update(added)
+            if len(library)>max_schedules:
+                return finished('LIBRARY_LIMIT',rounds=rnd+1)
+            continue
         state=('NUMERIC_PARTITION' if verify_boundaries else
                'NUMERIC_PARTITION_BOUNDARIES_UNVERIFIED')
         return dict(status=state,cells=cells,boundaries=boundaries,
-                    library_size=len(library),discoveries=discoveries,
-                    rounds=rnd+1)
-    return dict(status='UNRESOLVED',reason='ROUND_LIMIT',
-                library_size=len(library),discoveries=discoveries)
+                    library_size=len(library),discoveries=records,
+                    rounds=rnd+1,verified_cell_count=len(certificates))
+    return finished('ROUND_LIMIT',rounds=max_rounds)
