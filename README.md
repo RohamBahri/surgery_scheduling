@@ -55,6 +55,36 @@ initial smaller run. Each variant uses its own training directory. The private
 context file and Gurobi are required. The reused 2013 outcomes make this
 **exploratory tuning**, not an independent test.
 
+## Congestion representation ablation (preferred first test)
+
+The case tables show that positive congestion reaches the existing +2
+clipping threshold for about 7.5% of training cases. Before trying the broader
+12-feature context model, test three *nested* plan feature sets using the
+completed saturating-link `lambda025` run as reference:
+
+- `congestion_booked`: original five plan columns plus centered
+  `(booked/120 - 1) * congestion` (clipping stays ±2).
+- `congestion_clip3`: original five columns with congestion clipped at ±3.
+- `congestion_booked_clip3`: both changes together.
+
+Run one variant at a time to isolate their scheduling effects:
+
+```bash
+python -u pilot/compare_vf_features.py \
+  --base artifacts/vf_tuning/lambda025 \
+  --vf-features congestion_booked \
+  --out artifacts/vf_feature_comparison/congestion_booked \
+  --cores 15 --plan-seconds 180
+```
+
+All fits use the **identical absolute L1 penalty** from the reference,
+the original case initializer, the same provisional booked plans, and the
+saturating training link with three-regime deployment response. Every case
+and plan coefficient is optimized jointly. The runner saves
+`vf_feature_diagnostics.json` to check for duplicates between base and
+plan features; a near-zero scaler mean and unit standard deviation alone
+do **not** establish duplication.
+
 ## Contextual booked-plan features (targeted diagnostic)
 
 The original five booking-plan features remain available as

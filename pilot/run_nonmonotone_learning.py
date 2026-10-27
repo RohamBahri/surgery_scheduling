@@ -303,6 +303,25 @@ def work(ctx,root,args):
                    for key,_,_ in train}
         # CASE initializes VF, but all case and plan coefficients remain free.
         X=np.column_stack([data["X"],H])
+        # Diagnose duplicate or nearly duplicate columns before optimization.
+        Xcase=np.asarray(data["X"],float)
+        xc=Xcase-Xcase.mean(axis=0)
+        hc=H-H.mean(axis=0)
+        xn=np.sqrt(np.square(xc).sum(axis=0))
+        hn=np.sqrt(np.square(hc).sum(axis=0))
+        denom=hn[:,None]*xn[None,:]
+        corr=np.divide(hc.T@xc,denom,out=np.zeros((H.shape[1],Xcase.shape[1])),
+                       where=denom>1e-12)
+        audit=[]
+        for j,name in enumerate(feature_names(args.vf_features)):
+            exact=[int(k) for k in range(Xcase.shape[1])
+                   if np.allclose(H[:,j],Xcase[:,k],rtol=1e-10,atol=1e-10)]
+            candidates=np.argsort(-np.abs(corr[j]))[:3]
+            audit.append(dict(feature=name,exact_case_columns=exact,
+                    max_abs_case_correlation=float(np.abs(corr[j]).max()),
+                    strongest_case_columns=[dict(column=int(k),correlation=float(corr[j,k]))
+                                          for k in candidates]))
+        save(root/"vf_feature_diagnostics.json",dict(plan_features=audit))
         start=np.r_[coef,np.zeros(H.shape[1])]
         vf_started=time.perf_counter()
         vf_lam=(args.vf_lambda_absolute if args.vf_lambda_absolute is not None
@@ -511,7 +530,9 @@ def main():
     ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     ap.add_argument("--vf-plan-penalty",type=float,default=1.)
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
-    ap.add_argument("--vf-features",choices=("baseline","context"),default="baseline")
+    ap.add_argument("--vf-features",choices=(
+        "baseline","congestion_booked","congestion_clip3",
+        "congestion_booked_clip3","context"),default="baseline")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")

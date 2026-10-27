@@ -15,6 +15,7 @@ BASE_NAMES=(
     "surgeon_spread_x_congestion",
     "procedure_spread_x_congestion",
 )
+INTERACTION_NAMES=BASE_NAMES+("centered_booked_x_congestion",)
 CONTEXT_NAMES=BASE_NAMES+(
     "absolute_congestion",
     "reachable_capacity_proximity",
@@ -29,8 +30,10 @@ CONTEXT_NAMES=tuple(x.replace("sur­geon","surgeon") for x in CONTEXT_NAMES)
 
 
 def feature_names(schema="baseline"):
-    if schema=="baseline":
+    if schema in ("baseline","congestion_clip3"):
         return BASE_NAMES
+    if schema in ("congestion_booked","congestion_booked_clip3"):
+        return INTERACTION_NAMES
     if schema=="context":
         return CONTEXT_NAMES
     raise ValueError("Unknown VF feature schema: "+str(schema))
@@ -62,9 +65,13 @@ def booked_plan_features(items, booked, plans, history, schema="baseline",
         b=booked[rows]
         room_load=loads(c,z,b)
         count=np.bincount(z,minlength=c.k)[z].astype(float)
-        p=np.clip((room_load[z]-capacity)/120.,-2.,2.)
+        clip=3. if schema in ("congestion_clip3","congestion_booked_clip3") else 2.
+        p=np.clip((room_load[z]-capacity)/120.,-clip,clip)
         surgeon,procedure=history[rows,0],history[rows,1]
         cols=[surgeon,procedure,p,surgeon*p,procedure*p]
+        if schema in ("congestion_booked","congestion_booked_clip3"):
+            # Main congestion term is the effect at a 120-minute booking.
+            cols.append(((b-120.)/120.)*p)
         if schema=="context":
             room_booked=np.bincount(z,weights=b,minlength=c.k)[z]
             share=b/room_booked

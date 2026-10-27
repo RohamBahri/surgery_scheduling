@@ -25,6 +25,9 @@ def main():
         "artifacts/vf_feature_comparison/context"))
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
+    ap.add_argument("--vf-features",choices=("congestion_booked",
+        "congestion_clip3","congestion_booked_clip3","context"),
+        default="context")
     ap.add_argument("--dry-run",action="store_true")
     args=ap.parse_args()
     policy=json.loads((args.base/"selected_policy.json").read_text())
@@ -44,7 +47,7 @@ def main():
         shutil.copy2(case_path,dest)
     common=["--context",str(args.context),"--out",str(args.out),
             "--cores",str(args.cores),"--plan-seconds",str(args.plan_seconds),
-            "--link","saturating","--vf-features","context",
+            "--link","saturating","--vf-features",args.vf_features,
             "--vf-lambda-absolute",repr(lam)]
     for stage,result in (("all","selected_policy.json"),
                          ("evaluate","summary.json"),
@@ -61,20 +64,22 @@ def main():
     result=json.loads((args.out/"summary.json").read_text())
     train=json.loads((args.out/"train_probe.json").read_text())
     new_policy=json.loads((args.out/"selected_policy.json").read_text())
-    if new_policy.get("vf_features")!="context":
-        raise AssertionError("Unexpected feature model")
+    if new_policy.get("vf_features")!=args.vf_features:
+        raise AssertionError("Unexpected VF feature schema; use another output folder")
     n_case=len(new_policy["case_coeff"])
-    if len(new_policy["vf_theta"])!=n_case+12:
-        raise AssertionError("Joint VF must train all case + 12 context coefficients")
+    n_plan=len(new_policy["vf_feature_names"])
+    if len(new_policy["vf_theta"])!=n_case+n_plan:
+        raise AssertionError("Joint VF must train all case and plan coefficients")
     outcome=dict(reference=str(args.base),model=str(args.out),lambda_vf=lam,
+        vf_features=args.vf_features,
         n_joint_coefficients=len(new_policy["vf_theta"]),
         baseline_2013_cost_per_case=ref["VF"]["cost_per_case"],
-        context_2013_cost_per_case=result["VF"]["cost_per_case"],
-        context_minus_baseline_2013_per_case=(
+        candidate_2013_cost_per_case=result["VF"]["cost_per_case"],
+        candidate_minus_baseline_2013_per_case=(
             result["VF"]["cost_per_case"]-ref["VF"]["cost_per_case"]),
-        context_training_cost_per_case=train["VF"]["cost_per_case"],
+        candidate_training_cost_per_case=train["VF"]["cost_per_case"],
         booked_2013_cost_per_case=result["BOOKED"]["cost_per_case"],
-        context_minus_booked_2013_per_case=(
+        candidate_minus_booked_2013_per_case=(
             result["VF"]["cost_per_case"]-result["BOOKED"]["cost_per_case"]))
     (args.out/"feature_comparison.json").write_text(
         json.dumps(outcome,indent=2,sort_keys=True))
