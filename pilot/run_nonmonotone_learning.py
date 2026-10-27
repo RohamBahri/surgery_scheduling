@@ -333,6 +333,9 @@ def work(ctx,root,args):
         selected=json.loads((root/"selected_policy.json").read_text())
         eval_2013(ctx,root,args,cache,selected)
         return
+    if args.stage=="probe":
+        train_probe(ctx,root,args,cache)
+        return
     if args.stage=="report":
         report(ctx,root)
         return
@@ -377,6 +380,35 @@ def eval_2013(ctx,root,args,cache,selected):
          entries=rows))
     report(ctx,root)
     record_stage_time(root,"evaluation",time.perf_counter()-evaluated_started)
+
+
+def train_probe(ctx,root,args,cache):
+    """Realized training cost from frozen final displays; no refitting."""
+    data=ctx["fit"];items=ctx["train"]
+    booked=np.asarray(data["booked"],float)
+    selected=json.loads((root/"selected_policy.json").read_text())
+    c=ResponseDC(booked,.8,30.,args.cap,1.,link=args.link)
+    scale=json.loads((root/"vf_features.json").read_text())
+    original=cache.solve(items,booked,"train_booked",tie=True)
+    H,_,_=five_features(ctx,items,cache,"train",
+        scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),plans=original)
+    X=np.asarray(data["X"],float)
+    raw=np.column_stack([X,H])@np.asarray(selected["vf_theta"],float)
+    reviewed=np.maximum(1.,booked+response(c.display(raw),.8,30.))
+    if not np.allclose(reviewed,c.reviewed(raw),atol=1e-8):
+        raise AssertionError("Training and deployment durations differ")
+    fitted=cache.solve(items,reviewed,"train_final_vf_tie",tie=True)
+    result={}
+    for name,plans in (("BOOKED",original),("VF",fitted)):
+        certified=[(comp,plans[key]) for key,comp,rows in items
+                   if plans[key]["complete"]]
+        costs=sum(evaluate(comp,rec["assignment"],comp.actual)["cost"]
+                  for comp,rec in certified)
+        cases=sum(comp.n for comp,_ in certified)
+        result[name]=dict(cost_per_case=float(costs/cases) if cases else None,
+            certified_components=len(certified),certified_cases=cases)
+    save(root/"train_probe.json",result)
+    print(json.dumps(result,indent=2),flush=True)
 
 
 def report(ctx,root):
@@ -440,7 +472,7 @@ def report(ctx,root):
 
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--stage",choices=("case","draft","vf","all","evaluate","report"),
+    ap.add_argument("--stage",choices=("case","draft","vf","all","evaluate","probe","report"),
                     default="all")
     ap.add_argument("--context",type=Path,default=Path(
        "artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))

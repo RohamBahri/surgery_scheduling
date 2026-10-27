@@ -245,6 +245,42 @@ class DCObjective:
         return float(G-H)
 
 
+def score_loadings(objective, w, items):
+    """Per-component RMS score weights for a one-time adaptive L1 diagnostic."""
+    w=np.asarray(w,float)
+    slopes=np.empty(objective.n)
+    # Remove the L1 subgradient to obtain the objective score per case.
+    u=objective.base+objective.X@w
+    P,N,Pp,Np=objective.map.parts(u)
+    e=objective.actual-objective.booked
+    choose_a=np.where(P>e+N,1.,np.where(P<e+N,0.,.5))
+    S=objective.rooms
+    k=S@objective.booked+TURNOVER*np.maximum(np.diff(S.indptr)-1,0)-CAPACITY
+    pp=S@P
+    nn=S@N
+    choose_o=np.where(k+pp>nn,1.,np.where(k+pp<nn,0.,.5))
+    choose_i=np.where(nn-k>pp,1.,np.where(nn-k<pp,0.,.5))
+    sp=KAPPA*choose_a+C_OVER*np.asarray(S.T@choose_o).ravel()+C_UNDER*np.asarray(S.T@(1-choose_i)).ravel()
+    sn=KAPPA*(1-choose_a)+C_OVER*np.asarray(S.T@(1-choose_o)).ravel()+C_UNDER*np.asarray(S.T@choose_i).ravel()
+    slopes=(sp-KAPPA)*Pp+(sn-KAPPA)*Np
+    scores=[]
+    covered=np.zeros(objective.n,dtype=bool)
+    for _,_,rows in items:
+        if covered[rows].any():
+            raise ValueError("Overlapping training components")
+        covered[rows]=True
+        scores.append(slopes[rows]@objective.X[rows])
+    if not covered.all():
+        raise ValueError("Incomplete training components")
+    rms=np.sqrt(np.mean(np.square(scores),axis=0))
+    penalized=rms[1:]
+    if not np.isfinite(penalized).all() or not np.any(penalized>0):
+        raise ValueError("Invalid clustered score loadings")
+    rms=np.maximum(rms,1e-6*np.mean(penalized))
+    weights=np.r_[0.,rms[1:]/rms[1:].mean()]
+    return weights
+
+
 def planned_cost_fast(week, assignment, durations):
     """Vectorized primary cost for a previously validated assignment.
 
@@ -542,7 +578,7 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 def mm_vf(items, booked, X, response_map, actual, *,
           start, root, lam, initial_libraries, iterations=30, radius=100.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
-          solve_plans=None):
+          solve_plans=None, penalize=None):
     """Joint VF library majorization and pDCA over all coefficients.
 
     CASE provides only the warm start; no coefficients are held fixed.
@@ -554,7 +590,11 @@ def mm_vf(items, booked, X, response_map, actual, *,
         raise ValueError("Joint VF feature/start dimension mismatch")
     if np.any(np.abs(start)>radius):
         raise ValueError("Joint VF initial coefficients outside bounds")
-    penalty=np.ones(X.shape[1]);penalty[0]=0.
+    penalty=(np.r_[0.,np.ones(X.shape[1]-1)] if penalize is None
+             else np.asarray(penalize,float))
+    if (penalty.shape!=(X.shape[1],) or penalty[0]!=0.
+            or not np.isfinite(penalty).all() or np.any(penalty<0.)):
+        raise ValueError("Invalid VF coefficient penalty weights")
     if solve_plans is None:
         raise ValueError("Planner callback required")
     root=Path(root)
