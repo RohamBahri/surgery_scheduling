@@ -26,7 +26,8 @@ from scipy.optimize import linprog
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from surgery.nonmonotone_learning import (
-    ResponseDC, DCObjective, mm_vf, pdca, response)
+    ResponseDC, DCObjective, choose_library_schedules, mm_vf, pdca,
+    response, room_matrix, score_loadings)
 from surgery.weekly_planner import evaluate, loads
 
 
@@ -283,7 +284,7 @@ def work(ctx,root,args):
     data=ctx["fit"]
     b=np.asarray(data["booked"],float)
     actual=np.asarray(data["actual"],float)
-    response_map=ResponseDC(b,.8,30.,args.cap,1.)
+    response_map=ResponseDC(b,.8,30.,args.cap,1.,link=args.link)
     root.mkdir(parents=True,exist_ok=True)
     cache=PlannerCache(root,args.cores,args.plan_seconds)
     if args.stage in ("case","all","draft","vf"):
@@ -307,14 +308,23 @@ def work(ctx,root,args):
         X=np.column_stack([data["X"],H])
         start=np.r_[coef,np.zeros(H.shape[1])]
         vf_started=time.perf_counter()
-        vf_lam=train_lambda(X,len(train),intercept=True)
+        vf_lam=args.vf_lambda_scale*train_lambda(X,len(train),intercept=True)
+        penalty=np.ones(X.shape[1]);penalty[0]=0.
+        penalty[data["X"].shape[1]:]*=args.vf_plan_penalty
+        if args.vf_loading=="score":
+            selected=choose_library_schedules(
+                train,libraries,response_map.reviewed(X@start))
+            S,_=room_matrix(train,selected,len(b))
+            objective=DCObjective(b,X,np.zeros_like(b),response_map,
+                mode="VF",actual=actual,components=len(train),rooms=S)
+            penalty[1:]*=score_loadings(objective,start,train)[1:]
         def oracle(items,d,k):
             return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
         state=mm_vf(train,b,X,response_map,actual,start=start,root=root,
                  lam=vf_lam,initial_libraries=libraries,
                  iterations=args.vf_outers,radius=args.vf_radius,
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
-                 backend=args.backend,solve_plans=oracle)
+                 backend=args.backend,solve_plans=oracle,penalize=penalty)
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
         save(root/"selected_policy.json",dict(
@@ -322,7 +332,11 @@ def work(ctx,root,args):
                vf_theta=chosen.tolist(),
                lambda_case=json.loads(
                     (root/"case_policy.json").read_text())["lambda_case"],
-               lambda_vf=float(vf_lam),cap=args.cap,alpha=.8,h=30.,
+               lambda_vf=float(vf_lam),vf_penalty=penalty.tolist(),
+               vf_lambda_scale=args.vf_lambda_scale,
+               vf_plan_penalty=args.vf_plan_penalty,
+               vf_loading=args.vf_loading,link=args.link,
+               cap=args.cap,alpha=.8,h=30.,
                train_components=len(train),train_cases=len(b),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
@@ -346,7 +360,7 @@ def eval_2013(ctx,root,args,cache,selected):
     evaluated_started=time.perf_counter()
     held=ctx["held"];items=ctx["eval"]
     b=np.asarray(held["booked"],float)
-    c=ResponseDC(b,.8,30.,args.cap,1.)
+    c=ResponseDC(b,.8,30.,args.cap,1.,link=args.link)
     coef=np.asarray(selected["case_coeff"],float)
     theta=np.asarray(selected["vf_theta"],float)
     raw=np.asarray(held["X"],float)@coef
@@ -354,13 +368,14 @@ def eval_2013(ctx,root,args,cache,selected):
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
     H,_,_=five_features(ctx,items,cache,"eval",scaler=scale)
     vf_raw=np.column_stack([held["X"],H])@theta
-    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(vf_raw)}
+    # Deploy the same frozen minimum-magnitude displays under the original
+    # three-regime response, regardless of the training link.
+    ds={"BOOKED":b,"CASE":np.maximum(1.,b+response(c.display(raw),.8,30.)),
+        "VF":np.maximum(1.,b+response(c.display(vf_raw),.8,30.))}
     save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c)
-    # Verify deployment's smallest display EXACTLY preserves reviewed booking.
     for label,r in (("CASE",raw),("VF",vf_raw)):
-        displays=c.display(r)
-        if not np.allclose(b+response(displays,.8,30.),ds[label],atol=1e-8):
-            raise AssertionError("Non-monotone training/deployment mismatch")
+        if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
+            raise AssertionError("Training target differs from deployed response")
     plans={label:cache.solve(items,d,"eval_"+label,tie=True)
            for label,d in ds.items()}
     rows=[]
@@ -484,10 +499,18 @@ def main():
     ap.add_argument("--cuts",type=int,default=80)
     ap.add_argument("--case-radius",type=float,default=100.)
     ap.add_argument("--vf-radius",type=float,default=100.)
+    ap.add_argument("--link",choices=("saturating","nonmonotone"),
+                    default="saturating")
+    ap.add_argument("--vf-lambda-scale",type=float,default=1.)
+    ap.add_argument("--vf-plan-penalty",type=float,default=1.)
+    ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
     args=ap.parse_args()
+    if not (np.isfinite(args.vf_lambda_scale) and args.vf_lambda_scale>0.
+            and np.isfinite(args.vf_plan_penalty) and args.vf_plan_penalty>0.):
+        ap.error("VF penalty multipliers must be positive and finite")
     if not args.context.exists():
         raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
     with args.context.open("rb") as f:
@@ -498,7 +521,9 @@ def main():
                   alpha=.8,h=30.,cap=args.cap,case_steps=args.case_steps,
                   vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,
                   cuts=args.cuts,case_radius=args.case_radius,
-                  vf_radius=args.vf_radius,
+                  vf_radius=args.vf_radius,link=args.link,
+                  vf_lambda_scale=args.vf_lambda_scale,
+                  vf_plan_penalty=args.vf_plan_penalty,vf_loading=args.vf_loading,
                   plan_seconds=args.plan_seconds,backend=args.backend)
     args.out.mkdir(parents=True,exist_ok=True)
     contract=args.out/"run_contract.json"

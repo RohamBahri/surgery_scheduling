@@ -77,3 +77,11 @@ def test_tuning_dry_run_lists_only_requested_joint_fit(tmp_path):
     assert "--link saturating" in p.stdout
     assert "--vf-plan-penalty 4.0" in p.stdout
     assert "lambda025" not in p.stdout
+
+def test_joint_runner_exposes_sweep_options():
+    script=Path(__file__).parents[1]/"pilot"/"run_nonmonotone_learning.py"
+    p=subprocess.run([sys.executable,str(script),"--help"],
+                     capture_output=True,text=True,check=True)
+    for flag in ("--link","--vf-lambda-scale","--vf-plan-penalty",
+                 "--vf-loading","--stage"):
+        assert flag in p.stdout
