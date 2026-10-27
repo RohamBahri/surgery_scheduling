@@ -42,7 +42,7 @@ from surgery.weekly_planner import evaluate as planner_evaluate
 
 METHODS=("BOOKED","NAIVE")+evaluation_policy_labels()
 CASE_LAMBDA_SCALE=1.0
-VF_LAMBDA_SCALE=.25
+VF_LAMBDA_SCALE=1.0
 
 
 def sha_bytes(blob):
@@ -60,10 +60,7 @@ def contract(args,root):
         train=[vars(x) for x in TRAIN_SCENARIOS],
         evaluation=[vars(x) for x in EVAL_SCENARIOS],
         arms=list(METHODS),case_lambda_scale=CASE_LAMBDA_SCALE,
-        vf_lambda_scale=VF_LAMBDA_SCALE,
-        vf_lambda_absolute=args.vf_lambda_absolute,
-        vf_features=args.vf_features,
-        naive_lambda_scale=1.0,
+        vf_lambda_scale=VF_LAMBDA_SCALE,naive_lambda_scale=1.0,
         case_radius=100.,vf_radius=100.,cap=180.,
         case_steps=args.case_steps,vf_outers=args.vf_outers,
         vf_pdca_steps=args.vf_pdca_steps,inner_cuts=args.cuts,
@@ -71,6 +68,10 @@ def contract(args,root):
         deployment_tie="hash_seed_0",
         advice="freeze_display_under_training_B_link",
         planner_context="latest_objective_selection_12h")
+    if getattr(args,"vf_lambda_absolute",None) is not None:
+        scientific["vf_lambda_absolute"]=args.vf_lambda_absolute
+    if getattr(args,"vf_features","baseline")!="baseline":
+        scientific["vf_features"]=args.vf_features
     file=root/"run_contract.json"
     if file.exists():
         recorded=json.loads(file.read_text())
@@ -211,18 +212,21 @@ def fit_family(ctx,args,root,cache,scenario,booked_plans):
                    lambda_scale=CASE_LAMBDA_SCALE)
     raw=np.asarray(data["X"],float)@coeff
     verify_same_scenario(raw,booked,scenario)
+    schema=getattr(args,"vf_features","baseline")
+    feature_args=({"schema":schema} if schema!="baseline" else {})
     H,(mean,std),_=five_features(
          ctx,items,cache,"train_"+scenario.name,
-         plans=booked_plans,schema=args.vf_features)
+         plans=booked_plans,**feature_args)
     save(folder/"vf_features.json",dict(
-        schema=args.vf_features,mean=mean.tolist(),std=std.tolist()))
+        schema=schema,mean=mean.tolist(),std=std.tolist()))
     draft=cache.solve(items,model.reviewed(raw),
                      "train_"+scenario.name+"_case_draft",tie=True)
     libraries={key:[booked_plans[key]["assignment"],
                     draft[key]["assignment"]] for key,_,_ in items}
     X=np.column_stack([data["X"],H])
     start=np.r_[coeff,np.zeros(H.shape[1])]
-    vf_lam=(args.vf_lambda_absolute if args.vf_lambda_absolute is not None
+    absolute=getattr(args,"vf_lambda_absolute",None)
+    vf_lam=(absolute if absolute is not None
             else VF_LAMBDA_SCALE*train_lambda(X,len(items),intercept=True))
     print(f"TRAIN {scenario.name}: joint VF(B) MM-pDCA, "
           f"lambda={vf_lam:.8f}; initialized at CASE",flush=True)
@@ -242,7 +246,7 @@ def fit_family(ctx,args,root,cache,scenario,booked_plans):
                 vf_theta=theta.tolist(),
                 lambda_case=float(json.loads(
                     (folder/"case_policy.json").read_text())["lambda_case"]),
-                lambda_vf=float(vf_lam),vf_features=args.vf_features,
+                lambda_vf=float(vf_lam),vf_features=schema,
                 vf_status=state["status"],
                 vf_outer_iterations=len(state["history"]),
                 train_cases=len(booked),train_components=len(items))
@@ -268,10 +272,11 @@ def freeze_displays(ctx,root,cache,naive_weights,policies):
         model=mapping(booked,scenario)
         a_case=verify_same_scenario(case_raw,booked,scenario)
         scaler=json.loads((root/"training"/name/"vf_features.json").read_text())
+        schema=scaler.get("schema","baseline")
+        feature_args=({"schema":schema} if schema!="baseline" else {})
         H,_,_=five_features(ctx,items,cache,"eval_"+name,
                 scaler=(np.asarray(scaler["mean"],float),
-                        np.asarray(scaler["std"],float)),
-                schema=scaler.get("schema","baseline"))
+                        np.asarray(scaler["std"],float)),**feature_args)
         vf_raw=np.column_stack([X,H])@np.asarray(policy["vf_theta"],float)
         a_vf=verify_same_scenario(vf_raw,booked,scenario)
         displays[f"CASE__{name}"]=a_case
@@ -473,7 +478,7 @@ def main():
     ap.add_argument("--vf-outers",type=int,default=30)
     ap.add_argument("--vf-pdca-steps",type=int,default=50)
     ap.add_argument("--cuts",type=int,default=160)
-    ap.add_argument("--vf-features",choices=("baseline","clean"),default="clean")
+    ap.add_argument("--vf-features",choices=("baseline","clean"),default="baseline")
     ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     args=ap.parse_args()
     if args.vf_lambda_absolute is not None and (
