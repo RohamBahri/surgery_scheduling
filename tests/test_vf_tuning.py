@@ -85,3 +85,16 @@ def test_joint_runner_exposes_sweep_options():
     for flag in ("--link","--vf-lambda-scale","--vf-plan-penalty",
                  "--vf-loading","--stage"):
         assert flag in p.stdout
+
+
+def test_lambda_sweep_only_runs_new_values(tmp_path):
+    script=Path(__file__).parents[1]/"pilot"/"sweep_vf_tuning.py"
+    p=subprocess.run([sys.executable,str(script),"--dry-run",
+                      "--out-root",str(tmp_path),"--only",
+                      "lambda010","lambda050"],
+                     capture_output=True,text=True,check=True)
+    assert p.stdout.count("--stage all")==2
+    assert "--vf-lambda-scale 0.1" in p.stdout
+    assert "--vf-lambda-scale 0.5" in p.stdout
+    assert "--vf-lambda-scale 0.25" not in p.stdout
+    assert "--link saturating" in p.stdout

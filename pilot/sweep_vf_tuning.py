@@ -15,7 +15,9 @@ from pathlib import Path
 RUNNER=Path(__file__).with_name("run_nonmonotone_learning.py")
 CONFIGS=(
     ("reference", 1., 1., "uniform"),
+    ("lambda010", .1, 1., "uniform"),
     ("lambda025", .25, 1., "uniform"),
+    ("lambda050", .5, 1., "uniform"),
     ("lambda4", 4., 1., "uniform"),
     ("plan4", 1., 4., "uniform"),
     ("score", 1., 1., "score"),
@@ -33,23 +35,25 @@ def main():
     args=ap.parse_args()
     rows=[]
     for name,scale,plan,loading in CONFIGS:
-        if args.only is not None and name not in args.only:
-            continue
         folder=args.out_root/name
-        settings=["--context",str(args.context),"--out",str(folder),
-            "--cores",str(args.cores),"--plan-seconds",str(args.plan_seconds),
-            "--link","saturating","--vf-lambda-scale",str(scale),
-            "--vf-plan-penalty",str(plan),"--vf-loading",loading]
-        for stage,target in (("all","selected_policy.json"),
-                             ("evaluate","summary.json"),
-                             ("probe","train_probe.json")):
-            if (folder/target).exists():
-                continue
-            cmd=[sys.executable,"-u",str(RUNNER),"--stage",stage,*settings]
-            print("$"," ".join(cmd),flush=True)
-            if not args.dry_run:
-                subprocess.run(cmd,check=True)
-        if args.dry_run or not (folder/"train_probe.json").exists():
+        if args.only is None or name in args.only:
+            settings=["--context",str(args.context),"--out",str(folder),
+                "--cores",str(args.cores),"--plan-seconds",str(args.plan_seconds),
+                "--link","saturating","--vf-lambda-scale",str(scale),
+                "--vf-plan-penalty",str(plan),"--vf-loading",loading]
+            for stage,target in (("all","selected_policy.json"),
+                                 ("evaluate","summary.json"),
+                                 ("probe","train_probe.json")):
+                if (folder/target).exists():
+                    continue
+                cmd=[sys.executable,"-u",str(RUNNER),"--stage",stage,*settings]
+                print("$"," ".join(cmd),flush=True)
+                if not args.dry_run:
+                    subprocess.run(cmd,check=True)
+        # Summarize every completed experiment, even when --only was used.
+        if args.dry_run or not all((folder/name).exists() for name in (
+                "selected_policy.json","summary.json","train_probe.json",
+                "vf_library_progress.json")):
             continue
         policy=json.loads((folder/"selected_policy.json").read_text())
         summary=json.loads((folder/"summary.json").read_text())
