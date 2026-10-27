@@ -1,5 +1,6 @@
 name: Tests
 on: [push, pull_request]
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -7,7 +8,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12.15'
+          python-version: '3.12'
+      - name: Refuse private-data and secret files
+        run: |
+          python - <<'PY'
+          import subprocess
+          from pathlib import PurePosixPath
+          files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          forbidden = {".csv",".tsv",".xls",".xlsx",".xlsm",".parquet",
+                       ".pkl",".pickle",".npz",".npy",".sqlite",".db",
+                       ".json",".jsonl",".pdf",".zip",".ipynb",".pem",".key"}
+          roots = {"data","datasets","private","artifacts","results","outputs"}
+          invalid = [p for p in files if
+                     PurePosixPath(p).suffix.lower() in forbidden or
+                     PurePosixPath(p).parts[0] in roots or
+                     PurePosixPath(p).name.startswith(".env")]
+          if invalid:
+              raise SystemExit("Private-data file types tracked: " + repr(invalid))
+          PY
       - run: python -m pip install -r requirements-lock.txt
       - run: python -m pip install -e . --no-deps
       - run: python -m pytest -q

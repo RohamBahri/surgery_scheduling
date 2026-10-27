@@ -1,29 +1,10 @@
-# Surgery duration recommendations — VF research
+# Decision-aware operating-room planning
 
-**Current paper method:** value-function (VF) learning for surgeon-mediated, congestion-aware operating-room planning.
+Research code for surgeon-mediated duration recommendations and elective operating-room planning. The retained method is **CASE + value-function (VF) MM/pDCA**, evaluated using the same deterministic, hash-tie-broken weekly MILP. Historical surgeon responses to recommendations are not observed; response parameters are **scenario assumptions**.
 
-The current research uses historical elective surgeries from UHN (2011–2013), with **24,506 training** and **8,774 retrospective evaluation** cases. The study compares a five-feature shared VF recommendation policy against matched statistical (STAT), CASE, and BOOKED controls and a direct scheduling-cost (SHARED) benchmark. Surgeons' response parameters are **assumed scenarios**, not estimated responses to displayed advice.
+## Install
 
-The completed October 2026 model-selection and mechanism experiments are frozen. The **2013 cohort has been examined repeatedly**; subsequent analyses are retrospective diagnostics, not new independent holdouts.
-
-## Current entrypoints
-
-| Purpose | Entry |
-|---|---|
-| Main method-selection study (completed; reproduce only if needed) | `bash run_selection_12h.sh` |
-| VF mechanism and response follow-up (completed; reproduce only if needed) | `bash run_vf_followups.sh` |
-| Stage-level method selection | `pilot/run_objective_selection.py` |
-| Stage-level VF follow-ups | `pilot/run_vf_followups.py` |
-
-For the complete list of active and historical runners, see [Experiment entrypoints](docs/entrypoints.md). Historical weekly and anchored entrypoints have been relocated to `legacy/weekly/` and `legacy/anchored/` and should be launched using `python -m legacy.<family>.<module>` from the repository root. The root-level `run_weekly_rich.py` and `run_weekly_train.py` remain because the VF dependency chain imports them directly; they are not alternative headline methods.
-
-The current runner relies on `pilot/run_theory_full.py` and the `surgery/` implementation, especially `objective_selection.py`, `theory_exact.py`, `anchored_weekly_solver.py`, and `weekly_planner.py`. The *anchored* solver module provides the common exact physical-room planner and deterministic hash tie rule; its name does not mean ANCHORED is a selected learning method.
-
-The original workbook belongs at `data/UHNOperating_RoomScheduling2011-2013.xlsx`. Do **not** commit raw data or local artifacts. Frozen run results remain under `artifacts/`, which is git-ignored.
-
-## Install and test
-
-Use Python with a valid Gurobi license for solver-backed and full experiments.
+Python 3.12 and a working Gurobi license are required for optimization.
 
 ```bash
 python -m pip install -r requirements-lock.txt
@@ -31,17 +12,32 @@ python -m pip install -e . --no-deps
 python -m pytest -q
 ```
 
-## Experiment provenance and outputs
+## Reproduce the retained study
 
-- [Selection protocol and limitations](docs/paper_selection_12h.md).
-- [VF follow-up design and interpretation](docs/vf_followups.md).
-- Original method selection: `artifacts/objective_selection_12h/objective_selection_2013/`.
-- Follow-up summaries: `artifacts/vf_followups/vf_followups/summary.json`.
+The input is a **private, locally generated** UHN context checkpoint; it is intentionally **not** in this repository:
 
-Source-code SHA and study configuration are recorded in checkpoint contracts. A changed version of scientific code requires a **new artifact directory**, not reuse of incompatible training checkpoints.
+`artifacts/objective_selection_12h/objective_selection_2013/context.pkl`
 
-## Historical code
+Run the four B-response training scenarios and frozen-advice evaluation:
 
-Earlier daily-planning, ANCHORED, GAP, weekly-surrogate, and exact bilevel research remains in Git history and selected research modules. Those investigations **are not competing headline methods for the current VF paper**. Their documentation is historical and may describe different costs, planner/tie rules, or cohorts. Do not launch an old experiment merely because a historical runner exists.
+```bash
+python -u pilot/run_response_scenario_grid.py \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --out artifacts/response_saturation_grid --cores 15 --plan-seconds 180
+```
 
-For current manuscript work, preserve the distinction between the model-based VF upper bound, the solver's exact deployment status, and observed retrospective realized modeled costs. We have not established global optimality of the trained five-parameter VF coefficients or external-hospital causal benefits.
+Then evaluate the previously frozen advice under the additional C-response assumptions:
+
+```bash
+python -u pilot/extend_response_grid_evaluation.py \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --out artifacts/response_saturation_grid --cores 15 --plan-seconds 180
+```
+
+The study compares BOOKED, a response-unaware statistical recommendation, CASE, and VF. CASE and VF are fitted on earlier cases; later outcomes are used for retrospective evaluation only. The 2013 evaluation period has already been examined during development and must **not** be presented as a fresh independent holdout.
+
+## Privacy and scope
+
+**No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
+
+Only the retained learning, planner, response evaluation, and focused tests are versioned. Historical alternative methods, ray calibration, diagnostics, and feature prototypes are not part of the supported workflow.

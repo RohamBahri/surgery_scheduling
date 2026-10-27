@@ -3,20 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "uhn-daily-planning"
+name = "surgery-vf-planning"
 version = "1.0.0"
-description = "Daily decision-aware planning for the UHN 2011–2013 study"
-requires-python = ">=3.10"
+description = "CASE and value-function MM/pDCA for operating-room planning"
+requires-python = ">=3.12"
 dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "openpyxl>=3.1", "gurobipy>=12,<14", "scikit-learn>=1.4,<2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
-[project.scripts]
-uhn-experiment = "surgery.experiment:main"
-
 [tool.setuptools.packages.find]
-include = ["surgery*", "legacy*"]
+include = ["surgery*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

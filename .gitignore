@@ -1,30 +1,68 @@
-# Research datasets and generated experiment outputs
-/results/
-/data/
-/artifacts/
-/presentation_figures/
-
-# Archives and large binary exports
+# PRIVATE clinical data and any derived row-level exports
+data/
+datasets/
+dataset/
+private/
+confidential/
+artifacts/
+results/
+outputs/
+reports/
+local/
+scratch/
+*.csv
+*.tsv
+*.xls
 *.xlsx
-*.pkl
+*.xlsm
+*.ods
+*.parquet
+*.arrow
+*.feather
+*.h5
+*.hdf5
 *.sqlite*
-*.log
+*.db
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+*.json
+*.jsonl
+*.ndjson
 *.zip
-*.tgz
+*.7z
+*.tar
 *.tar.gz
+*.tgz
+*.pdf
+*.docx
+*.pptx
+*.ipynb
+*.log
 
-# Python, macOS, and local development state
-.DS_Store
-.AppleDouble
-__MACOSX/
+# Secrets and local credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+gurobi.env
+*.lic
+
+# Python, OS, and local build artifacts
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
 .venv/
-.env
-.env.*
-gurobi.env
-
-# Optional personal scratch area (move untracked prototypes here deliberately)
-/local/
+venv/
+build/
+dist/
+.DS_Store
+.AppleDouble
+__MACOSX/
