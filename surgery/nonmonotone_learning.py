@@ -1,9 +1,7 @@
-"""CASE pDCA and fixed-roster VF schedule-library MM.
+"""Response-aware CASE benchmark and joint VF with library MM/pDCA.
 
-Nominal behavioral assumptions are fixed: alpha=.8, h=30. CASE learns a
-shared RAW advice score; VF adds five shared congestion-aware coefficients.
-Only deployed advice is canonicalized to its minimum-magnitude preimage.
-Optimization retains the full adoption / attenuation / rejection response.
+VF learns all case and booking-plan coefficients with the exact scheduling
+cost, retaining the response model and verified objective descent.
 """
 from __future__ import annotations
 import json
@@ -263,7 +261,7 @@ def planned_cost_fast(week, assignment, durations):
                   +C_UNDER*np.maximum(CAPACITY-room_load,0.)).sum())
 
 
-def library_value(items,libraries,d,actual,lam,w):
+def library_value(items,libraries,d,actual,lam,w,penalize=None):
     """True finite-library envelope, with full unused-roster idle cost."""
     total=0.
     for key,c,rows in items:
@@ -274,7 +272,8 @@ def library_value(items,libraries,d,actual,lam,w):
         e=c.actual-segment
         total+=best+(C_OVER*np.maximum(e,0.)+
                      C_UNDER*np.maximum(-e,0.)).sum()
-    return float(total/len(items)+lam*np.abs(w).sum())
+    weights=np.ones(len(w)) if penalize is None else np.asarray(penalize,float)
+    return float(total/len(items)+lam*np.dot(weights,np.abs(w)))
 
 
 def choose_library_schedules(items,libraries,d):
@@ -295,25 +294,18 @@ def _save(path,payload):
     tmp.replace(path)
 
 
-class CaseConvexQP:
-    """One reusable exact convex epigraph QP for the CASE pDCA steps.
-
-    At each step minimize G(w)-gradH(current)@w + prox/2*||w-current||^2.
-    Per-case hinge auxiliaries model P and N, and A>=max(e+N,P).
-    All hinge coefficients are nonnegative, so these inequalities provide
-    the EXACT convex G, not a cutting-plane approximation. Reuse the same
-    constraints and warm start throughout CASE learning.
-    """
+class ConvexEpigraphQP:
+    """Reusable exact convex epigraph QP for CASE and fixed-schedule VF."""
 
     def __init__(self, objective, lower, upper):
         import gurobipy as gp
         from gurobipy import GRB
-        if objective.mode != "CASE":
-            raise ValueError("Exact CASE QP is intended for CASE only")
+        if objective.mode not in ("CASE","VF"):
+            raise ValueError("Exact QP requires CASE or VF")
         self.gp=gp
         self.GRB=GRB
         self.objective=objective
-        m=gp.Model("case_pdca_exact_epigraph")
+        m=gp.Model("pdca_exact_epigraph")
         m.Params.OutputFlag=0
         self.model=m
         n,p=objective.n,objective.p
@@ -347,12 +339,26 @@ class CaseConvexQP:
         e=objective.actual-objective.booked
         m.addConstr(A >= P,name="case_P")
         m.addConstr(A >= e+N,name="case_e_plus_N")
+        if objective.mode=="VF":
+            S=objective.rooms
+            counts=np.diff(S.indptr)
+            offset=S@objective.booked+TURNOVER*np.maximum(counts-1,0)-CAPACITY
+            sp=S@P
+            sn=S@N
+            O=m.addMVar(S.shape[0],lb=-GRB.INFINITY,name="overtime_dc")
+            I=m.addMVar(S.shape[0],lb=-GRB.INFINITY,name="idle_dc")
+            m.addConstr(O>=offset+sp,name="overtime_P")
+            m.addConstr(O>=sn,name="overtime_N")
+            m.addConstr(I>=sn-offset,name="idle_N")
+            m.addConstr(I>=sp,name="idle_P")
         absw=m.addMVar(p,lb=0.,name="abs_coeff")
         m.addConstr(absw>=self.w)
         m.addConstr(absw>=-self.w)
         self.base_G=(KAPPA/objective.components)*A.sum() \
             -C_UNDER*float(e.sum())/objective.components \
             +objective.lam*(objective.penalize@absw)
+        if objective.mode=="VF":
+            self.base_G+=(C_OVER*O.sum()+C_UNDER*I.sum())/objective.components
 
     def solve(self, center, gradient, prox):
         center=np.asarray(center,float)
@@ -364,11 +370,11 @@ class CaseConvexQP:
         w.Start=center
         m.optimize()
         if not m.SolCount:
-            return center,dict(status="CASE_QP_NO_SOLUTION",
+            return center,dict(status="EXACT_QP_NO_SOLUTION",
                                certified=False,trace=[],solver_status=int(m.Status))
         candidate=np.asarray(w.X,float)
         ok=m.Status==self.GRB.OPTIMAL
-        return candidate,dict(status="CASE_QP_OPTIMAL" if ok else "CASE_QP_FEASIBLE",
+        return candidate,dict(status="EXACT_QP_OPTIMAL" if ok else "EXACT_QP_FEASIBLE",
                               certified=bool(ok),trace=[],
                               solver_status=int(m.Status),
                               objective=float(m.ObjVal))
@@ -461,13 +467,7 @@ def _solve_qp_cuts(objective, center, h_gradient, lower, upper, prox,
 def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
          max_cuts=60, tolerance=1e-5, backend="gurobi",
          progress_label=None, progress_path=None):
-    """Proximal DCA with exact CASE QP and verified objective descent.
-
-    CASE/Gurobi: reuse an exact convex epigraph QP, not an approximate
-    high-dimensional cutting-plane master. VF: use the small-dimensional
-    convex cutting-plane QP. An accepted step is NEVER discarded simply
-    because the inner cut budget was exhausted.
-    """
+    """Proximal DCA with exact Gurobi epigraph QPs and verified descent."""
     x=np.asarray(start,float).copy()
     radius=float(radius)
     if radius<=0 or outer<1 or prox<0:
@@ -482,8 +482,8 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
     if progress_label:
         print(f"{progress_label} pDCA: setting up optimizer "
               f"(maximum {outer} steps)",flush=True)
-    solver=(CaseConvexQP(objective,lower,upper)
-            if objective.mode=="CASE" and backend=="gurobi" else None)
+    solver=(ConvexEpigraphQP(objective,lower,upper)
+            if objective.mode in ("CASE","VF") and backend=="gurobi" else None)
     if progress_label:
         print(f"{progress_label} pDCA: optimizer ready after "
               f"{time.perf_counter()-started:.1f}s",flush=True)
@@ -539,67 +539,22 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 
 
 
-def vf_directional_refine(items, libraries, booked, H, case_raw,
-                          response_map, actual, lam, reference, radius,
-                          *, steps=(16., 8., 4., 2., 1.)):
-    """Bounded multidirectional refinement of the SAME finite-library VF loss.
-
-    Pairs and coordinate directions are searched independently of pDCA.
-    This is the VF_DIRECTIONS optimizer, distinct from VF_PDCA.
-    No approximate planner outputs decide acceptance: actual library
-    objective values are compared with the same full training data.
-    """
-    x=np.asarray(reference,float)
-    n=len(x)
-    basis=np.eye(n)
-    directions=[sgn*basis[j] for j in range(n) for sgn in (-1.,1.)]
-    # Include non-axis motion to cross the nonmonotone response plateaus.
-    for j in range(1,n):
-        for sign in (-1.,1.):
-            vec=basis[2 if n>2 else 0]+sign*basis[j]
-            norm=np.max(np.abs(vec))
-            if norm:
-                directions.append(vec/norm)
-                directions.append(-vec/norm)
-    # Also search radial steps along the current multidirectional iterate.
-    if np.linalg.norm(x)>1e-8:
-        v=x/max(1.,np.max(np.abs(x)))
-        directions.extend([v,-v])
-    d0=booked+response_map.correction(case_raw+H@x)
-    best=library_value(items,libraries,d0,actual,lam,x)
-    chosen=x.copy()
-    seen={tuple(np.round(x,9))}
-    tried=0
-    for step in steps:
-        for v in directions:
-            candidate=np.clip(x+step*v,-radius,radius)
-            key=tuple(np.round(candidate,9))
-            if key in seen:
-                continue
-            seen.add(key)
-            d=booked+response_map.correction(case_raw+H@candidate)
-            score=library_value(items,libraries,d,actual,lam,candidate)
-            tried+=1
-            if score<best-1e-8*max(1.,abs(best)):
-                best=score
-                chosen=candidate.copy()
-    return chosen,dict(objective=float(best),evaluated=tried,
-                       improved=bool(np.linalg.norm(chosen-x)>1e-10))
-
-
-def mm_vf(items, booked, H, case_raw, response_map, actual, *,
-          root, lam, initial_libraries, iterations=30, radius=64.,
+def mm_vf(items, booked, X, response_map, actual, *,
+          start, root, lam, initial_libraries, iterations=30, radius=100.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
-          solve_plans=None, optimizer="pdca"):
-    """Finite-library majorization followed by full-response pDCA.
+          solve_plans=None):
+    """Joint VF library majorization and pDCA over all coefficients.
 
-    Every planner incumbent is FEASIBLE; certification is not required to
-    enlarge a library. A time-limited dual bound is recorded for epsilon.
-    Every accepted update decreases the EXACT finite-library surrogate.
-    Library enlargement can only tighten that surrogate.
+    CASE provides only the warm start; no coefficients are held fixed.
     """
-    if optimizer not in ("pdca","directions"):
-        raise ValueError("VF optimizer must be 'pdca' or 'directions'")
+    X=np.asarray(X,float)
+    booked=np.asarray(booked,float)
+    start=np.asarray(start,float)
+    if X.shape[0]!=len(booked) or start.shape!=(X.shape[1],):
+        raise ValueError("Joint VF feature/start dimension mismatch")
+    if np.any(np.abs(start)>radius):
+        raise ValueError("Joint VF initial coefficients outside bounds")
+    penalty=np.ones(X.shape[1]);penalty[0]=0.
     if solve_plans is None:
         raise ValueError("Planner callback required")
     root=Path(root)
@@ -607,20 +562,22 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
     status=root/"vf_library_progress.json"
     if status.exists():
         state=json.loads(status.read_text())
+        if state.get("policy_spec")!="joint_vf_bookings_v1":
+            raise ValueError("Incompatible VF checkpoint: use a new directory")
         theta=np.asarray(state["theta"],float)
+        if theta.shape!=start.shape:
+            raise ValueError("VF coefficient dimension mismatch")
         libraries=state["libraries"]
     else:
-        theta=np.zeros(H.shape[1])
+        theta=start.copy()
         libraries={key:[list(map(int,z)) for z in initial_libraries[key]]
                    for key,_,_ in items}
         state=dict(theta=theta.tolist(),history=[],libraries=libraries,
-                   optimizer=optimizer,status="RUNNING")
-    if state.get('optimizer',optimizer)!=optimizer:
-        raise ValueError('VF checkpoint optimizer mismatch')
+                   policy_spec="joint_vf_bookings_v1",status="RUNNING")
     if state.get("status") in ("NO_CONFIRMED_IMPROVEMENT",
                                "RELATIVE_IMPROVEMENT",
                                "OUTER_ITERATION_CAP"):
-        print(f"VF_{optimizer.upper()}: reusing completed checkpoint "
+        print(f"VF: reusing completed checkpoint "
               f"({len(state['history'])} iterations)",flush=True)
         return state
     if not all(libraries.get(key) for key,_,_ in items):
@@ -628,9 +585,9 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
     run_started=time.perf_counter()
     for outer in range(len(state["history"]),iterations):
         outer_started=time.perf_counter()
-        print(f"VF_{optimizer.upper()} MM {outer+1}/{iterations}: obtaining planner schedules "
+        print(f"VF MM {outer+1}/{iterations}: obtaining planner schedules "
               f"for {len(items)} components",flush=True)
-        d=np.asarray(booked,float)+response_map.correction(case_raw+H@theta)
+        d=booked+response_map.correction(X@theta)
         candidates=solve_plans(items,d,outer)
         gaps=[]
         for key,c,rows in items:
@@ -648,25 +605,18 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
             gaps.append(max(0.,value-max(0.,float(bound))) if bound is not None else value)
         selected=choose_library_schedules(items,libraries,d)
         S,_=room_matrix(items,selected,len(booked))
-        objective=DCObjective(booked,H,case_raw,response_map,mode="VF",
-                              actual=actual,components=len(items),rooms=S,lam=lam)
-        before=library_value(items,libraries,d,actual,lam,theta)
+        objective=DCObjective(booked,X,np.zeros_like(booked),response_map,
+                              mode="VF",actual=actual,components=len(items),
+                              rooms=S,lam=lam,penalize=penalty)
+        before=library_value(items,libraries,d,actual,lam,theta,penalty)
         if abs(before-objective.value(theta))>1e-5*max(1.,abs(before)):
             raise AssertionError("MM touching identity failed: objective normalization/rooms")
-        if optimizer=="pdca":
-            fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
-                        max_cuts=max_cuts,tolerance=1e-7,backend=backend)
-            trial=np.asarray(fitted["weights"],float)
-            search=dict(pdca_status=fitted["status"],
-                        inner=fitted["iterations"])
-        else:
-            trial,dlog=vf_directional_refine(
-                items,libraries,booked,H,case_raw,response_map,actual,
-                lam,theta,radius)
-            search=dict(directions_checked=dlog["evaluated"],
-                        direction_improved=dlog["improved"])
-        new_d=booked+response_map.correction(case_raw+H@trial)
-        after=library_value(items,libraries,new_d,actual,lam,trial)
+        fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
+                    max_cuts=max_cuts,tolerance=1e-7,backend=backend)
+        trial=np.asarray(fitted["weights"],float)
+        search=dict(pdca_status=fitted["status"],inner=fitted["iterations"])
+        new_d=booked+response_map.correction(X@trial)
+        after=library_value(items,libraries,new_d,actual,lam,trial,penalty)
         accepted=bool(after<before-1e-8*max(1.,abs(before)))
         improvement=max(0.,before-after) if accepted else 0.
         state["history"].append(dict(outer=outer+1,
@@ -681,7 +631,7 @@ def mm_vf(items, booked, H, case_raw, response_map, actual, *,
             state["theta"]=theta.tolist()
         row=state["history"][-1]
         row["elapsed_seconds"]=round(time.perf_counter()-outer_started,3)
-        print(f"VF_{optimizer.upper()} MM {outer+1}/{iterations}: "
+        print(f"VF MM {outer+1}/{iterations}: "
               f"objective {before:.6f} -> {after:.6f}; "
               f"delta={improvement:.6f}, epsilon={row['epsilon']:.6f}, "
               f"accepted={accepted}; schedules={row['added_schedules']}; "

@@ -124,20 +124,21 @@ def test_full_four_training_x_six_evaluation_grid_smoke(
         grid.save(folder/"case_policy.json",dict(
             lambda_case=.4,alpha=model.alpha,h=model.h,link=model.link))
         return np.array([0.,2.])
-    def features(ctx,items,raw,model,cache,stage,scaler=None):
-        n=len(raw)
+    def features(ctx,items,cache,stage,scaler=None,plans=None):
+        n=len(ctx["fit"]["booked"])
         H=np.column_stack([np.ones(n),np.arange(n),
                            np.ones(n)*.3,np.zeros(n),np.ones(n)*.2])
         assert (stage.startswith("train") or stage.startswith("eval"))
         return H,(np.zeros(5),np.ones(5)),Cache().solve(items,None,"draft")
-    def vf(items,booked,H,raw,model,actual,*,root,lam,optimizer,**kw):
-        assert optimizer=="pdca"
+    def vf(items,booked,X,model,actual,*,root,lam,start,**kw):
+        assert X.shape==(3,7)
+        assert np.array_equal(start[:2],[0.,2.])
+        assert np.array_equal(start[2:],np.zeros(5))
         assert lam==pytest.approx(.24)
         assert model.link=="saturating"
         root.mkdir(parents=True,exist_ok=True)
-        grid.save(root/"vf_library_progress.json",dict(theta=[0.,0.,0.,0.,0.]))
-        return dict(theta=[1.,0.,0.,0.,0.],status="RELATIVE_IMPROVEMENT",
-                    history=[])
+        return dict(theta=[0.,1.,1.,0.,0.,0.,0.],
+                    status="RELATIVE_IMPROVEMENT",history=[])
     monkeypatch.setattr(grid,"case_fit",fitted_case)
     monkeypatch.setattr(grid,"five_features",features)
     monkeypatch.setattr(grid,"mm_vf",vf)

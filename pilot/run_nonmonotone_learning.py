@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Reproducible UHN CASE -> provisional plan -> VF library-MM study.
+"""Reproducible UHN joint VF, initialized at CASE and evaluated against it.
 
 ONE response: alpha=.8, h=30. THREE arms: BOOKED, CASE, VF.
-No robustness sweep, donor simulation, synthetic profiles, or old search.
 """
 from __future__ import annotations
 
@@ -259,29 +258,25 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
     return w
 
 
-def five_features(ctx,items,case_raw,response_map,cache,stage,scaler=None):
-    """ONE frozen CASE draft per physical-room component, hash seed zero."""
+def five_features(ctx,items,cache,stage,scaler=None,plans=None):
+    """Five fixed congestion features from the outcome-blind booked plan."""
     data=ctx["fit"] if stage.startswith("train") else ctx["held"]
-    n=len(data["booked"])
-    baseline=response_map.reviewed(case_raw)
-    draft=cache.solve(items,baseline,stage+"_case_draft",tie=True)
+    booked=np.asarray(data["booked"],float)
+    draft=plans if plans is not None else cache.solve(
+        items,booked,stage+"_booked_draft",tie=True)
     history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
-    # The first two columns retain the original surgeon/procedure history
-    # scores; old CASE congestion columns are explicitly discarded.
-    s,q=history[:,0],history[:,1]
-    p=np.empty(n)
+    surgeon,procedure=history[:,0],history[:,1]
+    p=np.empty(len(booked))
     for key,c,rows in items:
         z=np.asarray(draft[key]["assignment"],int)
-        p[rows]=np.clip((loads(c,z,baseline[rows])[z]-480.)/120.,-2.,2.)
-    raw=np.column_stack([s,q,p,s*p,q*p])
+        p[rows]=np.clip((loads(c,z,booked[rows])[z]-480.)/120.,-2.,2.)
+    raw=np.column_stack([surgeon,procedure,p,surgeon*p,procedure*p])
     if scaler is None:
         mu=raw.mean(axis=0)
-        sd=raw.std(axis=0)
-        sd=np.maximum(sd,1e-12)
+        sd=np.maximum(raw.std(axis=0),1e-12)
     else:
         mu,sd=scaler
     return (raw-mu)/sd,(mu,sd),draft
-
 
 def work(ctx,root,args):
     train=ctx["train"]
@@ -298,29 +293,32 @@ def work(ctx,root,args):
             return
         draft_started=time.perf_counter()
         case_raw=np.asarray(data["X"],float)@coef
-        H,(mu,sd),case_draft=five_features(
-                    ctx,train,case_raw,response_map,cache,"train")
-        save(root/"vf_features.json",dict(mean=mu.tolist(),std=sd.tolist()))
         booked=cache.solve(train,b,"train_booked",tie=True)
+        H,(mu,sd),_=five_features(ctx,train,cache,"train",plans=booked)
+        save(root/"vf_features.json",dict(mean=mu.tolist(),std=sd.tolist()))
+        case_draft=cache.solve(train,response_map.reviewed(case_raw),
+                               "train_case_draft",tie=True)
         record_stage_time(root,"draft_and_booked",time.perf_counter()-draft_started)
         if args.stage=="draft":
             return
         libraries={key:[booked[key]["assignment"],case_draft[key]["assignment"]]
                    for key,_,_ in train}
-        # Feasible schedule certificates are retained on timeouts instead
-        # of promoting an unfinished planner solve to "exact".
+        # CASE initializes VF, but all case and plan coefficients remain free.
+        X=np.column_stack([data["X"],H])
+        start=np.r_[coef,np.zeros(H.shape[1])]
         vf_started=time.perf_counter()
-        vf_lam=train_lambda(H,len(train))
+        vf_lam=train_lambda(X,len(train),intercept=True)
         def oracle(items,d,k):
             return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
-        state=mm_vf(train,b,H,case_raw,response_map,actual,root=root,
+        state=mm_vf(train,b,X,response_map,actual,start=start,root=root,
                  lam=vf_lam,initial_libraries=libraries,
                  iterations=args.vf_outers,radius=args.vf_radius,
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
                  backend=args.backend,solve_plans=oracle)
         chosen=np.asarray(state["theta"],float)
+        vf_raw=X@chosen
         save(root/"selected_policy.json",dict(
-               method="CASE+VF",case_coeff=coef.tolist(),
+               method="JOINT_VF",case_coeff=coef.tolist(),
                vf_theta=chosen.tolist(),
                lambda_case=json.loads(
                     (root/"case_policy.json").read_text())["lambda_case"],
@@ -328,7 +326,7 @@ def work(ctx,root,args):
                train_components=len(train),train_cases=len(b),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
-                        case_raw+H@chosen,H,response_map)
+                        vf_raw,H,response_map)
         record_stage_time(root,"vf",time.perf_counter()-vf_started)
         return
     if args.stage=="evaluate":
@@ -351,11 +349,12 @@ def eval_2013(ctx,root,args,cache,selected):
     raw=np.asarray(held["X"],float)@coef
     record=json.loads((root/"vf_features.json").read_text())
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
-    H,_,_=five_features(ctx,items,raw,c,cache,"eval",scaler=scale)
-    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(raw+H@theta)}
-    save_case_table(root/"cases_test.csv",held,raw,raw+H@theta,H,c)
+    H,_,_=five_features(ctx,items,cache,"eval",scaler=scale)
+    vf_raw=np.column_stack([held["X"],H])@theta
+    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(vf_raw)}
+    save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c)
     # Verify deployment's smallest display EXACTLY preserves reviewed booking.
-    for label,r in (("CASE",raw),("VF",raw+H@theta)):
+    for label,r in (("CASE",raw),("VF",vf_raw)):
         displays=c.display(r)
         if not np.allclose(b+response(displays,.8,30.),ds[label],atol=1e-8):
             raise AssertionError("Non-monotone training/deployment mismatch")
@@ -445,14 +444,14 @@ def main():
                     default="all")
     ap.add_argument("--context",type=Path,default=Path(
        "artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))
-    ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_case_vf_mm"))
+    ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_joint_vf_mm"))
     ap.add_argument("--cap",type=float,default=180.)
     ap.add_argument("--case-steps",type=int,default=200)
     ap.add_argument("--vf-outers",type=int,default=30)
     ap.add_argument("--vf-pdca-steps",type=int,default=50)
     ap.add_argument("--cuts",type=int,default=80)
     ap.add_argument("--case-radius",type=float,default=100.)
-    ap.add_argument("--vf-radius",type=float,default=64.)
+    ap.add_argument("--vf-radius",type=float,default=100.)
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
@@ -488,7 +487,7 @@ def main():
                   "speed/reporting revision (source history saved)",flush=True)
     else:
         save(contract,settings)
-    print("UHN CASE/VF:",len(ctx["train"]),"train components;",
+    print("UHN joint VF:",len(ctx["train"]),"train components;",
           len(ctx["eval"]),"evaluation components; nominal response only",
           flush=True)
     work(ctx,args.out,args)

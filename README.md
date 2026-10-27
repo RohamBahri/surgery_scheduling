@@ -1,6 +1,6 @@
 # Decision-aware operating-room planning
 
-Research code for surgeon-mediated duration recommendations and elective operating-room planning. The retained method is **CASE + value-function (VF) MM/pDCA**, evaluated using the same deterministic, hash-tie-broken weekly MILP. Historical surgeon responses to recommendations are not observed; response parameters are **scenario assumptions**.
+Research code for surgeon-mediated duration recommendations and elective operating-room planning. The retained method is **joint value-function (VF) learning via library MM/pDCA**, evaluated using the same deterministic, hash-tie-broken weekly MILP. CASE is a warm start and benchmark; VF learns all case and plan-feature coefficients together. Historical surgeon responses to recommendations are not observed; response parameters are **scenario assumptions**.
 
 ## Install
 
@@ -34,10 +34,10 @@ python -u pilot/extend_response_grid_evaluation.py \
   --out artifacts/response_saturation_grid --cores 15 --plan-seconds 180
 ```
 
-The study compares BOOKED, a response-unaware statistical recommendation, CASE, and VF. CASE and VF are fitted on earlier cases; later outcomes are used for retrospective evaluation only. The 2013 evaluation period has already been examined during development and must **not** be presented as a fresh independent holdout.
+The study compares BOOKED, a response-unaware statistical recommendation, CASE, and joint VF. VF uses case features and congestion features from a bookings-based provisional plan. CASE initializes VF but does not constrain its coefficients. Fits use earlier cases; later outcomes are used for retrospective evaluation only. The 2013 evaluation period has already been examined during development and must **not** be presented as a fresh independent holdout.
 
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
 
-Only the retained learning, planner, response evaluation, and focused tests are versioned. Historical alternative methods, ray calibration, diagnostics, and feature prototypes are not part of the supported workflow.
+Only the retained learning, planner, response evaluation, and focused tests are versioned. Joint VF requires fresh training artifacts; do not resume old five-coefficient VF checkpoints. Historical alternative methods, ray calibration, diagnostics, and feature prototypes are not part of the supported workflow.

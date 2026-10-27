@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One resumable saturated-response (B) cross-scenario experiment.
 
-Train the response-aware CASE and decision-response-aware VF separately
+Train response-aware CASE and joint decision-aware VF separately
 under EACH (alpha,h) in {(.5,30),(.5,60),(.8,30),(.8,60)}.
 Train ONE NAIVE no-behavior LAD policy. Evaluate BOOKED, NAIVE and all
 eight fitted policies under every saturated response in
@@ -61,7 +61,7 @@ def contract(args,root):
         evaluation=[vars(x) for x in EVAL_SCENARIOS],
         arms=list(METHODS),case_lambda_scale=CASE_LAMBDA_SCALE,
         vf_lambda_scale=VF_LAMBDA_SCALE,naive_lambda_scale=1.0,
-        case_radius=100.,vf_radius=64.,cap=180.,
+        case_radius=100.,vf_radius=100.,cap=180.,
         case_steps=args.case_steps,vf_outers=args.vf_outers,
         vf_pdca_steps=args.vf_pdca_steps,inner_cuts=args.cuts,
         plan_seconds=args.plan_seconds,cores=args.cores,
@@ -189,7 +189,7 @@ def fit_naive(ctx,root):
     return weights
 
 def fit_family(ctx,args,root,cache,scenario,booked_plans):
-    """Fit a distinct CASE and VF under one saturation assumption only."""
+    """Fit CASE for initialization and benchmark, then joint VF."""
     folder=root/"training"/scenario.name
     folder.mkdir(parents=True,exist_ok=True)
     completed=folder/"frozen_policy.json"
@@ -206,29 +206,32 @@ def fit_family(ctx,args,root,cache,scenario,booked_plans):
     coeff=case_fit(ctx,items,model,folder,
                    args.case_steps,args.cuts,"gurobi",100.,
                    lambda_scale=CASE_LAMBDA_SCALE)
-    # All subsequent features are built from this scenario's CASE policy.
     raw=np.asarray(data["X"],float)@coeff
     verify_same_scenario(raw,booked,scenario)
-    H,(mean,std),draft=five_features(
-         ctx,items,raw,model,cache,"train_"+scenario.name)
+    H,(mean,std),_=five_features(
+         ctx,items,cache,"train_"+scenario.name,plans=booked_plans)
     save(folder/"vf_features.json",dict(mean=mean.tolist(),std=std.tolist()))
+    draft=cache.solve(items,model.reviewed(raw),
+                     "train_"+scenario.name+"_case_draft",tie=True)
     libraries={key:[booked_plans[key]["assignment"],
                     draft[key]["assignment"]] for key,_,_ in items}
-    vf_lam=VF_LAMBDA_SCALE*train_lambda(H,len(items))
-    print(f"TRAIN {scenario.name}: VF(B) MM-pDCA, "
-          f"lambda={vf_lam:.8f}; theta starts at zero",flush=True)
+    X=np.column_stack([data["X"],H])
+    start=np.r_[coeff,np.zeros(H.shape[1])]
+    vf_lam=VF_LAMBDA_SCALE*train_lambda(X,len(items),intercept=True)
+    print(f"TRAIN {scenario.name}: joint VF(B) MM-pDCA, "
+          f"lambda={vf_lam:.8f}; initialized at CASE",flush=True)
     def oracle(parts,durations,k):
         return cache.solve(parts,durations,
                            f"train_{scenario.name}_vf_outer_{k}",tie=False)
-    state=mm_vf(items,booked,H,raw,model,actual,
-                root=folder/"vf",lam=vf_lam,
+    state=mm_vf(items,booked,X,model,actual,
+                start=start,root=folder/"vf",lam=vf_lam,
                 initial_libraries=libraries,
-                iterations=args.vf_outers,radius=64.,
+                iterations=args.vf_outers,radius=100.,
                 pdca_steps=args.vf_pdca_steps,
                 max_cuts=args.cuts,backend="gurobi",
-                solve_plans=oracle,optimizer="pdca")
+                solve_plans=oracle)
     theta=np.asarray(state["theta"],float)
-    verify_same_scenario(raw+H@theta,booked,scenario)
+    verify_same_scenario(X@theta,booked,scenario)
     fitted=dict(scenario=vars(scenario),case_coeff=coeff.tolist(),
                 vf_theta=theta.tolist(),
                 lambda_case=float(json.loads(
@@ -259,11 +262,10 @@ def freeze_displays(ctx,root,cache,naive_weights,policies):
         model=mapping(booked,scenario)
         a_case=verify_same_scenario(case_raw,booked,scenario)
         scaler=json.loads((root/"training"/name/"vf_features.json").read_text())
-        H,_,_=five_features(ctx,items,case_raw,model,cache,
-                "eval_"+name,
+        H,_,_=five_features(ctx,items,cache,"eval_"+name,
                 scaler=(np.asarray(scaler["mean"],float),
                         np.asarray(scaler["std"],float)))
-        vf_raw=case_raw+H@np.asarray(policy["vf_theta"],float)
+        vf_raw=np.column_stack([X,H])@np.asarray(policy["vf_theta"],float)
         a_vf=verify_same_scenario(vf_raw,booked,scenario)
         displays[f"CASE__{name}"]=a_case
         displays[f"VF__{name}"]=a_vf

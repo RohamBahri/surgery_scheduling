@@ -151,8 +151,9 @@ def test_library_mm_trains_and_keeps_feasible_timeout_incumbent(tmp_path,backend
         return {"toy":dict(assignment=[0,0,0],bound=0.,
                            complete=False,status="TIME_LIMIT")}
     results=mm_vf(items,week.booked,
-            np.array([[1.],[.5],[-1.]]),np.array([12.,-4.,40.]),
-            m,week.actual,root=tmp_path,lam=.001,
+            np.array([[1.,1.],[1.,.5],[1.,-1.]]),
+            m,week.actual,start=np.array([12.,0.]),
+            root=tmp_path,lam=.001,
             initial_libraries={"toy":[[0,0,0],[0,1,1]]},
             iterations=2,pdca_steps=3,max_cuts=25,
             backend=backend,solve_plans=oracle)
@@ -183,7 +184,7 @@ def test_case_lad_and_penalty_rules_on_small_instance():
     assert np.max(abs(X@w-actual_error))<1e-5
     h=np.column_stack([np.ones(10),np.linspace(-2,2,10),
                        np.zeros(10)])
-    # VF has no intercept, and lambda calibration includes column 1.
+    # Joint VF has an intercept; lambda excludes column zero.
     a=train_lambda(h,2,intercept=False)
     b=train_lambda(h,2,intercept=True)
     assert a>0 and b>0 and a!=pytest.approx(b)
@@ -214,7 +215,7 @@ def test_exact_case_qp_matches_convex_majorizer_when_licensed():
         m.dispose()
     except gp.GurobiError as exc:
         pytest.skip(str(exc))
-    from surgery.nonmonotone_learning import CaseConvexQP
+    from surgery.nonmonotone_learning import ConvexEpigraphQP
     rng=np.random.default_rng(77)
     n,p=24,5
     b=np.linspace(1.,150.,n)
@@ -228,7 +229,7 @@ def test_exact_case_qp_matches_convex_majorizer_when_licensed():
                     penalize=np.r_[0.,np.ones(p-1)])
     center=np.array([2.,-3.,4.,1.,-2.])
     gradient=obj.parts(center)[3]
-    solver=CaseConvexQP(obj,np.full(p,-40.),np.full(p,40.))
+    solver=ConvexEpigraphQP(obj,np.full(p,-40.),np.full(p,40.))
     try:
         trial,status=solver.solve(center,gradient,prox=.001)
         assert status["certified"],status
@@ -296,11 +297,66 @@ def test_case_exact_qp_improves_with_70_shared_features():
             pytest.skip("70-feature regression requires full Gurobi license")
         raise
     assert result["iterations"]
-    assert all(r["inner_status"].startswith("CASE_QP_")
+    assert all(r["inner_status"].startswith("EXACT_QP_")
                for r in result["iterations"])
     assert result["objective"]<obj.value(start)-1e-3
     assert any(r["accepted"] for r in result["iterations"])
 
+
+
+def test_joint_vf_uses_all_coefficients_and_unpenalized_intercept():
+    week=toy_week()
+    items=[("toy",week,np.arange(week.n))]
+    m=ResponseDC(week.booked,.8,30.,180.,1.)
+    X=np.column_stack([np.ones(week.n),np.array([-1.,0.,1.]),
+                       np.array([.5,-1.,2.])])
+    w=np.array([5.,2.,-3.])
+    from surgery.nonmonotone_learning import planned_cost_fast
+    d=m.reviewed(X@w)
+    library={"toy":[[0,0,0],[0,1,1]]}
+    z=min(library["toy"],key=lambda z:planned_cost_fast(week,z,d))
+    rooms,_=room_matrix(items,{"toy":z},week.n)
+    pen=np.array([0.,1.,1.])
+    obj=DCObjective(week.booked,X,np.zeros(week.n),m,mode="VF",
+                    actual=week.actual,components=1,rooms=rooms,
+                    lam=.07,penalize=pen)
+    expected=library_value(items,{"toy":[z]},d,week.actual,.07,w,pen)
+    assert obj.value(w)==pytest.approx(expected,abs=1e-7)
+    assert obj.value(w)!=pytest.approx(obj.value(w+np.array([0.,0.,2.])))
+    assert library_value(items,{"toy":[z]},d,week.actual,.07,
+                         np.array([90.,2.,-3.]),pen)==pytest.approx(expected)
+
+
+def test_vf_exact_epigraph_qp_matches_dc_on_joint_features():
+    gp=pytest.importorskip("gurobipy")
+    try:
+        probe=gp.Model();probe.Params.OutputFlag=0
+        v=probe.addVar(lb=0.,ub=1.);probe.setObjective(v*v)
+        probe.optimize();probe.dispose()
+    except gp.GurobiError:
+        pytest.skip("Gurobi license unavailable")
+    from surgery.nonmonotone_learning import ConvexEpigraphQP
+    week=toy_week()
+    items=[("toy",week,np.arange(week.n))]
+    X=np.column_stack([np.ones(week.n),np.array([-1.,0.,1.]),
+                       np.array([.2,-1.,1.])])
+    m=ResponseDC(week.booked,.8,30.,180.,1.)
+    rooms,_=room_matrix(items,{"toy":[0,1,1]},week.n)
+    obj=DCObjective(week.booked,X,np.zeros(week.n),m,mode="VF",
+                    actual=week.actual,components=1,rooms=rooms,
+                    lam=.01,penalize=np.array([0.,1.,1.]))
+    center=np.array([2.,-1.,1.])
+    grad=obj.parts(center)[3]
+    solver=ConvexEpigraphQP(obj,np.full(3,-40.),np.full(3,40.))
+    try:
+        trial,result=solver.solve(center,grad,.01)
+        assert result["certified"],result
+        G,_,_,_=obj.parts(trial)
+        assert result["objective"]==pytest.approx(
+            G-grad@trial+.005*np.sum((trial-center)**2),
+            rel=1e-6,abs=1e-5)
+    finally:
+        solver.close()
 
 
 def test_fast_planned_cost_matches_current_weekly_evaluate_exactly():
