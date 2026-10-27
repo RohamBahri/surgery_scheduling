@@ -113,6 +113,41 @@ lambda sweep finds a better one. See `feature_comparison.json` in the
 comparison folder. This uses the already-examined 2013 data and is
 exploratory, not a pristine holdout.
 
+## Unattended final-paper experiment
+
+The research configuration is frozen: joint VF with the saturating training
+link, original nominal (0.8,30) adoption, absolute L1 penalty
+0.10924129431614196 and no additional feature search. This command
+performs the complete empirical/methodological follow-up, with resumable
+stage logs and source/checkpoint verification:
+
+```bash
+caffeinate -i python -u -m pilot.run_paper_completion \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --base artifacts/vf_tuning/lambda025 \
+  --out artifacts/paper_completion \
+  --cores 15 --plan-seconds 180
+```
+
+The script tests the installed Gurobi stack, audits saved numerical claims,
+runs two controlled joint-VF fits (three nonduplicated plan features and a
+*true* 77-coefficient case-only ablation), trains four homogeneous response
+policies, evaluates frozen displayed advice across six deployment scenarios,
+chooses nominal/minimax-regret/equal-weight candidate rules using *training*
+outcomes, assesses two explicitly hypothetical persistent surgeon response
+mixtures, and compares assignment hash-tie seeds 0–2.
+
+Rerunning the **identical** command resumes cached planner solves and
+completed stages; outputs appear in `artifacts/paper_completion/`. Start with
+`final_report.md`, `final_results.json`, and
+`audit/claims_register.csv`. The baseline policy is not overwritten.
+
+The robust rules are chosen *from trained candidates*; no global
+distributionally robust policy is claimed. No true surgeon adoption
+parameters are identified; the 2013 data were examined repeatedly and the
+results are exploratory. A proof obligation register is not a substitute for
+completing each mathematical proof in the manuscript.
+
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.

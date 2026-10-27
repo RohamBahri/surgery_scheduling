@@ -16,6 +16,8 @@ BASE_NAMES=(
     "procedure_spread_x_congestion",
 )
 INTERACTION_NAMES=BASE_NAMES+("centered_booked_x_congestion",)
+CLEAN_NAMES=("draft_congestion","surgeon_spread_x_congestion",
+             "procedure_spread_x_congestion")
 CONTEXT_NAMES=BASE_NAMES+(
     "absolute_congestion",
     "reachable_capacity_proximity",
@@ -30,6 +32,10 @@ CONTEXT_NAMES=tuple(x.replace("sur­geon","surgeon") for x in CONTEXT_NAMES)
 
 
 def feature_names(schema="baseline"):
+    if schema=="case_only":
+        return ()
+    if schema=="clean":
+        return CLEAN_NAMES
     if schema in ("baseline","congestion_clip3"):
         return BASE_NAMES
     if schema in ("congestion_booked","congestion_booked_clip3"):
@@ -68,7 +74,9 @@ def booked_plan_features(items, booked, plans, history, schema="baseline",
         clip=3. if schema in ("congestion_clip3","congestion_booked_clip3") else 2.
         p=np.clip((room_load[z]-capacity)/120.,-clip,clip)
         surgeon,procedure=history[rows,0],history[rows,1]
-        cols=[surgeon,procedure,p,surgeon*p,procedure*p]
+        cols=([p,surgeon*p,procedure*p] if schema=="clean" else
+              ([] if schema=="case_only" else
+               [surgeon,procedure,p,surgeon*p,procedure*p]))
         if schema in ("congestion_booked","congestion_booked_clip3"):
             # Main congestion term is the effect at a 120-minute booking.
             cols.append(((b-120.)/120.)*p)
@@ -88,7 +96,8 @@ def booked_plan_features(items, booked, plans, history, schema="baseline",
                 p*share,
                 p*log_alt,
             ))
-        out[rows]=np.column_stack(cols)
+        if cols:
+            out[rows]=np.column_stack(cols)
     if not seen.all() or not np.isfinite(out).all():
         raise ValueError("Missing or nonfinite VF feature values")
     return out
@@ -97,6 +106,12 @@ def booked_plan_features(items, booked, plans, history, schema="baseline",
 def standardize_features(raw, scaler=None):
     """Training-fitted scaling only; do not learn scaling on evaluation cases."""
     raw=np.asarray(raw,float)
+    if raw.ndim!=2:
+        raise ValueError("Plan features must be a matrix")
+    if raw.shape[1]==0:
+        if scaler is not None and any(len(np.asarray(x)) for x in scaler):
+            raise ValueError("Nonempty scaler for case-only feature schema")
+        return raw.copy(),(np.empty(0),np.empty(0))
     if scaler is None:
         mu=raw.mean(axis=0)
         measured=raw.std(axis=0)

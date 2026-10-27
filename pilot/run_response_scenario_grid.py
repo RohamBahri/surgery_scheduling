@@ -42,7 +42,7 @@ from surgery.weekly_planner import evaluate as planner_evaluate
 
 METHODS=("BOOKED","NAIVE")+evaluation_policy_labels()
 CASE_LAMBDA_SCALE=1.0
-VF_LAMBDA_SCALE=1.0
+VF_LAMBDA_SCALE=.25
 
 
 def sha_bytes(blob):
@@ -60,7 +60,10 @@ def contract(args,root):
         train=[vars(x) for x in TRAIN_SCENARIOS],
         evaluation=[vars(x) for x in EVAL_SCENARIOS],
         arms=list(METHODS),case_lambda_scale=CASE_LAMBDA_SCALE,
-        vf_lambda_scale=VF_LAMBDA_SCALE,naive_lambda_scale=1.0,
+        vf_lambda_scale=VF_LAMBDA_SCALE,
+        vf_lambda_absolute=args.vf_lambda_absolute,
+        vf_features=args.vf_features,
+        naive_lambda_scale=1.0,
         case_radius=100.,vf_radius=100.,cap=180.,
         case_steps=args.case_steps,vf_outers=args.vf_outers,
         vf_pdca_steps=args.vf_pdca_steps,inner_cuts=args.cuts,
@@ -209,15 +212,18 @@ def fit_family(ctx,args,root,cache,scenario,booked_plans):
     raw=np.asarray(data["X"],float)@coeff
     verify_same_scenario(raw,booked,scenario)
     H,(mean,std),_=five_features(
-         ctx,items,cache,"train_"+scenario.name,plans=booked_plans)
-    save(folder/"vf_features.json",dict(mean=mean.tolist(),std=std.tolist()))
+         ctx,items,cache,"train_"+scenario.name,
+         plans=booked_plans,schema=args.vf_features)
+    save(folder/"vf_features.json",dict(
+        schema=args.vf_features,mean=mean.tolist(),std=std.tolist()))
     draft=cache.solve(items,model.reviewed(raw),
                      "train_"+scenario.name+"_case_draft",tie=True)
     libraries={key:[booked_plans[key]["assignment"],
                     draft[key]["assignment"]] for key,_,_ in items}
     X=np.column_stack([data["X"],H])
     start=np.r_[coeff,np.zeros(H.shape[1])]
-    vf_lam=VF_LAMBDA_SCALE*train_lambda(X,len(items),intercept=True)
+    vf_lam=(args.vf_lambda_absolute if args.vf_lambda_absolute is not None
+            else VF_LAMBDA_SCALE*train_lambda(X,len(items),intercept=True))
     print(f"TRAIN {scenario.name}: joint VF(B) MM-pDCA, "
           f"lambda={vf_lam:.8f}; initialized at CASE",flush=True)
     def oracle(parts,durations,k):
@@ -236,7 +242,7 @@ def fit_family(ctx,args,root,cache,scenario,booked_plans):
                 vf_theta=theta.tolist(),
                 lambda_case=float(json.loads(
                     (folder/"case_policy.json").read_text())["lambda_case"]),
-                lambda_vf=float(vf_lam),
+                lambda_vf=float(vf_lam),vf_features=args.vf_features,
                 vf_status=state["status"],
                 vf_outer_iterations=len(state["history"]),
                 train_cases=len(booked),train_components=len(items))
@@ -264,7 +270,8 @@ def freeze_displays(ctx,root,cache,naive_weights,policies):
         scaler=json.loads((root/"training"/name/"vf_features.json").read_text())
         H,_,_=five_features(ctx,items,cache,"eval_"+name,
                 scaler=(np.asarray(scaler["mean"],float),
-                        np.asarray(scaler["std"],float)))
+                        np.asarray(scaler["std"],float)),
+                schema=scaler.get("schema","baseline"))
         vf_raw=np.column_stack([X,H])@np.asarray(policy["vf_theta"],float)
         a_vf=verify_same_scenario(vf_raw,booked,scenario)
         displays[f"CASE__{name}"]=a_case
@@ -466,7 +473,13 @@ def main():
     ap.add_argument("--vf-outers",type=int,default=30)
     ap.add_argument("--vf-pdca-steps",type=int,default=50)
     ap.add_argument("--cuts",type=int,default=160)
+    ap.add_argument("--vf-features",choices=("baseline","clean"),default="clean")
+    ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     args=ap.parse_args()
+    if args.vf_lambda_absolute is not None and (
+        not np.isfinite(args.vf_lambda_absolute) or
+        args.vf_lambda_absolute<0):
+        ap.error("VF lambda must be finite and nonnegative")
     if not (1<=args.cores<=15 and args.plan_seconds>0):
         ap.error("Invalid core count or planner time limit")
     check_grid()

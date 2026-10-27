@@ -531,7 +531,7 @@ def main():
     ap.add_argument("--vf-plan-penalty",type=float,default=1.)
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
     ap.add_argument("--vf-features",choices=(
-        "baseline","congestion_booked","congestion_clip3",
+        "baseline","clean","case_only","congestion_booked","congestion_clip3",
         "congestion_booked_clip3","context"),default="baseline")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
