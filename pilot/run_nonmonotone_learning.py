@@ -29,6 +29,7 @@ from surgery.nonmonotone_learning import (
     ResponseDC, DCObjective, choose_library_schedules, mm_vf, pdca,
     response, room_matrix, score_loadings)
 from surgery.weekly_planner import evaluate, loads
+from surgery.vf_features import booked_plan_features, feature_names, standardize_features
 
 
 def save(path,obj):
@@ -51,7 +52,7 @@ def record_stage_time(root,stage,elapsed):
     print(f"{stage}: {elapsed:.1f} wall seconds",flush=True)
 
 
-def save_case_table(path,data,case_raw,vf_raw,features,response_map):
+def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_schema="baseline"):
     """Per-case replay file; does not run extra optimizer calls."""
     case_raw=np.asarray(case_raw,float)
     vf_raw=np.asarray(vf_raw,float)
@@ -59,8 +60,9 @@ def save_case_table(path,data,case_raw,vf_raw,features,response_map):
     vf_reviewed=response_map.reviewed(vf_raw)
     case_display=response_map.display(case_raw)
     vf_display=response_map.display(vf_raw)
-    names=["surgeon_spread","procedure_spread","draft_congestion",
-           "surgeon_spread_x_congestion","procedure_spread_x_congestion"]
+    names=feature_names(feature_schema)
+    if np.asarray(features).shape!=(len(case_raw),len(names)):
+        raise ValueError("Case-table feature count does not match schema")
     fields=["case_id","booked","actual","case_raw","case_display",
             "case_reviewed","vf_raw","vf_display","vf_reviewed"] + [
             "feature_"+v+"_standardized" for v in names]
@@ -259,25 +261,17 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
     return w
 
 
-def five_features(ctx,items,cache,stage,scaler=None,plans=None):
-    """Five fixed congestion features from the outcome-blind booked plan."""
+def five_features(ctx,items,cache,stage,scaler=None,plans=None,
+                  schema="baseline"):
+    """Outcome-blind fixed features from the provisional booked schedule."""
     data=ctx["fit"] if stage.startswith("train") else ctx["held"]
     booked=np.asarray(data["booked"],float)
     draft=plans if plans is not None else cache.solve(
         items,booked,stage+"_booked_draft",tie=True)
     history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
-    surgeon,procedure=history[:,0],history[:,1]
-    p=np.empty(len(booked))
-    for key,c,rows in items:
-        z=np.asarray(draft[key]["assignment"],int)
-        p[rows]=np.clip((loads(c,z,booked[rows])[z]-480.)/120.,-2.,2.)
-    raw=np.column_stack([surgeon,procedure,p,surgeon*p,procedure*p])
-    if scaler is None:
-        mu=raw.mean(axis=0)
-        sd=np.maximum(raw.std(axis=0),1e-12)
-    else:
-        mu,sd=scaler
-    return (raw-mu)/sd,(mu,sd),draft
+    raw=booked_plan_features(items,booked,draft,history,schema=schema)
+    scaled,params=standardize_features(raw,scaler)
+    return scaled,params,draft
 
 def work(ctx,root,args):
     train=ctx["train"]
@@ -295,8 +289,11 @@ def work(ctx,root,args):
         draft_started=time.perf_counter()
         case_raw=np.asarray(data["X"],float)@coef
         booked=cache.solve(train,b,"train_booked",tie=True)
-        H,(mu,sd),_=five_features(ctx,train,cache,"train",plans=booked)
-        save(root/"vf_features.json",dict(mean=mu.tolist(),std=sd.tolist()))
+        H,(mu,sd),_=five_features(
+            ctx,train,cache,"train",plans=booked,schema=args.vf_features)
+        save(root/"vf_features.json",dict(
+            schema=args.vf_features,names=list(feature_names(args.vf_features)),
+            mean=mu.tolist(),std=sd.tolist()))
         case_draft=cache.solve(train,response_map.reviewed(case_raw),
                                "train_case_draft",tie=True)
         record_stage_time(root,"draft_and_booked",time.perf_counter()-draft_started)
@@ -308,7 +305,8 @@ def work(ctx,root,args):
         X=np.column_stack([data["X"],H])
         start=np.r_[coef,np.zeros(H.shape[1])]
         vf_started=time.perf_counter()
-        vf_lam=args.vf_lambda_scale*train_lambda(X,len(train),intercept=True)
+        vf_lam=(args.vf_lambda_absolute if args.vf_lambda_absolute is not None
+                else args.vf_lambda_scale*train_lambda(X,len(train),intercept=True))
         penalty=np.ones(X.shape[1]);penalty[0]=0.
         penalty[data["X"].shape[1]:]*=args.vf_plan_penalty
         if args.vf_loading=="score":
@@ -335,12 +333,13 @@ def work(ctx,root,args):
                lambda_vf=float(vf_lam),vf_penalty=penalty.tolist(),
                vf_lambda_scale=args.vf_lambda_scale,
                vf_plan_penalty=args.vf_plan_penalty,
-               vf_loading=args.vf_loading,link=args.link,
+               vf_loading=args.vf_loading,vf_features=args.vf_features,
+               vf_feature_names=list(feature_names(args.vf_features)),link=args.link,
                cap=args.cap,alpha=.8,h=30.,
                train_components=len(train),train_cases=len(b),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
-                        vf_raw,H,response_map)
+                        vf_raw,H,response_map,args.vf_features)
         record_stage_time(root,"vf",time.perf_counter()-vf_started)
         return
     if args.stage=="evaluate":
@@ -366,13 +365,16 @@ def eval_2013(ctx,root,args,cache,selected):
     raw=np.asarray(held["X"],float)@coef
     record=json.loads((root/"vf_features.json").read_text())
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
-    H,_,_=five_features(ctx,items,cache,"eval",scaler=scale)
+    schema=record.get("schema","baseline")
+    if schema!=args.vf_features:
+        raise ValueError("Evaluation VF feature schema differs from trained policy")
+    H,_,_=five_features(ctx,items,cache,"eval",scaler=scale,schema=schema)
     vf_raw=np.column_stack([held["X"],H])@theta
     # Deploy the same frozen minimum-magnitude displays under the original
     # three-regime response, regardless of the training link.
     ds={"BOOKED":b,"CASE":np.maximum(1.,b+response(c.display(raw),.8,30.)),
         "VF":np.maximum(1.,b+response(c.display(vf_raw),.8,30.))}
-    save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c)
+    save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
     for label,r in (("CASE",raw),("VF",vf_raw)):
         if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
             raise AssertionError("Training target differs from deployed response")
@@ -405,8 +407,12 @@ def train_probe(ctx,root,args,cache):
     c=ResponseDC(booked,.8,30.,args.cap,1.,link=args.link)
     scale=json.loads((root/"vf_features.json").read_text())
     original=cache.solve(items,booked,"train_booked",tie=True)
+    schema=scale.get("schema","baseline")
+    if schema!=args.vf_features:
+        raise ValueError("Probe VF feature schema differs from trained policy")
     H,_,_=five_features(ctx,items,cache,"train",
-        scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),plans=original)
+        scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),
+        plans=original,schema=schema)
     X=np.asarray(data["X"],float)
     raw=np.column_stack([X,H])@np.asarray(selected["vf_theta"],float)
     reviewed=np.maximum(1.,booked+response(c.display(raw),.8,30.))
@@ -502,8 +508,10 @@ def main():
     ap.add_argument("--link",choices=("saturating","nonmonotone"),
                     default="saturating")
     ap.add_argument("--vf-lambda-scale",type=float,default=1.)
+    ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     ap.add_argument("--vf-plan-penalty",type=float,default=1.)
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
+    ap.add_argument("--vf-features",choices=("baseline","context"),default="baseline")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
@@ -511,6 +519,11 @@ def main():
     if not (np.isfinite(args.vf_lambda_scale) and args.vf_lambda_scale>0.
             and np.isfinite(args.vf_plan_penalty) and args.vf_plan_penalty>0.):
         ap.error("VF penalty multipliers must be positive and finite")
+    if args.vf_lambda_absolute is not None and (
+            not np.isfinite(args.vf_lambda_absolute) or args.vf_lambda_absolute<0.):
+        ap.error("Absolute VF lambda must be finite and nonnegative")
+    if args.vf_lambda_absolute is not None and args.vf_lambda_scale!=1.:
+        ap.error("Choose either VF lambda scale or an absolute lambda, not both")
     if not args.context.exists():
         raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
     with args.context.open("rb") as f:
@@ -525,6 +538,11 @@ def main():
                   vf_lambda_scale=args.vf_lambda_scale,
                   vf_plan_penalty=args.vf_plan_penalty,vf_loading=args.vf_loading,
                   plan_seconds=args.plan_seconds,backend=args.backend)
+    # Absent defaults retain compatibility with prior tuning checkpoints.
+    if args.vf_features!="baseline":
+        settings["vf_features"]=args.vf_features
+    if args.vf_lambda_absolute is not None:
+        settings["vf_lambda_absolute"]=args.vf_lambda_absolute
     args.out.mkdir(parents=True,exist_ok=True)
     contract=args.out/"run_contract.json"
     if contract.exists():

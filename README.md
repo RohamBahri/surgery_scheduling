@@ -55,6 +55,34 @@ initial smaller run. Each variant uses its own training directory. The private
 context file and Gurobi are required. The reused 2013 outcomes make this
 **exploratory tuning**, not an independent test.
 
+## Contextual booked-plan features (targeted diagnostic)
+
+The original five booking-plan features remain available as
+`--vf-features baseline` (default). An alternative
+`--vf-features context` appends seven outcome-blind signals:
+absolute congestion, proximity to 480-minute capacity within the
+collectively attainable correction range, booked room case count, the case's
+share of that room's booked minutes, number of alternative eligible slots,
+and two interactions (congestion × share and congestion × flexibility).
+All features use the frozen booked-duration provisional schedule; scaling
+is fitted on training cases only. The complete case + plan coefficient
+vector is still trained **jointly**.
+
+To compare the richer features against a completed baseline with exactly
+the same numeric L1 penalty (and the same nominal response), run:
+
+```bash
+python -u pilot/compare_vf_features.py \
+  --base artifacts/vf_tuning/lambda025 \
+  --out artifacts/vf_feature_comparison/context \
+  --cores 15 --plan-seconds 180
+```
+
+Switch `--base` to a different completed saturating-link baseline if the
+lambda sweep finds a better one. See `feature_comparison.json` in the
+comparison folder. This uses the already-examined 2013 data and is
+exploratory, not a pristine holdout.
+
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
