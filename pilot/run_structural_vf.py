@@ -318,7 +318,12 @@ def main():
         frozen_selected_policy_sha256=hash_file(args.base/"selected_policy.json"),
         case_initializer_sha256=hash_file(args.base/"case_policy.json"),
         schema=SCHEMA,lambda_vf=LAMBDA,plan_seconds=args.plan_seconds,
-        cores=args.cores,version="structural_vf_1")
+        cores=args.cores,version="structural_vf_1",
+        feature_implementation_sha256=hash_file(
+            ROOT/"surgery"/"vf_features.py"),
+        training_runner_sha256=hash_file(
+            ROOT/"pilot"/"run_nonmonotone_learning.py"),
+        experiment_runner_sha256=hash_file(Path(__file__)))
     file=args.out/"structural_run_contract.json"
     if file.exists() and read(file)!=contract:
         raise ValueError("Experiment input/contract changed: choose a NEW --out")
@@ -329,9 +334,14 @@ def main():
                         ROOT/"pilot"/"run_structural_tests.py",
                         args.out,[])
         save(args.out/"feature_tests_passed.json",dict(status="passed"))
-    if not (args.out/"structural_feature_audit.json").exists():
+    audit_file=args.out/"structural_feature_audit.json"
+    if not audit_file.exists():
         with args.context.open("rb") as f:ctx=pickle.load(f)
         audit_features(ctx,args.out,args.clean)
+    audit=read(audit_file)
+    if audit.get("exact_duplicate_found") or any(
+            r["sd"]<1e-10 for r in audit["features"]):
+        raise ValueError("Structural feature audit failed; see "+str(audit_file))
     initializer=args.out/"case_policy.json"
     if initializer.exists():
         if initializer.read_bytes()!=(args.base/"case_policy.json").read_bytes():
