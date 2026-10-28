@@ -148,6 +148,31 @@ parameters are identified; the 2013 data were examined repeatedly and the
 results are exploratory. A proof obligation register is not a substitute for
 completing each mathematical proof in the manuscript.
 
+## Post-run follow-up: corrected hash seeds and credibility cliffs
+
+The first `artifacts/paper_completion/seed_audit/` report is **invalid**:
+the shared planner worker hardcoded `hash_seed=0` even when the environment
+requested seeds 1 or 2. The independent follow-up worker passes seeds directly
+and stores seed-specific cache signatures. It also evaluates the same frozen
+displays under nonmonotone true responses without retraining.
+
+Run **only** this follow-up, not the original expensive paper-completion
+command (the completed scenario grid is source-fingerprinted):
+
+```bash
+caffeinate -i python -u -m pilot.paper_followup \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --base artifacts/vf_tuning/lambda025 \
+  --grid artifacts/paper_completion/scenarios \
+  --out artifacts/paper_completion/followup \
+  --cores 15 --plan-seconds 180
+```
+
+Outputs: `followup/followup_report.md`,
+`followup/seed_audit_fixed/seed_robustness.json` and
+`followup/cliff/cliff_policy_sensitivity.csv`. Results are exploratory
+and conditional on hypothesized response curves; no surgeon response was observed.
+
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
