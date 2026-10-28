@@ -216,6 +216,52 @@ be presented as fresh confirmatory testing. The run does not search over
 candidate feature specifications or retrain behavior scenarios. Running
 the same command again resumes completed stages.
 
+## Frozen structural VF finalization: explicit seeds and behavior
+
+Run **one** resumable workflow from the repository root after the completed
+clean VF and structural VF experiments:
+
+```bash
+git pull --ff-only origin main && \
+caffeinate -i python -u -m pilot.run_structural_finalization \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --clean artifacts/paper_completion/clean \
+  --structural artifacts/vf_structural \
+  --out artifacts/structural_finalization \
+  --cores 15 --plan-seconds 180
+```
+
+1. Reuse the exact recorded `cases_test.csv` canonical displayed advice and
+   adopted durations for clean and structural; assert nominal response
+   consistency and identical CASE coefficients. Do not fit a new policy or
+   recompute provisional-plan features.
+2. Solve BOOKED, CASE, clean VF and structural VF under explicit hash
+   seeds 0, 1, 2, 3, 4 using the previously tested hash-specific worker
+   and its duration- and seed-keyed resumable cache. Assert seed 0 reproduces
+   certified archived costs. Compare all policies on **one** jointly
+   certified set, with calendar-week paired bootstrap keeping the seeds
+   together.
+3. Apply a practical screening rule to the already reused (exploratory)
+   2013 data: at least 95% certified case coverage, a structural cost
+   improvement in at least four of five seeds, a seed-averaged improvement
+   of at least 0.4 cost units/case, and a negative upper end of the paired
+   calendar-week bootstrap interval. This is a *post-development practical
+   screen*, **not** a pre-registered confirmatory statistical test.
+4. Only if structural passes, replay the **two nominal frozen VF policies**
+   across the previously agreed six saturating and six nonmonotone true
+   behavioral responses. Do not re-canonicalize displays. No refits of
+   scenario-conditioned VF, no behavioral identification, and no new
+   feature or penalty experiments. The earlier cross-training minimax
+   conclusion is not transferred to structural by this replay.
+
+Results: `artifacts/structural_finalization/finalization_report.md`,
+`decision.json`, `seed_comparison/seed_comparison.json`, and, if selected,
+`behavioral/matched_12_scenario_costs.csv` and
+`behavioral/behavior_summary.json`. The workflow logs each stage and
+can be rerun to resume if interrupted. For seed-only operation, add
+`--seed-only`; the exact same output can later be resumed without it.
+Archived 2013 comparisons remain exploratory.
+
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
