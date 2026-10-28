@@ -51,6 +51,40 @@ def hash_file(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def validate_frozen_baseline(reference):
+    """Accept the old implicit baseline schema without weakening other checks.
+
+    Original lambda025 predates the vf_features metadata key: absence means
+    baseline (five draft-plan columns). The frozen scientific specification
+    and coefficient dimensions still have to match exactly.
+    """
+    problems=[]
+    expected_text={"method":"JOINT_VF","link":"saturating",
+                   "vf_loading":"uniform"}
+    for key,expected in expected_text.items():
+        if reference.get(key)!=expected:
+            problems.append(f"{key}={reference.get(key)!r}, expected {expected!r}")
+    schema=reference.get("vf_features","baseline")
+    if schema!="baseline":
+        problems.append(f"vf_features={schema!r}, expected 'baseline'")
+    for key,expected in (("alpha",.8),("h",30.),("cap",180.),
+                         ("vf_plan_penalty",1.),
+                         ("vf_lambda_scale",.25),("lambda_vf",LAMBDA)):
+        value=reference.get(key)
+        if not isinstance(value,(int,float)) or not math.isclose(
+                float(value),expected,rel_tol=1e-10,abs_tol=1e-9):
+            problems.append(f"{key}={value!r}, expected {expected!r}")
+    case=reference.get("case_coeff")
+    theta=reference.get("vf_theta")
+    if not isinstance(case,list) or len(case)!=77:
+        problems.append("expected 77 frozen case coefficients")
+    if not isinstance(theta,list) or len(theta)!=82:
+        problems.append("expected 82 frozen joint VF coefficients (77 + 5)")
+    if problems:
+        raise ValueError("Frozen baseline mismatch: "+"; ".join(problems))
+    return True
+
+
 def audit_features(ctx,out,clean):
     """Training-only diagnostics; no solver, realized data, or plan selection."""
     items=ctx["train"]
@@ -296,11 +330,7 @@ def main():
         if not file.exists():
             raise FileNotFoundError("Missing prior experiment: "+str(file))
     reference=read(args.base/"selected_policy.json")
-    if (reference.get("method")!="JOINT_VF" or
-            reference.get("link")!="saturating" or
-            reference.get("vf_features")!="baseline" or
-            not math.isclose(float(reference["lambda_vf"]),LAMBDA,abs_tol=1e-9)):
-        raise ValueError("Frozen baseline does not match the nominated setup")
+    validate_frozen_baseline(reference)
     # Cross-check all method settings against the previous fully tested
     # clean-VF run. Only the feature schema is permitted to change.
     previous=read(args.clean/"run_contract.json")

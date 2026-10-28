@@ -100,3 +100,36 @@ def test_structural_cli_available():
                      check=True,capture_output=True,text=True)
     assert "--plan-seconds" in p.stdout
     assert "--clean" in p.stdout
+
+
+def test_frozen_lambda025_legacy_policy_metadata_is_accepted():
+    # The October 27 lambda025 artifact has no vf_features field.
+    from pilot.run_structural_vf import LAMBDA,validate_frozen_baseline
+    legacy=dict(
+        method="JOINT_VF",link="saturating",alpha=.8,h=30.,cap=180.,
+        vf_loading="uniform",vf_plan_penalty=1.,vf_lambda_scale=.25,
+        lambda_vf=LAMBDA,case_coeff=[0.]*77,vf_theta=[0.]*82)
+    assert "vf_features" not in legacy
+    assert validate_frozen_baseline(legacy)
+    legacy["vf_features"]="baseline"
+    assert validate_frozen_baseline(legacy)
+
+
+@pytest.mark.parametrize("key,value",[
+    ("vf_features","clean"),
+    ("lambda_vf",.5),
+    ("link","nonmonotone"),
+    ("vf_loading","score"),
+    ("vf_lambda_scale",1.),
+    ("vf_theta",[0.]*83),
+    ("case_coeff",[0.]*76),
+])
+def test_frozen_lambda025_scientific_mismatches_rejected(key,value):
+    from pilot.run_structural_vf import LAMBDA,validate_frozen_baseline
+    baseline=dict(
+        method="JOINT_VF",link="saturating",alpha=.8,h=30.,cap=180.,
+        vf_loading="uniform",vf_plan_penalty=1.,vf_lambda_scale=.25,
+        lambda_vf=LAMBDA,case_coeff=[0.]*77,vf_theta=[0.]*82)
+    baseline[key]=value
+    with pytest.raises(ValueError,match="Frozen baseline mismatch"):
+        validate_frozen_baseline(baseline)
