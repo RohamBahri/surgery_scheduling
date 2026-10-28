@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Reproducible UHN joint VF, initialized at CASE and evaluated against it.
+"""Internal engine: structural joint-VF learning, CASE warm start and benchmark.
 
-ONE response: alpha=.8, h=30. THREE arms: BOOKED, CASE, VF.
+Invoked through pilot.run_joint_vf. The feature representation is frozen;
+behavioral parameters and numerical budgets may vary as explicit configurations.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ def record_stage_time(root,stage,elapsed):
     print(f"{stage}: {elapsed:.1f} wall seconds",flush=True)
 
 
-def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_schema="baseline"):
+def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_schema="structural"):
     """Per-case replay file; does not run extra optimizer calls."""
     case_raw=np.asarray(case_raw,float)
     vf_raw=np.asarray(vf_raw,float)
@@ -262,27 +263,23 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
 
 
 def five_features(ctx,items,cache,stage,scaler=None,plans=None,
-                  schema="baseline"):
-    """Outcome-blind context; structural features never invoke a planner."""
+                  schema="structural"):
+    """Structural features do not need or inspect a provisional schedule."""
+    feature_names(schema)  # reject stale historical feature variants
     data=ctx["fit"] if stage.startswith("train") else ctx["held"]
     booked=np.asarray(data["booked"],float)
     history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
-    if schema=="structural":
-        draft=None  # Not used to compute any recommendation feature.
-        raw=booked_plan_features(items,booked,None,history,schema=schema)
-    else:
-        draft=plans if plans is not None else cache.solve(
-            items,booked,stage+"_booked_draft",tie=True)
-        raw=booked_plan_features(items,booked,draft,history,schema=schema)
+    raw=booked_plan_features(items,booked,None,history,schema="structural")
     scaled,params=standardize_features(raw,scaler)
-    return scaled,params,draft
+    return scaled,params,None
+
 
 def work(ctx,root,args):
     train=ctx["train"]
     data=ctx["fit"]
     b=np.asarray(data["booked"],float)
     actual=np.asarray(data["actual"],float)
-    response_map=ResponseDC(b,.8,30.,args.cap,1.,link=args.link)
+    response_map=ResponseDC(b,args.alpha,args.h,args.cap,1.,link=args.link)
     root.mkdir(parents=True,exist_ok=True)
     cache=PlannerCache(root,args.cores,args.plan_seconds)
     if args.stage in ("case","all","draft","vf"):
@@ -358,7 +355,7 @@ def work(ctx,root,args):
                vf_plan_penalty=args.vf_plan_penalty,
                vf_loading=args.vf_loading,vf_features=args.vf_features,
                vf_feature_names=list(feature_names(args.vf_features)),link=args.link,
-               cap=args.cap,alpha=.8,h=30.,
+               cap=args.cap,alpha=args.alpha,h=args.h,
                train_components=len(train),train_cases=len(b),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
@@ -382,7 +379,7 @@ def eval_2013(ctx,root,args,cache,selected):
     evaluated_started=time.perf_counter()
     held=ctx["held"];items=ctx["eval"]
     b=np.asarray(held["booked"],float)
-    c=ResponseDC(b,.8,30.,args.cap,1.,link=args.link)
+    c=ResponseDC(b,args.alpha,args.h,args.cap,1.,link=args.link)
     coef=np.asarray(selected["case_coeff"],float)
     theta=np.asarray(selected["vf_theta"],float)
     raw=np.asarray(held["X"],float)@coef
@@ -393,10 +390,9 @@ def eval_2013(ctx,root,args,cache,selected):
         raise ValueError("Evaluation VF feature schema differs from trained policy")
     H,_,_=five_features(ctx,items,cache,"eval",scaler=scale,schema=schema)
     vf_raw=np.column_stack([held["X"],H])@theta
-    # Deploy the same frozen minimum-magnitude displays under the original
-    # three-regime response, regardless of the training link.
-    ds={"BOOKED":b,"CASE":np.maximum(1.,b+response(c.display(raw),.8,30.)),
-        "VF":np.maximum(1.,b+response(c.display(vf_raw),.8,30.))}
+    # Evaluate the response assumed for THIS configured policy.
+    # Alternative true-response scenarios are separate frozen-display audits.
+    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(vf_raw)}
     save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
     for label,r in (("CASE",raw),("VF",vf_raw)):
         if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
@@ -427,7 +423,7 @@ def train_probe(ctx,root,args,cache):
     data=ctx["fit"];items=ctx["train"]
     booked=np.asarray(data["booked"],float)
     selected=json.loads((root/"selected_policy.json").read_text())
-    c=ResponseDC(booked,.8,30.,args.cap,1.,link=args.link)
+    c=ResponseDC(booked,args.alpha,args.h,args.cap,1.,link=args.link)
     scale=json.loads((root/"vf_features.json").read_text())
     original=cache.solve(items,booked,"train_booked",tie=True)
     schema=scale.get("schema","baseline")
@@ -438,7 +434,7 @@ def train_probe(ctx,root,args,cache):
         plans=original,schema=schema)
     X=np.asarray(data["X"],float)
     raw=np.column_stack([X,H])@np.asarray(selected["vf_theta"],float)
-    reviewed=np.maximum(1.,booked+response(c.display(raw),.8,30.))
+    reviewed=c.reviewed(raw)
     if not np.allclose(reviewed,c.reviewed(raw),atol=1e-8):
         raise AssertionError("Training and deployment durations differ")
     fitted=cache.solve(items,reviewed,"train_final_vf_tie",tie=True)
@@ -530,17 +526,19 @@ def main():
     ap.add_argument("--vf-radius",type=float,default=100.)
     ap.add_argument("--link",choices=("saturating","nonmonotone"),
                     default="saturating")
+    ap.add_argument("--alpha",type=float,default=.8)
+    ap.add_argument("--h",type=float,default=30.)
     ap.add_argument("--vf-lambda-scale",type=float,default=1.)
     ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     ap.add_argument("--vf-plan-penalty",type=float,default=1.)
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
-    ap.add_argument("--vf-features",choices=(
-        "baseline","clean","case_only","congestion_booked","congestion_clip3",
-        "congestion_booked_clip3","context","structural"),default="baseline")
+    ap.add_argument("--vf-features",choices=("structural",),default="structural")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
     args=ap.parse_args()
+    if not (0<args.alpha<1 and args.h>0 and np.isfinite(args.h)):
+        ap.error("Response alpha must be in (0,1) and h must be positive")
     if not (np.isfinite(args.vf_lambda_scale) and args.vf_lambda_scale>0.
             and np.isfinite(args.vf_plan_penalty) and args.vf_plan_penalty>0.):
         ap.error("VF penalty multipliers must be positive and finite")
@@ -556,7 +554,7 @@ def main():
     from surgery import nonmonotone_learning as core
     fingerprint=sha(Path(__file__).read_bytes()+Path(core.__file__).read_bytes())
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
-                  alpha=.8,h=30.,cap=args.cap,case_steps=args.case_steps,
+                  alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
                   vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,
                   cuts=args.cuts,case_radius=args.case_radius,
                   vf_radius=args.vf_radius,link=args.link,
@@ -564,8 +562,7 @@ def main():
                   vf_plan_penalty=args.vf_plan_penalty,vf_loading=args.vf_loading,
                   plan_seconds=args.plan_seconds,backend=args.backend)
     # Absent defaults retain compatibility with prior tuning checkpoints.
-    if args.vf_features!="baseline":
-        settings["vf_features"]=args.vf_features
+    settings["vf_features"]="structural"
     if args.vf_lambda_absolute is not None:
         settings["vf_lambda_absolute"]=args.vf_lambda_absolute
     args.out.mkdir(parents=True,exist_ok=True)

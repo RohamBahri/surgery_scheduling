@@ -1,25 +1,12 @@
-"""Outcome-blind scheduling context for the joint VF recommendation policy.
+"""Schedule-independent structural features for the single joint-VF policy.
 
-The original feature schemas use a booked-duration provisional schedule.
-The new 'structural' schema depends ONLY on booked durations, the eligibility
-graph and historical case information. In particular it never uses a plan,
-realized durations, future observations, or the scheduler's tie-breaking rule.
-All schemas use training-fitted standardization at evaluation time.
+Features use only bookings, eligibility, rostered capacity and historical
+training-derived spread scores. No provisional plan, actual duration,
+tie-breaking seed or future outcome enters feature construction.
 """
 from __future__ import annotations
 import numpy as np
-from .weekly_planner import loads
 
-BASE_NAMES=(
-    "surgeon_spread",
-    "procedure_spread",
-    "draft_congestion",
-    "surgeon_spread_x_congestion",
-    "procedure_spread_x_congestion",
-)
-INTERACTION_NAMES=BASE_NAMES+("centered_booked_x_congestion",)
-CLEAN_NAMES=("draft_congestion","surgeon_spread_x_congestion",
-             "procedure_spread_x_congestion")
 STRUCTURAL_NAMES=(
     "component_capacity_pressure",
     "eligibility_bottleneck_pressure",
@@ -28,34 +15,12 @@ STRUCTURAL_NAMES=(
     "surgeon_spread_x_eligibility_pressure",
     "procedure_spread_x_eligibility_pressure",
 )
-CONTEXT_NAMES=BASE_NAMES+(
-    "absolute_congestion",
-    "reachable_capacity_proximity",
-    "log_room_case_count",
-    "booking_share_of_room",
-    "log_surgeon_alternative_slots",
-    "congestion_x_booking_share",
-    "congestion_x_alternative_slots",
-)
-# Keep ASCII identifiers in data artifacts and avoid names depending on locale.
-CONTEXT_NAMES=tuple(x.replace("sur­geon","surgeon") for x in CONTEXT_NAMES)
 
 
-def feature_names(schema="baseline"):
-    if schema=="case_only":
-        return ()
-    if schema=="clean":
-        return CLEAN_NAMES
-    if schema=="structural":
-        return STRUCTURAL_NAMES
-    if schema in ("baseline","congestion_clip3"):
-        return BASE_NAMES
-    if schema in ("congestion_booked","congestion_booked_clip3"):
-        return INTERACTION_NAMES
-    if schema=="context":
-        return CONTEXT_NAMES
-    raise ValueError("Unknown VF feature schema: "+str(schema))
-
+def feature_names(schema="structural"):
+    if schema!="structural":
+        raise ValueError("Only the frozen structural VF feature schema is supported")
+    return STRUCTURAL_NAMES
 
 
 def structural_features(items, booked, history, *, capacity=480.,
@@ -136,65 +101,15 @@ def structural_features(items, booked, history, *, capacity=480.,
     return out
 
 
-def booked_plan_features(items, booked, plans, history, schema="baseline",
-                         capacity=480., turnover=30., reach=24.):
-    """Return unstandardized context features in the case-row order.
+def booked_plan_features(items,booked,plans,history,schema="structural",
+                         capacity=480.,turnover=30.,reach=24.):
+    """Compatibility entry point; plans are deliberately ignored.
 
-    The provisional assignment is solved using booked durations and is fixed
-    when the recommendation policy is optimized. Never access actual outcomes.
+    Kept only for existing structural feature tests and reproducibility.
     """
-    if schema=="structural":
-        return structural_features(items,booked,history,capacity=capacity,
-                                   turnover=turnover)
-    booked=np.asarray(booked,float)
-    history=np.asarray(history,float)
-    if history.ndim!=2 or history.shape[0]!=len(booked) or history.shape[1]<2:
-        raise ValueError("Historical spread matrix must have at least 2 columns")
-    n=len(booked)
-    out=np.empty((n,len(feature_names(schema))),float)
-    seen=np.zeros(n,dtype=bool)
-    for key,c,rows in items:
-        rows=np.asarray(rows,int)
-        if seen[rows].any() or len(rows)!=c.n:
-            raise ValueError("Overlapping or incomplete component row indices")
-        seen[rows]=True
-        assignment=plans[key]
-        if isinstance(assignment,dict):
-            assignment=assignment["assignment"]
-        z=np.asarray(assignment,int)
-        b=booked[rows]
-        room_load=loads(c,z,b)
-        count=np.bincount(z,minlength=c.k)[z].astype(float)
-        clip=3. if schema in ("congestion_clip3","congestion_booked_clip3") else 2.
-        p=np.clip((room_load[z]-capacity)/120.,-clip,clip)
-        surgeon,procedure=history[rows,0],history[rows,1]
-        cols=([p,surgeon*p,procedure*p] if schema=="clean" else
-              ([] if schema=="case_only" else
-               [surgeon,procedure,p,surgeon*p,procedure*p]))
-        if schema in ("congestion_booked","congestion_booked_clip3"):
-            # Main congestion term is the effect at a 120-minute booking.
-            cols.append(((b-120.)/120.)*p)
-        if schema=="context":
-            room_booked=np.bincount(z,weights=b,minlength=c.k)[z]
-            share=b/room_booked
-            flexibility=np.array([
-                max(0,len(c.allowed[int(c.surgeon[i])])-1)
-                for i in range(c.n)],float)
-            log_alt=np.log1p(flexibility)
-            cols.extend((
-                np.abs(p),
-                np.maximum(0.,1.-np.abs(room_load[z]-capacity)/(reach*count)),
-                np.log1p(count),
-                share,
-                log_alt,
-                p*share,
-                p*log_alt,
-            ))
-        if cols:
-            out[rows]=np.column_stack(cols)
-    if not seen.all() or not np.isfinite(out).all():
-        raise ValueError("Missing or nonfinite VF feature values")
-    return out
+    feature_names(schema)
+    return structural_features(items,booked,history,capacity=capacity,
+                               turnover=turnover)
 
 
 def standardize_features(raw, scaler=None):
