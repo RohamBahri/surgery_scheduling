@@ -66,35 +66,12 @@ def test_saturating_training_matches_frozen_three_regime_deployment():
     assert np.allclose(deployed,d,rtol=0,atol=1e-9)
 
 
-def test_tuning_dry_run_lists_only_requested_joint_fit(tmp_path):
-    script=Path(__file__).parents[1]/"pilot"/"sweep_vf_tuning.py"
-    p=subprocess.run([sys.executable,str(script),"--dry-run",
-                      "--out-root",str(tmp_path),"--only","plan4"],
-                     capture_output=True,text=True,check=True)
-    assert "--stage all" in p.stdout
-    assert "--stage evaluate" in p.stdout
-    assert "--stage probe" in p.stdout
-    assert "--link saturating" in p.stdout
-    assert "--vf-plan-penalty 4.0" in p.stdout
-    assert "lambda025" not in p.stdout
-
-def test_joint_runner_exposes_sweep_options():
-    script=Path(__file__).parents[1]/"pilot"/"run_nonmonotone_learning.py"
-    p=subprocess.run([sys.executable,str(script),"--help"],
-                     capture_output=True,text=True,check=True)
-    for flag in ("--link","--vf-lambda-scale","--vf-plan-penalty",
-                 "--vf-loading","--stage"):
+def test_only_public_runner_exposes_structural_configuration():
+    script=Path(__file__).parents[1]/"pilot"/"run_joint_vf.py"
+    p=subprocess.run([sys.executable,"-m","pilot.run_joint_vf","--help"],
+                     cwd=script.parents[1],capture_output=True,text=True,check=True)
+    for flag in ("--stage","--alpha","--h","--link","--lambda-vf",
+                 "--true-alpha","--true-h","--true-link","--seeds"):
         assert flag in p.stdout
-
-
-def test_lambda_sweep_only_runs_new_values(tmp_path):
-    script=Path(__file__).parents[1]/"pilot"/"sweep_vf_tuning.py"
-    p=subprocess.run([sys.executable,str(script),"--dry-run",
-                      "--out-root",str(tmp_path),"--only",
-                      "lambda010","lambda050"],
-                     capture_output=True,text=True,check=True)
-    assert p.stdout.count("--stage all")==2
-    assert "--vf-lambda-scale 0.1" in p.stdout
-    assert "--vf-lambda-scale 0.5" in p.stdout
-    assert "--vf-lambda-scale 0.25" not in p.stdout
-    assert "--link saturating" in p.stdout
+    assert "--vf-features" not in p.stdout
+    assert "--vf-loading" not in p.stdout

@@ -85,7 +85,7 @@ def test_replay_user_script_reuses_training_plan_tags(tmp_path,monkeypatch):
             return {"toy":dict(assignment=list(map(int,week.original)),
                                complete=True)}
     monkeypatch.setattr(engine,"PlannerCache",Cache)
-    args=SimpleNamespace(out=folder,alpha=.8,h=30.,
+    args=SimpleNamespace(out=folder,alpha=.8,h=30.,link="saturating",
                          cores=1,plan_seconds=1.)
     result=runner.replay_training(args,ctx)
     assert [x[0] for x in called]==[

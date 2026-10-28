@@ -167,16 +167,16 @@ def test_library_mm_trains_and_keeps_feasible_timeout_incumbent(tmp_path,backend
 def test_runner_help_imports_without_training():
     import subprocess,sys
     from pathlib import Path
-    entry=Path(__file__).resolve().parents[1]/"pilot"/"run_nonmonotone_learning.py"
-    out=subprocess.run([sys.executable,str(entry),"--help"],cwd=entry.parents[1],
+    entry=Path(__file__).resolve().parents[1]/"pilot"/"run_joint_vf.py"
+    out=subprocess.run([sys.executable,"-m","pilot.run_joint_vf","--help"],cwd=entry.parents[1],
                        capture_output=True,text=True,timeout=25)
     assert out.returncode==0,out.stderr
-    assert "evaluate" in out.stdout and "vf" in out.stdout
+    assert "evaluate" in out.stdout and "structural" in out.stdout
     assert "--scenario" not in out.stdout
 
 
 def test_case_lad_and_penalty_rules_on_small_instance():
-    from pilot.run_nonmonotone_learning import lad_start,train_lambda
+    from pilot._joint_vf_engine import lad_start,train_lambda
     X=np.array([[1.,-2.],[1.,-1.],[1.,0.],[1.,1.],[1.,2.]])
     actual_error=4.+2.*X[:,1]
     w,diag=lad_start(X,actual_error,lam=0.,components=1,box=30.)
@@ -391,10 +391,10 @@ def test_pdca_progress_jsonl_persists_iteration_diagnostics(tmp_path,capsys):
 
 
 def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
-    from pilot.run_nonmonotone_learning import save_case_table
+    from pilot._joint_vf_engine import save_case_table
     import csv
     b=np.array([10.,100.])
-    X=np.ones((2,5))
+    X=np.ones((2,6))
     m=ResponseDC(b,.8,30.,180.,1.)
     data=dict(case_id=np.array([101,102]),booked=b,
               actual=np.array([12.,90.]))
@@ -406,6 +406,6 @@ def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
     assert len(records)==2
     assert "case_display" in records[0]
     assert "vf_reviewed" in records[0]
-    assert sum(k.startswith("feature_") for k in records[0])==5
+    assert sum(k.startswith("feature_") for k in records[0])==6
     assert float(records[1]["case_reviewed"]) == pytest.approx(
         m.reviewed(np.array([18.,-160.]))[1])
