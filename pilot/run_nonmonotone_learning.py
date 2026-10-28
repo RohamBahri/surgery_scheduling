@@ -263,13 +263,17 @@ def case_fit(ctx,items,response_map,folder,steps,cuts,backend,radius,*,
 
 def five_features(ctx,items,cache,stage,scaler=None,plans=None,
                   schema="baseline"):
-    """Outcome-blind fixed features from the provisional booked schedule."""
+    """Outcome-blind context; structural features never invoke a planner."""
     data=ctx["fit"] if stage.startswith("train") else ctx["held"]
     booked=np.asarray(data["booked"],float)
-    draft=plans if plans is not None else cache.solve(
-        items,booked,stage+"_booked_draft",tie=True)
     history=np.asarray(ctx["H"] if stage.startswith("train") else ctx["H_eval"],float)
-    raw=booked_plan_features(items,booked,draft,history,schema=schema)
+    if schema=="structural":
+        draft=None  # Not used to compute any recommendation feature.
+        raw=booked_plan_features(items,booked,None,history,schema=schema)
+    else:
+        draft=plans if plans is not None else cache.solve(
+            items,booked,stage+"_booked_draft",tie=True)
+        raw=booked_plan_features(items,booked,draft,history,schema=schema)
     scaled,params=standardize_features(raw,scaler)
     return scaled,params,draft
 
@@ -532,7 +536,7 @@ def main():
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
     ap.add_argument("--vf-features",choices=(
         "baseline","clean","case_only","congestion_booked","congestion_clip3",
-        "congestion_booked_clip3","context"),default="baseline")
+        "congestion_booked_clip3","context","structural"),default="baseline")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")

@@ -173,6 +173,49 @@ Outputs: `followup/followup_report.md`,
 `followup/cliff/cliff_policy_sensitivity.csv`. Results are exploratory
 and conditional on hypothesized response curves; no surgeon response was observed.
 
+## One controlled schedule-independent joint VF experiment
+
+The structural experiment replaces only the three provisional-booked-plan
+context features with six predeclared functions of booked durations, the
+room-day eligibility graph and historical spread. Eligibility pressure is
+based on the workload of all cases whose eligible sets lie inside the case's
+eligible set (a necessary workload constraint). Turnover uses a conservative
+lower bound: 30 minutes per case in excess of available slots.
+No assigned schedule, hash seed, or realized outcome enters the features.
+
+Run once from the repository root, using the existing frozen policy and
+paper-completion runs:
+
+```bash
+caffeinate -i python -u -m pilot.run_structural_vf \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --base artifacts/vf_tuning/lambda025 \
+  --clean artifacts/paper_completion/clean \
+  --case-only artifacts/paper_completion/case_only \
+  --out artifacts/vf_structural \
+  --cores 15 --plan-seconds 180
+```
+
+The runner checks its own small test suite and performs a *training-only*
+feature audit before fitting one VF policy. It verifies all scientific
+training settings against the previously completed clean-VF run contract:
+saturating alpha=0.8/h=30, CASE warm start, joint VF, absolute lambda
+0.10924129431614196, uniform L1 (unpenalized intercept), 30 MM outer
+iterations, 50 pDCA steps, 80 cuts and coefficient radius 100. The
+previous planner and hashed tie-break remain unchanged. The booked and
+CASE schedules remain legitimate initial schedules for MM, not feature
+inputs. No prior result folder is modified.
+
+Reports: `artifacts/vf_structural/structural_report.md`,
+`structural_comparison.json`, and `structural_feature_audit.json`.
+The new model is compared on identical certified components with the
+previous clean, original, and case-only VF experiments, with paired
+calendar-week bootstrap differences. Because 2013 was viewed repeatedly
+during development, these comparisons are *exploratory* and must not
+be presented as fresh confirmatory testing. The run does not search over
+candidate feature specifications or retrain behavior scenarios. Running
+the same command again resumes completed stages.
+
 ## Privacy and scope
 
 **No patient-level data, private context files, or results belong in Git.** Store the UHN workbook in a local `data/` directory and checkpoints, fitted coefficients, reports, and case-level outputs in local `artifacts/`; both are ignored. The repository does not include the private cohort-preparation checkpoint or a public replacement for its upstream preprocessing, so reproducing the study from a raw workbook alone requires the separately maintained private preparation pipeline.
