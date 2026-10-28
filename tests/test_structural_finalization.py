@@ -91,3 +91,61 @@ def test_frozen_policy_table_checks_case_order_and_replay(tmp_path):
     (folder/"cases_test.csv").write_text(lines[0]+lines[2]+lines[1])
     with pytest.raises(AssertionError,match="order"):
         frozen_case_table(ctx,folder,"clean")
+
+
+def test_seed0_archive_reproduction_uses_single_policy_cell(tmp_path):
+    """Regression for KeyError: 0 after all five-seed solver jobs finished."""
+    from pilot.seed_compare_policies import check_seed0_archive
+    archive=tmp_path/"clean"
+    archive.mkdir()
+    (archive/"evaluation_2013.json").write_text(json.dumps({
+        "entries":[
+            {"component":"a","method":"VF","complete":True,"cost":12.5},
+            {"component":"b","method":"VF","complete":True,"cost":7.5},
+            {"component":"a","method":"CASE","complete":True,"cost":11.5},
+        ]}))
+    # Already cells[0,"VF_clean"], not a seed-indexed dict.
+    cells=dict(cost={"a":12.5,"b":7.5},
+               certified={"a":True,"b":True},
+               assignment={"a":[0],"b":[0]})
+    result=check_seed0_archive(cells,archive,"VF",["a","b"])
+    assert result["verified_components"]==2
+    assert result["changed_cost_components"]==0
+    assert result["max_abs_cost_difference"]==0
+    cells["cost"]["b"]=7.6
+    result=check_seed0_archive(cells,archive,"VF",["a","b"])
+    assert result["changed_cost_components"]==1
+    assert result["max_abs_cost_difference"]==pytest.approx(.1)
+    assert result["examples"][0][0]=="b"
+
+
+def test_contract_accepts_only_documented_post_solve_reporting_hotfix(tmp_path):
+    from pilot.run_structural_finalization import reconcile_contract
+    log=tmp_path/"explicit_five_seeds.log"
+    log.write_text("Traceback in check_seed0_archive\nKeyError: 0\n")
+    old=dict(version="structural_finalization_v1",
+             context_sha256="same-data",plan_seconds=180.,seed_set=[0,1,2,3,4],
+             implementation_sha256={"seed_compare_policies.py":"old",
+                                    "anchored_weekly_solver.py":"unchanged"})
+    new={**old,"implementation_sha256":
+         {"seed_compare_policies.py":"fixed",
+          "anchored_weekly_solver.py":"unchanged"}}
+    updated=reconcile_contract(old,new,log)
+    assert len(updated["implementation_history"])==1
+    assert updated["implementation_sha256"]["seed_compare_policies.py"]=="fixed"
+    assert reconcile_contract(updated,new,log)==updated
+    with pytest.raises(ValueError,match="Unexpected implementation"):
+        reconcile_contract(old,new,log,seed_result_exists=True)
+    with pytest.raises(ValueError,match="Unexpected implementation"):
+        reconcile_contract(old,new,log,behavior_result_exists=True)
+    changed_solver={**new,"implementation_sha256":
+         {"seed_compare_policies.py":"fixed",
+          "anchored_weekly_solver.py":"changed"}}
+    with pytest.raises(ValueError,match="Unexpected implementation"):
+        reconcile_contract(old,changed_solver,log)
+    changed_science={**new,"plan_seconds":240.}
+    with pytest.raises(ValueError,match="Frozen finalization"):
+        reconcile_contract(old,changed_science,log)
+    log.write_text("Different error")
+    with pytest.raises(ValueError,match="Unexpected implementation"):
+        reconcile_contract(old,new,log)

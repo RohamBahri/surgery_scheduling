@@ -33,6 +33,45 @@ def sha(file):
     return hashlib.sha256(Path(file).read_bytes()).hexdigest()
 
 
+def reconcile_contract(recorded, expected, failed_seed_log,
+                       seed_result_exists=False, behavior_result_exists=False):
+    """Permit exactly the observed seed-0 reporting KeyError hotfix.
+
+    No scientific inputs, solver implementation, seed set or source other
+    than seed_compare_policies.py may change. Require evidence that the
+    earlier run failed IN check_seed0_archive before publishing results.
+    Preserve an audit trail of the one accepted code-only repair.
+    """
+    result=dict(expected)
+    previous_history=list(recorded.get("implementation_history",[]))
+    old_science={k:v for k,v in recorded.items()
+                 if k not in ("implementation_sha256","implementation_history")}
+    new_science={k:v for k,v in expected.items()
+                 if k!="implementation_sha256"}
+    if old_science!=new_science:
+        raise ValueError("Frozen finalization inputs or parameters changed: "
+                         "use NEW --out")
+    prior=recorded.get("implementation_sha256",{})
+    current=expected.get("implementation_sha256",{})
+    changed={name for name in set(prior)|set(current)
+             if prior.get(name)!=current.get(name)}
+    if changed:
+        log=failed_seed_log.read_text(errors="replace") if failed_seed_log.exists() else ""
+        if (changed!={"seed_compare_policies.py"} or
+                seed_result_exists or behavior_result_exists or
+                "check_seed0_archive" not in log or "KeyError: 0" not in log):
+            raise ValueError("Unexpected implementation change after starting "
+                             "experiment: use NEW --out")
+        previous_history.append(dict(
+            reason="Repair check_seed0_archive mistaken cells[0] lookup",
+            file="seed_compare_policies.py",
+            prior_sha256=prior["seed_compare_policies.py"],
+            replacement_sha256=current["seed_compare_policies.py"]))
+    if previous_history:
+        result["implementation_history"]=previous_history
+    return result
+
+
 def invoke(stage,out,argv):
     log=out/(stage+".log")
     print("\n=== "+stage+" ===",flush=True)
@@ -170,11 +209,17 @@ def main():
                 ROOT/"surgery"/"anchored_weekly_solver.py",
                 ROOT/"surgery"/"response_grid.py")})
     file=args.out/"finalization_contract.json"
-    if file.exists() and read(file)!=contract:
-        raise ValueError("Frozen inputs or implementation changed; choose NEW --out")
-    file.write_text(json.dumps(contract,indent=2,sort_keys=True))
     seed_dir=args.out/"seed_comparison"
     result_file=seed_dir/"seed_comparison.json"
+    behavior_result=args.out/"behavioral"/"behavior_summary.json"
+    if file.exists():
+        contract=reconcile_contract(
+            read(file),contract,args.out/"explicit_five_seeds.log",
+            seed_result_exists=result_file.exists(),
+            behavior_result_exists=behavior_result.exists())
+    temp=file.with_suffix(".tmp")
+    temp.write_text(json.dumps(contract,indent=2,sort_keys=True))
+    temp.replace(file)
     if not result_file.exists():
         invoke("explicit_five_seeds",args.out,[
             sys.executable,"-u","-m","pilot.seed_compare_policies",

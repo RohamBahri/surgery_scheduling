@@ -126,10 +126,14 @@ def check_seed0_archive(cells,folder,method,common,tolerance=1e-6):
     archive={r["component"]:r for r in rows
              if r["method"]==method and r["complete"]}
     keys=sorted(set(common)&set(archive))
-    deviations={key:cells[0]["cost"][key]-float(archive[key]["cost"])
+    # Caller supplies cells[0, policy], already a single-seed record.
+    # It has keys "cost", "certified" and "assignment"; indexing cells[0]
+    # erroneously treated that record as the outer (seed, policy) dictionary.
+    deviations={key:cells["cost"][key]-float(archive[key]["cost"])
                 for key in keys}
     changed={k:v for k,v in deviations.items() if abs(v)>tolerance}
-    return dict(verified_components=len(keys),changed_cost_components=len(changed),
+    return dict(verified_components=len(keys),missing_archived_components=len(set(common)-set(keys)),
+                changed_cost_components=len(changed),
                 max_abs_cost_difference=max((abs(v) for v in deviations.values()),default=0.),
                 examples=list(changed.items())[:8])
 
