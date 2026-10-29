@@ -51,7 +51,7 @@ def _model(week, seconds, threads):
 def conservation_certificate(week, duration):
     """Sufficient certificate: all slots forced open, original attains convex LB.
 
-    With zero turnover, W=sum_i d_i regardless of the number of used slots;
+    With all K slots forced open, W=sum_i d_i+turnover*(n-K);
     sum_j max(CAPACITY-L_j,0)+OVERTIME*max(L_j-CAPACITY,0)
     >= max(K*CAPACITY-W,0)+OVERTIME*max(W-K*CAPACITY,0).
     A feasible original assignment matching the bound is globally optimal.
@@ -60,7 +60,7 @@ def conservation_certificate(week, duration):
     if len(mandatory_slots(week)) != week.k:
         return None
     d = _feasible_duration(week, duration)
-    total = float(d.sum())
+    total = float(d.sum()) + TURNOVER*(week.n-week.k)
     excess = total - CAPACITY * week.k
     lb = max(-excess, 0.) + OVERTIME * max(excess, 0.)
     original = float(evaluate(week, week.original, d)['cost'])
@@ -116,7 +116,7 @@ def _hash_expression(week, x, seed):
 
 
 def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
-               hash_seed=None):
+               hash_seed=None, balance=True):
     """Certify primary cost, minimum squared room loads, then fixed-hash winner.
 
     Uncertified time-limited primary, hash, or uniqueness solves cannot be
@@ -246,31 +246,32 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             return outcome("OPTIMAL_PRIMARY", True, True, True)
 
         m.addConstr(primary <= primary_opt+tol, name="primary_tie_set")
-        # Secondary lexicographic criterion: use convex quadratic load balance,
-        # retaining the original primary optimum within numerical tolerance.
-        # No realized duration is used to select an assignment.
-        import gurobipy as gp
-        balance_started = time.monotonic()
-        room_loads = [gp.quicksum(float(d[i])*x[i,j] for i in cases)
-                      for j,cases in enumerate(by_room)]
-        balance_expr = gp.quicksum(load*load for load in room_loads)
-        m.setObjective(balance_expr, GRB.MINIMIZE)
-        m.Params.TimeLimit = max(.001,seconds-(time.monotonic()-start))
-        m.optimize()
-        balance_seconds = time.monotonic()-balance_started
-        if m.SolCount:
-            selected = _assignment(week,x)
-        if m.Status != GRB.OPTIMAL or not m.SolCount:
-            return outcome("BALANCE_UNRESOLVED",primary_ok=True)
-        balance_complete = True
-        balance_objective = float(m.ObjVal)
-        if evaluate(week,selected,d)["cost"]>primary_opt+tol+1e-6:
-            raise AssertionError("Squared-load stage changed the primary cost")
-        # Tiny numerical allowance for the subsequent hash MIQCP.
-        balance_tol = min(1.,max(.01,1e-8*max(1.,abs(balance_objective))))
-        m.addQConstr(balance_expr <= balance_objective+balance_tol,
-                     name="secondary_tie_set")
-        m.update()
+        if balance:
+            # Secondary lexicographic criterion. The non-balanced diagnostic
+            # skips this stage but still solves both deterministic hash stages.
+            import gurobipy as gp
+            balance_started=time.monotonic()
+            room_loads=[
+                gp.quicksum((float(d[i])+TURNOVER)*x[i,j] for i in cases)
+                -TURNOVER*used[j]
+                for j,cases in enumerate(by_room)]
+            balance_expr=gp.quicksum(load*load for load in room_loads)
+            m.setObjective(balance_expr,GRB.MINIMIZE)
+            m.Params.TimeLimit=max(.001,seconds-(time.monotonic()-start))
+            m.optimize()
+            balance_seconds=time.monotonic()-balance_started
+            if m.SolCount:
+                selected=_assignment(week,x)
+            if m.Status!=GRB.OPTIMAL or not m.SolCount:
+                return outcome("BALANCE_UNRESOLVED",primary_ok=True)
+            balance_complete=True
+            balance_objective=float(m.ObjVal)
+            if evaluate(week,selected,d)["cost"]>primary_opt+tol+1e-6:
+                raise AssertionError("Squared-load stage changed primary cost")
+            balance_tol=min(1.,max(.01,1e-8*max(1.,abs(balance_objective))))
+            m.addQConstr(balance_expr<=balance_objective+balance_tol,
+                         name="secondary_tie_set")
+            m.update()
         for ordinal in (0,1):
             priority = _hash_expression(week,x,seed+ordinal)
             m.setObjective(priority, GRB.MINIMIZE)

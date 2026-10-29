@@ -131,7 +131,7 @@ class PlannerCache:
             d=np.asarray(durations[rows],float)
             keyhash=sha(str(key).encode())
             signature=sha(str(key).encode()+np.ascontiguousarray(d,dtype="<f8").tobytes()+
-                          repr((self.seconds,tie,"zero_turnover_sqload_v1")).encode())
+                          repr((self.seconds,tie,"vf_turnover_v2",float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER))).encode())
             path=dest/(keyhash+".json")
             if path.exists():
                 entry=json.loads(path.read_text())
@@ -564,6 +564,7 @@ def main():
     fingerprint=sha(b"".join(Path(mod.__file__).read_bytes() for mod in
         (sys.modules[__name__],core,weekly_planner,anchored_weekly_solver,vf_features)))
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
+                  turnover=float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
                   vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,
                   cuts=args.cuts,case_radius=args.case_radius,

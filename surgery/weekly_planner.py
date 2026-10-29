@@ -5,6 +5,7 @@ The primary scheduling objective is never contaminated with realized durations.
 """
 from dataclasses import asdict, dataclass
 import math
+import os
 import time
 
 import numpy as np
@@ -12,7 +13,7 @@ import numpy as np
 from .weekly_data import Week
 
 CAPACITY = 480.
-TURNOVER = 0.  # Deliberately exclude between-case changeover time.
+TURNOVER = float(os.environ.get('SURGERY_TURNOVER_MINUTES', '0'))
 OVERTIME = 1.75
 
 
@@ -48,7 +49,9 @@ def loads(week: Week, assignment, durations):
         for wd in days:
             if not any(week.slots[a[i]][0] == wd for i in members):
                 raise ValueError("An observed surgeon-day was emptied")
-    return np.bincount(a, weights=d, minlength=week.k)
+    counts=np.bincount(a,minlength=week.k)
+    return (np.bincount(a,weights=d+TURNOVER,minlength=week.k)
+            -TURNOVER*(counts>0))
 
 
 def evaluate(week: Week, assignment, durations):
@@ -139,7 +142,7 @@ def _model(week, seconds, threads):
 
 
 def _cost(m, x, used, by_room, duration, *, exact, name):
-    """J = 480K - sum(d) + 2.75sum(OT), all staffed rooms included.
+    """J=480K-sum(d)-turnover*n+turnover*used+2.75sum(OT).
 
     MAX oracles require exact actual-duration overtime, enforced by a binary
     disjunction. The negative predicted-cost term automatically tightens its
@@ -151,8 +154,10 @@ def _cost(m, x, used, by_room, duration, *, exact, name):
     d = np.asarray(duration, float)
     overtime = []
     for j, cases in enumerate(by_room):
-        excess = gp.quicksum(float(d[i]) * x[i, j] for i in cases) - CAPACITY
-        ub = max(0., sum(float(d[i]) for i in cases) - CAPACITY)
+        excess=(gp.quicksum((float(d[i])+TURNOVER)*x[i,j] for i in cases)
+                -TURNOVER*used[j]-CAPACITY)
+        ub=max(0.,sum(float(d[i])+TURNOVER for i in cases)
+               -TURNOVER-CAPACITY)
         ot = m.addVar(lb=0., ub=ub, name=f"{name}_overtime_{j}")
         m.addConstr(ot >= excess)
         if exact and ub > 0:
@@ -160,8 +165,9 @@ def _cost(m, x, used, by_room, duration, *, exact, name):
             m.addConstr(ot <= ub * high)
             m.addConstr(ot <= excess + CAPACITY * (1 - high))
         overtime.append(ot)
-    return (CAPACITY * len(by_room) - float(d.sum())
-            + (OVERTIME + 1.) * gp.quicksum(overtime))
+    return (CAPACITY*len(by_room)-float(d.sum())-TURNOVER*len(d)
+            +TURNOVER*used.sum()
+            +(OVERTIME+1.)*gp.quicksum(overtime))
 
 
 def _assignment(week, x):
@@ -220,7 +226,8 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True, balance=Fal
             peak = m.addVar(lb=0., name="max_predicted_room_load")
             for j, cases in enumerate(by_room):
                 total_load = (
-                    gp.quicksum(float(d[i]) * x[i, j] for i in cases)
+                    gp.quicksum((float(d[i])+TURNOVER)*x[i,j] for i in cases)
+                    -TURNOVER*used[j]
                 )
                 m.addConstr(peak >= total_load)
             m.setObjective(peak, GRB.MINIMIZE)

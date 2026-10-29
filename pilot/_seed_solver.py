@@ -20,9 +20,10 @@ from pilot._joint_vf_engine import save
 
 
 def explicit_job(job):
-    key,c,d,seconds,seed=job
+    key,c,d,seconds,seed,balance=job
     from surgery.anchored_weekly_solver import solve_week
-    result=solve_week(c,d,seconds=seconds,threads=1,tie=True,hash_seed=seed)
+    result=solve_week(c,d,seconds=seconds,threads=1,tie=True,
+                      hash_seed=seed,balance=balance)
     z=(list(map(int,result.assignment))
        if result.assignment is not None else list(map(int,c.original)))
     return key,dict(assignment=z,complete=bool(result.complete),
@@ -32,7 +33,7 @@ def explicit_job(job):
                     balance_seconds=float(getattr(result,"balance_seconds",0.)))
 
 
-def run_seed(items,duration,folder,label,seed,cores,seconds):
+def run_seed(items,duration,folder,label,seed,cores,seconds,*,balance=True):
     """Per-component resumability with a duration- and seed-specific signature."""
     cache=folder/"explicit_plans"/("seed"+str(seed))/label
     cache.mkdir(parents=True,exist_ok=True)
@@ -41,7 +42,9 @@ def run_seed(items,duration,folder,label,seed,cores,seconds):
         d=np.ascontiguousarray(np.asarray(duration[rows],float),dtype="<f8")
         signature=hashlib.sha256(
             str(key).encode()+d.tobytes()+
-            repr((float(seconds),int(seed),"tie","zero_turnover_sqload_v1")).encode()).hexdigest()
+            repr((float(seconds),int(seed),"tie",float(
+                __import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
+                bool(balance),"turnover_tie_v2")).encode()).hexdigest()
         path=cache/(hashlib.sha256(str(key).encode()).hexdigest()+".json")
         if path.exists():
             record=json.loads(path.read_text())
@@ -49,7 +52,7 @@ def run_seed(items,duration,folder,label,seed,cores,seconds):
                     record.get("result",{}).get("hash_seed")==seed):
                 answers[key]=record["result"]
                 continue
-        jobs.append(((key,c,d,seconds,seed),path,signature))
+        jobs.append(((key,c,d,seconds,seed,balance),path,signature))
     print(label,"seed",seed,":",len(answers),"cached;",len(jobs),"solves",flush=True)
     def store(reply,path,signature):
         key,data=reply

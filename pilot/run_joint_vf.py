@@ -20,6 +20,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -58,6 +59,8 @@ def parse_args(argv=None):
                    help="Training display saturation threshold (minutes)")
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
+    p.add_argument("--turnover",type=float,default=0.,
+                   help="Per-between-case room time in minutes, 0 or 30")
     p.add_argument("--lambda-vf",type=float,default=LAMBDA_VF,
                    help="Absolute VF L1 coefficient (intercept excluded)")
     p.add_argument("--cores",type=int,default=15)
@@ -82,6 +85,8 @@ def parse_args(argv=None):
     if not a.context.is_file():p.error("Missing private context.pkl: "+str(a.context))
     if not(0<a.alpha<1 and a.h>0 and 0<a.true_alpha<1 and a.true_h>0):
         p.error("Response alphas must be in (0,1); thresholds must be positive")
+    if a.turnover not in (0.,30.):
+        p.error("Supported turnover specifications are 0 and 30 minutes")
     if not(np.isfinite(a.lambda_vf) and a.lambda_vf>=0):
         p.error("lambda-vf must be finite and nonnegative")
     if a.cores<1 or a.plan_seconds<=0 or a.case_steps<1 or a.vf_outers<1 or a.vf_pdca_steps<1 or a.cuts<1 or a.radius<=0:
@@ -93,6 +98,13 @@ def parse_args(argv=None):
         p.error("Hash seeds must be distinct and nonnegative")
     a.context=a.context.resolve()
     a.out=a.out.resolve()
+    os.environ["SURGERY_TURNOVER_MINUTES"]=str(a.turnover)
+    # These modules were imported before parsing, while spawned solver
+    # processes import them anew using the inherited environment setting.
+    from surgery import weekly_planner, anchored_weekly_solver, nonmonotone_learning
+    weekly_planner.TURNOVER=a.turnover
+    anchored_weekly_solver.TURNOVER=a.turnover
+    nonmonotone_learning.TURNOVER=a.turnover
     return a
 
 
@@ -126,6 +138,8 @@ def verified_context(a):
         vf_pdca_steps=a.vf_pdca_steps,cuts=a.cuts,
         case_radius=a.radius,vf_radius=a.radius,
         plan_seconds=a.plan_seconds)
+    if float(contract.get("turnover",0.))!=float(a.turnover):
+        raise ValueError("Turnover setting differs from trained policy")
     bad={k:(contract.get(k),v) for k,v in expected.items()
          if contract.get(k)!=v}
     if bad:raise ValueError("Frozen policy configuration mismatch: "+str(bad)+
