@@ -167,8 +167,8 @@ def verified_context(a):
                   else "primary_optimum")
     if (contract.get("vf_training_tie")!=required_tie or
         contract.get("accuracy_gate")!=a.accuracy_gate or
-        contract.get("accuracy_reference_kind")!="fitted_accuracy_only_display" or
-        contract.get("accuracy_kind")!="displayed_asymmetric"):
+        contract.get("accuracy_reference_kind")!="fitted_display_mae_reference" or
+        contract.get("accuracy_kind")!="displayed_mae"):
         raise ValueError("Contract lacks requested training-tie or displayed-accuracy reference")
     bad={k:(contract.get(k),v) for k,v in expected.items()
          if contract.get(k)!=v}
@@ -179,7 +179,7 @@ def verified_context(a):
         selected.get("vf_features")!="structural" or
         selected.get("link")!=a.link or
         selected.get("training_uses_deployment_ties")!=(a.train_tie=="deployed") or
-        selected.get("accuracy_reference_kind")!="fitted_accuracy_only_display" or
+        selected.get("accuracy_reference_kind")!="fitted_display_mae_reference" or
         selected.get("accuracy_gate")!=a.accuracy_gate or
         selected.get("relaxed_required_days") is not True or
         not np.isclose(selected.get("accuracy_mu",-1),a.accuracy_mu) or
