@@ -4,7 +4,7 @@ This repository contains **one retained learning method**: value-function
 (VF) learning. It learns one shared linear recommendation policy
 from **77 case features and six schedule-independent capacity/eligibility
 features**. A specified hypothetical surgeon response produces reviewed
-durations, and the unchanged Gurobi planner schedules them. All 83 policy
+durations, and a fixed-roster Gurobi planner schedules them. All 83 policy
 coefficients are optimized jointly using direct MM/pDCA of the exact VF
 objective, without a finite schedule-library approximation. The
 case-only response-aware CASE model is retained only as an initializer and
@@ -45,9 +45,9 @@ caffeinate -i python -u -m pilot.run_joint_vf \
   --cores 15 --plan-seconds 300
 ```
 
-This fits CASE as a warm start, learns structural VF jointly, evaluates BOOKED,
-CASE and VF on commonly certified 2013 components, and reports realized training
-cost. It reuses complete checkpoints/cached planner solves where possible.
+This fits CASE as a warm start, learns VF jointly, evaluates BOOKED,
+CASE and VF on commonly proven-optimal 2013 planning instances, reports realized
+training cost, and audits extreme planned and realized room-day loads. It reuses complete checkpoints/cached planner solves where possible.
 Each distinct scientific configuration **must use its own `--out` folder**.
 Old context.pkl is input data only; the training, planning, and tie caches in
 the new folder must be generated afresh. The new audit outputs
@@ -76,7 +76,7 @@ Default frozen scientific configuration:
 ```bash
 caffeinate -i python -u -m pilot.run_joint_vf \
   --stage all --alpha 0.5 --h 20 --link saturating \
-  --out artifacts/structural_vf_a50_h20 --cores 15
+  --out artifacts/vf_direct_a50_h20 --cores 15 --plan-seconds 300
 ```
 
 To change numerical iteration budgets or the VF penalty without introducing
@@ -89,7 +89,7 @@ using the repeatedly examined 2013 outcomes.
 
 All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
 
-- `all`: train, evaluate, and compute realized training cost.
+- `all`: train, evaluate, compute realized training cost, and run operational audit.
 - `train`: train the joint VF policy only.
 - `evaluate`: evaluate frozen BOOKED, CASE and VF on 2013, then report.
 - `probe`: realized training cost for frozen BOOKED and VF.
@@ -102,9 +102,11 @@ All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
   0,1,2,3,4; common certified cases and calendar-week paired bootstrap. Outputs
   `seed_robustness.json`. Other seeds: `--seeds 0 1 2`.
 - `audit`: audit BOOKED, CASE and VF test plans for peak load concentration.
-  Only flagged instances (default >720 planned or realized minutes) trigger an
-  independent minimum-feasible-peak MILP; the report distinguishes confirmed
-  avoidable concentration, capacity shortfalls, and solver-unresolved cases.
+  Only flagged instances (default >720 planned or realized minutes) trigger
+  independent minimum-feasible-peak MILPs under reviewed durations (prospective
+  comparison) and, separately, observed durations (hindsight only). The report
+  distinguishes confirmed avoidable concentration, capacity shortfalls,
+  eligibility bottlenecks, and unresolved optimization gaps.
   `all` runs this audit automatically. Use `--audit-seconds 120` and
   `--audit-threshold 720` to adjust the audit.
 - `stress`: replay **the same frozen displayed advice**, but apply one
@@ -112,14 +114,14 @@ All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
   Configured by `--true-alpha`, `--true-h`, `--true-link`. Outputs
   `stress_<link>_a<alpha>_h<h>.json`.
 
-For example, on an existing frozen structural result folder:
+For example, on a completed new direct-VF result folder:
 
 ```bash
-python -u -m pilot.run_joint_vf --stage replay --out artifacts/vf_structural
-python -u -m pilot.run_joint_vf --stage seeds --out artifacts/vf_structural \
-  --seeds 0 1 2 3 4 --cores 15
-python -u -m pilot.run_joint_vf --stage stress --out artifacts/vf_structural \
-  --true-alpha 0.5 --true-h 20 --true-link nonmonotone
+python -u -m pilot.run_joint_vf --stage replay --out artifacts/vf_direct_no_turnover
+python -u -m pilot.run_joint_vf --stage seeds --out artifacts/vf_direct_no_turnover \
+  --seeds 0 1 2 3 4 --cores 15 --plan-seconds 300
+python -u -m pilot.run_joint_vf --stage stress --out artifacts/vf_direct_no_turnover \
+  --true-alpha 0.5 --true-h 20 --true-link nonmonotone --plan-seconds 300
 ```
 
 **Do not delete or overwrite old local artifact directories.** The earlier
@@ -141,8 +143,9 @@ keeping redundant executable study drivers on the current branch.
   training-fitted normalization.
 - `surgery/nonmonotone_learning.py`: response/DC compiler and direct
   MM/pDCA with gap-aware exact-VF acceptance (no persistent libraries).
-- `surgery/anchored_weekly_solver.py`, `weekly_planner.py`,
-  `weekly_data.py`, `data.py`: unchanged planner and cohort logic.
+- `surgery/anchored_weekly_solver.py`, `weekly_planner.py`: zero-turnover,
+  squared-load secondary selection and fixed-roster assignment model.
+- `surgery/weekly_data.py`, `surgery/data.py`: unchanged historical cohort logic.
 - `surgery/response_grid.py`: application of alternative true responses to
   frozen displays, with no re-canonicalization.
 
