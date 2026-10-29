@@ -762,7 +762,14 @@ def mm_vf(items, booked, X, response_map, actual, *,
         row=dict(outer=outer+1,majorizer_before=before,
                  majorizer_after=after,majorizer_decrease=float(decrease),
                  certified_planner_gap=gap,uncertified_planner_instances=int(unresolved),
-                 guaranteed_exact_vf_decrease_lower_bound=float(decrease-gap),
+                 guaranteed_penalized_objective_decrease_lower_bound=
+                    float(decrease-gap),
+                 # Without the penalty this also certifies exact VF descent.
+                 # With mu>0 it DOES NOT certify descent of unpenalized VF.
+                 guaranteed_exact_vf_decrease_lower_bound=(
+                    float(decrease-gap) if accuracy_mu==0. else None),
+                 objective_kind=("exact_VF" if accuracy_mu==0.
+                                 else "exact_VF_plus_mu_displayed_MAE"),
                  accepted=accepted,
                  displayed_accuracy_before=displayed_accuracy(theta),
                  displayed_accuracy_trial=trial_accuracy,
