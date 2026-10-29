@@ -69,3 +69,77 @@ def test_relaxed_retention_allows_empty_observed_day(monkeypatch):
         assert anchored.conservation_certificate(wk,wk.booked) is None
     with pytest.raises(ValueError,match="emptied"):
         weekly.loads(wk,[0,0],wk.booked)
+
+
+@pytest.mark.parametrize("link",["saturating","nonmonotone"])
+def test_display_only_objective_exactly_matches_pre_response_accuracy(link):
+    b=np.array([8.,100.,190.,275.])
+    actual=np.array([20.,133.,150.,298.])
+    X=np.array([[1.,-2.],[1.,1.],[1.,0.],[1.,.5]])
+    c=ResponseDC(b,.8,30.,180.,1.,link=link)
+    obj=DCObjective(b,X,np.zeros(4),c,mode="DISPLAY",
+        actual=actual,components=2,lam=0.,penalize=[0.,1.])
+    for w in [np.array([0.,0.]),np.array([22.,15.]),
+              np.array([-50.,85.]),np.array([180.,-160.])]:
+        display=b+c.display(X@w)
+        error=actual-display
+        expected=(1.75*np.maximum(error,0.)+
+                  np.maximum(-error,0.)).sum()/2
+        assert obj.value(w)==pytest.approx(expected,abs=1e-7)
+
+
+def test_display_reference_fit_uses_same_features_and_improves_accuracy(
+        tmp_path,monkeypatch):
+    from pilot._joint_vf_engine import displayed_reference_fit
+    from surgery.weekly_data import Week
+    b=np.array([120.,110.]);actual=np.array([150.,95.])
+    X=np.array([[1.,1.,.5],[1.,-1.,-.5]])
+    c=ResponseDC(b,.8,30.,180.,1.,link="saturating")
+    week=Week("TGH","2012-01-02",((0,"OR1"),(0,"OR2")),
+        np.array([11,12]),("S1",),np.array([0,0]),
+        np.array([0,1]),((0,1),),((0,),),
+        b,actual,()).validate()
+    start=np.zeros(3)
+    def fake_pdca(objective,start,**kwargs):
+        assert objective.mode=="DISPLAY"
+        assert objective.X.shape[1]==3
+        return dict(weights=start.tolist(),status="NO_VERIFIED_DESCENT",
+                    iterations=[])
+    monkeypatch.setattr("pilot._joint_vf_engine.pdca",fake_pdca)
+    w,score=displayed_reference_fit(
+        dict(booked=b,actual=actual),[("k",week,np.arange(2))],
+        X,c,start,tmp_path,4,"gurobi",100.)
+    assert np.array_equal(w,start)
+    assert score==pytest.approx((1.75*30+15)/1.)
+    assert (tmp_path/"display_accuracy_reference.json").exists()
+
+
+def test_primary_training_and_accuracy_gate_defaults(tmp_path):
+    from pilot.run_joint_vf import parse_args
+    context=tmp_path/"context.pkl"
+    context.write_bytes(b"checkpoint")
+    a=parse_args(["--context",str(context)])
+    assert a.turnover==0.
+    assert a.train_tie=="primary"
+    assert a.accuracy_gate=="off"
+    assert a.accuracy_budget==pytest.approx(.05)
+
+
+def test_display_only_pdca_exact_qp_if_licensed():
+    gp=pytest.importorskip("gurobipy")
+    try:
+        m=gp.Model();m.Params.OutputFlag=0
+        q=m.addVar();m.setObjective(q*q);m.optimize();m.dispose()
+    except gp.GurobiError:
+        pytest.skip("No Gurobi license")
+    from surgery.nonmonotone_learning import pdca
+    b=np.array([100.,120.]);actual=np.array([125.,110.])
+    X=np.array([[1.,1.],[1.,-1.]])
+    c=ResponseDC(b,.8,30.,180.,1.,link="saturating")
+    obj=DCObjective(b,X,np.zeros(2),c,mode="DISPLAY",
+                    actual=actual,components=1,lam=0.)
+    before=obj.value(np.zeros(2))
+    run=pdca(obj,np.zeros(2),outer=5,radius=100.,backend="gurobi")
+    assert np.isfinite(run["objective"])
+    assert run["objective"]<=before+1e-7
+    assert all(z["inner_certified"] for z in run["iterations"])
