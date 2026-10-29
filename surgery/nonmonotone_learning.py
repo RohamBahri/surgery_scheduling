@@ -175,7 +175,7 @@ class DCObjective:
 
     def __init__(self, booked, X, base, response_map, *,
                  mode, actual, components, rooms=None, lam=0.,
-                 penalize=None):
+                 penalize=None,accuracy_mu=0.):
         self.booked=np.asarray(booked,float)
         self.X=np.asarray(X,float)
         self.base=np.asarray(base,float)
@@ -194,6 +194,11 @@ class DCObjective:
         if mode=="VF" and (rooms is None or rooms.shape[1]!=self.n):
             raise ValueError("VF requires fixed physical-room assignments")
         self.lam=float(lam)
+        self.accuracy_mu=float(accuracy_mu)
+        if not np.isfinite(self.accuracy_mu) or self.accuracy_mu<0:
+            raise ValueError("Accuracy multiplier must be nonnegative")
+        if self.mode!="VF" and self.accuracy_mu:
+            raise ValueError("Displayed-accuracy penalty is VF-only")
         self.penalize=np.ones(self.p) if penalize is None else np.asarray(penalize,float)
         if self.penalize.shape!=(self.p,):
             raise ValueError("Penalty mask length mismatch")
@@ -201,7 +206,8 @@ class DCObjective:
     def replace_rooms(self,S):
         return DCObjective(self.booked,self.X,self.base,self.map,mode=self.mode,
                            actual=self.actual,components=self.components,rooms=S,
-                           lam=self.lam,penalize=self.penalize)
+                           lam=self.lam,penalize=self.penalize,
+                           accuracy_mu=self.accuracy_mu)
 
     def parts(self,w):
         w=np.asarray(w,float)
@@ -233,6 +239,19 @@ class DCObjective:
             dp=grad_P*Pp
             dn=grad_N*Np
             hraw=KAPPA*(Pp+Np)
+        if self.accuracy_mu:
+            # Accuracy of the DISPLAYED recommendation b+correction/alpha,
+            # not the implemented, attenuated surgeon booking b+correction.
+            a=self.map.alpha
+            showP,showN=P/a,N/a
+            display_A=np.maximum(e+showN,showP)
+            display_choose=np.where(showP>e+showN,1.,
+                              np.where(showP<e+showN,0.,.5))
+            G+=self.accuracy_mu*(KAPPA*display_A.sum()-C_UNDER*e.sum())
+            H+=self.accuracy_mu*(C_OVER*showP.sum()+C_UNDER*showN.sum())
+            dp+=self.accuracy_mu*KAPPA*display_choose*Pp/a
+            dn+=self.accuracy_mu*KAPPA*(1.-display_choose)*Np/a
+            hraw+=self.accuracy_mu*(C_OVER*Pp+C_UNDER*Np)/a
         G/=self.components
         H/=self.components
         dg=self.X.T@(dp+dn)/self.components
@@ -376,6 +395,11 @@ class ConvexEpigraphQP:
         e=objective.actual-objective.booked
         m.addConstr(A >= P,name="case_P")
         m.addConstr(A >= e+N,name="case_e_plus_N")
+        if objective.accuracy_mu:
+            a=objective.map.alpha
+            B=m.addMVar(n,lb=-GRB.INFINITY,name="display_accuracy_envelope")
+            m.addConstr(B>=P/a,name="display_accuracy_plus")
+            m.addConstr(B>=e+N/a,name="display_accuracy_minus")
         if objective.mode=="VF":
             S=objective.rooms
             counts=np.diff(S.indptr)
@@ -396,6 +420,9 @@ class ConvexEpigraphQP:
             +objective.lam*(objective.penalize@absw)
         if objective.mode=="VF":
             self.base_G+=(C_OVER*O.sum()+C_UNDER*I.sum())/objective.components
+        if objective.accuracy_mu:
+            self.base_G+=objective.accuracy_mu*(
+                KAPPA*B.sum()-C_UNDER*float(e.sum()))/objective.components
 
     def solve(self, center, gradient, prox):
         center=np.asarray(center,float)
@@ -579,7 +606,8 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 def mm_vf(items, booked, X, response_map, actual, *,
           start, root, lam, initial_libraries=None, iterations=30, radius=100.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
-          solve_plans=None, penalize=None):
+          solve_plans=None, penalize=None, accuracy_mu=0.,
+          accuracy_reference=None, accuracy_budget=.05):
     """Direct MM/pDCA for EXACT VF; no finite-library approximation.
 
     Each iteration solves the planner at current reviewed durations and uses
@@ -603,21 +631,42 @@ def mm_vf(items, booked, X, response_map, actual, *,
         raise ValueError("Invalid VF penalty weights")
     if solve_plans is None:
         raise ValueError("Planner callback required")
+    if not(np.isfinite(accuracy_mu) and accuracy_mu>=0 and
+           np.isfinite(accuracy_budget) and accuracy_budget>=0):
+        raise ValueError("Invalid displayed-accuracy budget or multiplier")
+    def displayed_accuracy(w):
+        displayed=booked+response_map.display(X@np.asarray(w,float))
+        error=actual-displayed
+        return float((C_OVER*np.maximum(error,0.)
+                     +C_UNDER*np.maximum(-error,0.)).sum()/len(items))
+    initial_accuracy=displayed_accuracy(theta)
+    if accuracy_reference is None:
+        accuracy_reference=initial_accuracy
+    accuracy_reference=float(accuracy_reference)
+    if not np.isfinite(accuracy_reference) or accuracy_reference<=0:
+        raise ValueError("Missing positive displayed-accuracy reference")
+    accuracy_limit=accuracy_reference*(1.+accuracy_budget)
+    if initial_accuracy>accuracy_limit+1e-7:
+        raise ValueError("Starting policy violates displayed-accuracy budget")
     root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
     status=root/"vf_direct_progress.json"
+    spec=dict(policy_spec="joint_vf_accuracy_display_v1",
+              accuracy_mu=float(accuracy_mu),
+              accuracy_reference=float(accuracy_reference),
+              accuracy_budget=float(accuracy_budget),
+              accuracy_limit=float(accuracy_limit))
     if status.exists():
         state=json.loads(status.read_text())
-        if state.get("policy_spec")!="joint_vf_direct_zero_turnover_v1":
-            raise ValueError("Incompatible direct-VF checkpoint; use new directory")
+        if any(state.get(k)!=v for k,v in spec.items()):
+            raise ValueError("Incompatible accuracy-VF checkpoint; use new directory")
         theta=np.asarray(state["theta"],float)
         if theta.shape!=start.shape:
             raise ValueError("Direct VF checkpoint dimension mismatch")
     else:
-        state=dict(theta=theta.tolist(),history=[],
-                   policy_spec="joint_vf_direct_zero_turnover_v1",
-                   status="RUNNING")
+        state=dict(theta=theta.tolist(),history=[],**spec,status="RUNNING")
     if state.get("status") in ("NO_CONFIRMED_IMPROVEMENT",
+                               "ACCURACY_BUDGET_BLOCKED",
                                "RELATIVE_IMPROVEMENT","OUTER_ITERATION_CAP"):
         print("VF: reusing completed direct-MM checkpoint",flush=True)
         return state
@@ -633,6 +682,11 @@ def mm_vf(items, booked, X, response_map, actual, *,
             candidate=candidates.get(key)
             if candidate is None or candidate.get("assignment") is None:
                 raise ValueError("Direct VF requires a feasible planner schedule")
+            if not candidate.get("complete",False):
+                raise RuntimeError(
+                    f"VF training needs certified deployed squared-load/hash "
+                    f"schedule for {key}: {candidate.get('status')}; "
+                    "increase --plan-seconds and use a new output directory")
             z=list(map(int,candidate["assignment"]))
             from surgery.weekly_planner import loads
             loads(c,z,d[rows])
@@ -646,7 +700,8 @@ def mm_vf(items, booked, X, response_map, actual, *,
         S,_=room_matrix(items,selected,len(booked))
         objective=DCObjective(booked,X,np.zeros_like(booked),response_map,
                               mode="VF",actual=actual,components=len(items),
-                              rooms=S,lam=lam,penalize=penalty)
+                              rooms=S,lam=lam,penalize=penalty,
+                              accuracy_mu=accuracy_mu)
         before=float(objective.value(theta))
         gap=float(np.sum(gaps)/len(items))
         fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
@@ -655,12 +710,19 @@ def mm_vf(items, booked, X, response_map, actual, *,
         after=float(objective.value(trial))
         decrease=before-after
         tolerance=1e-8*max(1.,abs(before))
-        accepted=bool(decrease>gap+tolerance)
+        trial_accuracy=displayed_accuracy(trial)
+        feasible=bool(trial_accuracy<=accuracy_limit+1e-7)
+        accepted=bool(decrease>gap+tolerance and feasible)
         row=dict(outer=outer+1,majorizer_before=before,
                  majorizer_after=after,majorizer_decrease=float(decrease),
                  certified_planner_gap=gap,uncertified_planner_instances=int(unresolved),
                  guaranteed_exact_vf_decrease_lower_bound=float(decrease-gap),
-                 accepted=accepted,pdca_status=fitted["status"],
+                 accepted=accepted,
+                 displayed_accuracy_before=displayed_accuracy(theta),
+                 displayed_accuracy_trial=trial_accuracy,
+                 displayed_accuracy_limit=accuracy_limit,
+                 accuracy_feasible=feasible,
+                 pdca_status=fitted["status"],
                  inner=fitted["iterations"],schedules=len(selected),
                  elapsed_seconds=round(time.perf_counter()-tick,3))
         state["history"].append(row)
@@ -675,7 +737,8 @@ def mm_vf(items, booked, X, response_map, actual, *,
               f"elapsed={row['elapsed_seconds']:.1f}s; "
               f"total={time.perf_counter()-run_started:.1f}s",flush=True)
         if not accepted:
-            state["status"]="NO_CONFIRMED_IMPROVEMENT"
+            state["status"]=("ACCURACY_BUDGET_BLOCKED"
+                             if not feasible else "NO_CONFIRMED_IMPROVEMENT")
             _save(status,state)
             break
         if decrease/max(1.,abs(before))<1e-6:
