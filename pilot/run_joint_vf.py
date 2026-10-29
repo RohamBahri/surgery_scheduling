@@ -28,6 +28,7 @@ import numpy as np
 
 from pilot import _joint_vf_engine as engine
 from pilot._seed_solver import run_seed
+from pilot.operational_audit import audit_policy
 from surgery.nonmonotone_learning import ResponseDC
 from surgery.response_grid import Scenario, implemented_from_display
 from surgery.weekly_planner import evaluate
@@ -48,7 +49,7 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage",choices=("all","train","evaluate","probe",
-                    "replay","seeds","stress"),default="all")
+                    "replay","seeds","stress","audit"),default="all")
     p.add_argument("--context",type=Path,default=DEFAULT_CONTEXT)
     p.add_argument("--out",type=Path,default=Path("artifacts/vf_direct_no_turnover"))
     p.add_argument("--alpha",type=float,default=.8,
@@ -67,6 +68,10 @@ def parse_args(argv=None):
     p.add_argument("--cuts",type=int,default=80)
     p.add_argument("--radius",type=float,default=100.)
     p.add_argument("--seeds",type=int,nargs="+",default=[0,1,2,3,4])
+    p.add_argument("--audit-seconds",type=float,default=60.,
+                   help="Time limit for each independent minimum-peak audit MILP")
+    p.add_argument("--audit-threshold",type=float,default=720.,
+                   help="Audit instances whose predicted or realized peak exceeds this value")
     p.add_argument("--true-alpha",type=float,default=.8,
                    help="Assumed TRUE adoption for frozen-display stress only")
     p.add_argument("--true-h",type=float,default=30.,
@@ -81,6 +86,9 @@ def parse_args(argv=None):
         p.error("lambda-vf must be finite and nonnegative")
     if a.cores<1 or a.plan_seconds<=0 or a.case_steps<1 or a.vf_outers<1 or a.vf_pdca_steps<1 or a.cuts<1 or a.radius<=0:
         p.error("Invalid compute budget")
+    if not (np.isfinite(a.audit_seconds) and a.audit_seconds>0
+            and np.isfinite(a.audit_threshold) and a.audit_threshold>0):
+        p.error("Audit seconds and threshold must be positive and finite")
     if len(set(a.seeds))!=len(a.seeds) or any(s<0 for s in a.seeds):
         p.error("Hash seeds must be distinct and nonnegative")
     a.context=a.context.resolve()
@@ -291,6 +299,29 @@ def audit_stress(a,ctx):
     return output
 
 
+def audit_operational(a,ctx):
+    """Audit avoidable peak concentration against an independently solved MILP."""
+    _,_,ds=frozen_test_durations(a,ctx)
+    cache=engine.PlannerCache(a.out,a.cores,a.plan_seconds)
+    results={}
+    for method in ("BOOKED","CASE","VF"):
+        d=ds[method]
+        plans=cache.solve(ctx["eval"],d,"eval_"+method,tie=True)
+        result=audit_policy(ctx["eval"],d,plans,
+            a.out/"operational_audit_cache"/method,
+            seconds=a.audit_seconds,threshold=a.audit_threshold)
+        results[method]=result
+        print(method,"audit:",result["flagged_instances"],"flagged;",
+              result["confirmed_avoidable"],"avoidable;",
+              result["forced_over_capacity_proven"],"forced",flush=True)
+        engine.save(a.out/("operational_audit_"+method+".json"),result)
+    summary={m:{k:v for k,v in result.items() if k!="entries"}
+             for m,result in results.items()}
+    engine.save(a.out/"operational_audit_summary.json",summary)
+    print(json.dumps(summary,indent=2))
+    return summary
+
+
 def main(argv=None):
     a=parse_args(argv)
     if a.stage in ("all","train"):
@@ -307,6 +338,9 @@ def main(argv=None):
         run_engine(a,"report")
     if a.stage in ("all","probe"):
         run_engine(a,"probe")
+    if a.stage in ("all","audit"):
+        ctx,_=verified_context(a)
+        audit_operational(a,ctx)
     if a.stage in ("replay","seeds","stress"):
         ctx,_=verified_context(a)
         if a.stage=="replay":replay_training(a,ctx)
