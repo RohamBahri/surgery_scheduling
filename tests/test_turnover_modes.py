@@ -51,11 +51,13 @@ def test_turnover_switch_changes_all_cost_identities(monkeypatch):
 def test_turnover_cli_and_hash_only_stage(tmp_path,monkeypatch):
     context=tmp_path/"context.pkl"
     context.write_bytes(b"stub")
-    with monkeypatch.context():
+    with monkeypatch.context() as m:
+        m.setenv("SURGERY_TURNOVER_MINUTES","0")
+        for module in (wp,nl,anchor):
+            m.setattr(module,"TURNOVER",module.TURNOVER)
         a=parse_args(["--context",str(context),"--stage","hash-only",
                       "--turnover","0"])
         assert a.stage=="hash-only" and a.turnover==0.
-    with monkeypatch.context() as m:
         a=parse_args(["--context",str(context),"--stage","train",
                       "--turnover","30"])
         assert a.turnover==30.
