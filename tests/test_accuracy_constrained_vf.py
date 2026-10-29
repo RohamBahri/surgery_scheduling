@@ -26,7 +26,7 @@ def test_displayed_accuracy_loss_exactly_matches_dc_difference(link):
               np.array([-160.,170.]),np.array([30.,20.])]:
         display=b+response.display(X@w)
         err=y-display
-        expected=3.*(1.75*np.maximum(err,0.)+np.maximum(-err,0.)).sum()/2
+        expected=3.*np.abs(err).sum()/2
         assert fortified.value(w)-plain.value(w)==pytest.approx(expected,abs=1e-7)
 
 
@@ -83,8 +83,7 @@ def test_display_only_objective_exactly_matches_pre_response_accuracy(link):
               np.array([-50.,85.]),np.array([180.,-160.])]:
         display=b+c.display(X@w)
         error=actual-display
-        expected=(1.75*np.maximum(error,0.)+
-                  np.maximum(-error,0.)).sum()/2
+        expected=np.abs(error).sum()/2
         assert obj.value(w)==pytest.approx(expected,abs=1e-7)
 
 
@@ -110,7 +109,7 @@ def test_display_reference_fit_uses_same_features_and_improves_accuracy(
         dict(booked=b,actual=actual),[("k",week,np.arange(2))],
         X,c,start,tmp_path,4,"gurobi",100.)
     assert np.array_equal(w,start)
-    assert score==pytest.approx((1.75*30+15)/1.)
+    assert score==pytest.approx((30+15)/1.)
     assert (tmp_path/"display_accuracy_reference.json").exists()
 
 
