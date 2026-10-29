@@ -288,6 +288,51 @@ def five_features(ctx,items,cache,stage,scaler=None,plans=None,
     return scaled,params,None
 
 
+
+def displayed_reference_fit(data, items, X, response_map, start, folder,
+                            steps, backend, radius):
+    """Fit prediction-only DISPLAYED durations with the VF feature class.
+
+    This benchmark minimizes the asymmetric pre-response duration error
+    (no scheduling value, no fitted post-response accuracy target).
+    It is not a globally optimal nonconvex predictor; the fitted reference
+    and its training objective are explicitly recorded.
+    """
+    path=folder/"display_accuracy_reference.json"
+    if path.exists():
+        record=json.loads(path.read_text())
+        w=np.asarray(record["weights"],float)
+        if w.shape!=(X.shape[1],):
+            raise ValueError("Displayed reference checkpoint has wrong dimension")
+        return w,float(record["accuracy_per_component"])
+    booked=np.asarray(data["booked"],float)
+    actual=np.asarray(data["actual"],float)
+    objective=DCObjective(booked,X,np.zeros_like(booked),response_map,
+        mode="DISPLAY",actual=actual,components=len(items),
+        lam=0.,penalize=np.r_[0.,np.ones(X.shape[1]-1)])
+    start=np.asarray(start,float)
+    initial=float(objective.value(start))
+    print("DISPLAY reference: fitting accuracy-only advice from CASE warm start",
+          flush=True)
+    result=pdca(objective,start,radius=radius,outer=steps,
+                backend=backend,progress_label="DISPLAY",
+                progress_path=folder/"display_reference_progress.jsonl")
+    candidate=np.asarray(result["weights"],float)
+    achieved=float(objective.value(candidate))
+    if achieved>initial+1e-7:
+        raise AssertionError("Displayed reference worsened its own objective")
+    save(path,dict(
+        reference_kind="fitted_accuracy_only_display",
+        feature_count=int(X.shape[1]),
+        weights=candidate.tolist(),
+        accuracy_per_component=achieved,
+        initial_accuracy_per_component=initial,
+        optimizer_status=result["status"],
+        optimizer_iterations=len(result["iterations"]),
+        globally_optimal=False))
+    return candidate,achieved
+
+
 def work(ctx,root,args):
     train=ctx["train"]
     data=ctx["fit"]
@@ -348,14 +393,14 @@ def work(ctx,root,args):
             objective=DCObjective(b,X,np.zeros_like(b),response_map,
                 mode="VF",actual=actual,components=len(train),rooms=S)
             penalty[1:]*=score_loadings(objective,start,train)[1:]
-        # Accuracy is measured against actual room durations using the
-        # PRE-RESPONSE displayed advice, not the reviewed booking.
-        ref_display=b+response_map.display(case_raw)
-        ref_errors=actual-ref_display
-        accuracy_reference=float((1.75*np.maximum(ref_errors,0.)
-                        +np.maximum(-ref_errors,0.)).sum()/len(train))
+        # Reference minimizes error of the displayed recommendation itself,
+        # with the SAME 83 features as VF; CASE is only its warm start.
+        _,accuracy_reference=displayed_reference_fit(
+            data,train,X,response_map,start,root,args.case_steps,
+            args.backend,args.vf_radius)
         def oracle(items,d,k):
-            return cache.solve(items,d,"vf_outer_"+str(k),tie=True)
+            return cache.solve(items,d,"vf_outer_"+str(k),
+                               tie=(args.train_tie=="deployed"))
         state=mm_vf(train,b,X,response_map,actual,start=start,root=root,
                  lam=vf_lam,
                  iterations=args.vf_outers,radius=args.vf_radius,
@@ -364,6 +409,7 @@ def work(ctx,root,args):
                  accuracy_mu=args.accuracy_mu,
                  accuracy_reference=accuracy_reference,
                  accuracy_budget=args.accuracy_budget,
+                 accuracy_gate=(args.accuracy_gate=="on"),
                  require_complete_deployment=False)
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
@@ -388,11 +434,19 @@ def work(ctx,root,args):
                     actual-b-response_map.display(vf_raw),0.)
                     +np.maximum(b+response_map.display(vf_raw)-actual,0.)
                     ).sum()/len(train)),
-               training_uses_deployment_ties=True,
+               training_uses_deployment_ties=(args.train_tie=="deployed"),
+               train_tie=args.train_tie,accuracy_gate=args.accuracy_gate,
+               accuracy_reference_kind="fitted_accuracy_only_display",
+               accuracy_ratio=float((1.75*np.maximum(
+                    actual-b-response_map.display(vf_raw),0.)
+                    +np.maximum(b+response_map.display(vf_raw)-actual,0.)
+                    ).sum()/len(train)/accuracy_reference),
                training_incomplete_tie_counts=[
                    int(row["uncertified_planner_instances"])
                    for row in state["history"]],
-               relaxed_required_days=True,turnover_minutes=30.,
+               relaxed_required_days=True,
+               turnover_minutes=float(__import__(
+                    "surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
                         vf_raw,H,response_map,args.vf_features)
@@ -589,7 +643,11 @@ def main():
     ap.add_argument("--accuracy-mu",type=float,default=5.,
                     help="Multiplier of displayed recommendation asymmetric loss")
     ap.add_argument("--accuracy-budget",type=float,default=.05,
-                    help="Relative training accuracy degradation permitted vs reference")
+                    help="Relative training accuracy degradation permitted vs fitted display reference")
+    ap.add_argument("--accuracy-gate",choices=("on","off"),default="off",
+                    help="Optional in-iteration hard safeguard; off permits multiplier calibration")
+    ap.add_argument("--train-tie",choices=("primary","deployed"),default="primary",
+                    help="Training MM majorizer schedule; primary is faster")
     ap.add_argument("--vf-features",choices=("structural",),default="structural")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
@@ -619,7 +677,10 @@ def main():
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
                   turnover=float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                   relaxed_required_days=True,
-                  vf_training_tie="squared_load_hash",
+                  vf_training_tie=("squared_load_hash" if args.train_tie=="deployed"
+                                   else "primary_optimum"),
+                  accuracy_gate=args.accuracy_gate,
+                  accuracy_reference_kind="fitted_accuracy_only_display",
                   accuracy_kind="displayed_asymmetric",
                   accuracy_mu=float(args.accuracy_mu),
                   accuracy_budget=float(args.accuracy_budget),
