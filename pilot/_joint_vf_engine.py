@@ -293,7 +293,7 @@ def displayed_reference_fit(data, items, X, response_map, start, folder,
                             steps, backend, radius):
     """Fit prediction-only DISPLAYED durations with the VF feature class.
 
-    This benchmark minimizes the asymmetric pre-response duration error
+    This benchmark minimizes the pre-response absolute duration error
     (no scheduling value, no fitted post-response accuracy target).
     It is not a globally optimal nonconvex predictor; the fitted reference
     and its training objective are explicitly recorded.
@@ -425,22 +425,20 @@ def work(ctx,root,args):
                vf_feature_names=list(feature_names(args.vf_features)),link=args.link,
                cap=args.cap,alpha=args.alpha,h=args.h,
                train_components=len(train),train_cases=len(b),
-               accuracy_kind="displayed_asymmetric",
+               accuracy_kind="displayed_mae",
                accuracy_mu=float(args.accuracy_mu),
                accuracy_budget=float(args.accuracy_budget),
                accuracy_reference=float(accuracy_reference),
                accuracy_limit=float(accuracy_reference*(1+args.accuracy_budget)),
-               accuracy_achieved=float((1.75*np.maximum(
-                    actual-b-response_map.display(vf_raw),0.)
-                    +np.maximum(b+response_map.display(vf_raw)-actual,0.)
-                    ).sum()/len(train)),
+               accuracy_achieved=float(np.abs(
+                   actual-b-response_map.display(vf_raw)
+                   ).sum()/len(train)),
                training_uses_deployment_ties=(args.train_tie=="deployed"),
                train_tie=args.train_tie,accuracy_gate=args.accuracy_gate,
-               accuracy_reference_kind="fitted_accuracy_only_display",
-               accuracy_ratio=float((1.75*np.maximum(
-                    actual-b-response_map.display(vf_raw),0.)
-                    +np.maximum(b+response_map.display(vf_raw)-actual,0.)
-                    ).sum()/len(train)/accuracy_reference),
+               accuracy_reference_kind="fitted_display_mae_reference",
+               accuracy_ratio=float(np.abs(
+                   actual-b-response_map.display(vf_raw)
+                   ).sum()/len(train)/accuracy_reference),
                training_incomplete_tie_counts=[
                    int(row["uncertified_planner_instances"])
                    for row in state["history"]],
@@ -680,8 +678,8 @@ def main():
                   vf_training_tie=("squared_load_hash" if args.train_tie=="deployed"
                                    else "primary_optimum"),
                   accuracy_gate=args.accuracy_gate,
-                  accuracy_reference_kind="fitted_accuracy_only_display",
-                  accuracy_kind="displayed_asymmetric",
+                  accuracy_reference_kind="fitted_display_mae_reference",
+                  accuracy_kind="displayed_mae",
                   accuracy_mu=float(args.accuracy_mu),
                   accuracy_budget=float(args.accuracy_budget),
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
