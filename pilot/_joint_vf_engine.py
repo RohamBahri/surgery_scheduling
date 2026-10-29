@@ -131,7 +131,11 @@ class PlannerCache:
             d=np.asarray(durations[rows],float)
             keyhash=sha(str(key).encode())
             signature=sha(str(key).encode()+np.ascontiguousarray(d,dtype="<f8").tobytes()+
-                          repr((self.seconds,tie,"vf_turnover_v2",float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER))).encode())
+                          repr((self.seconds,tie,"accuracy_relaxed_retention_v1",
+                                float(__import__("surgery.weekly_planner",
+                                fromlist=["TURNOVER"]).TURNOVER),
+                                bool(__import__("surgery.weekly_planner",
+                                fromlist=["RELAX_REQUIRED_DAYS"]).RELAX_REQUIRED_DAYS))).encode())
             path=dest/(keyhash+".json")
             if path.exists():
                 entry=json.loads(path.read_text())
@@ -344,13 +348,22 @@ def work(ctx,root,args):
             objective=DCObjective(b,X,np.zeros_like(b),response_map,
                 mode="VF",actual=actual,components=len(train),rooms=S)
             penalty[1:]*=score_loadings(objective,start,train)[1:]
+        # Accuracy is measured against actual room durations using the
+        # PRE-RESPONSE displayed advice, not the reviewed booking.
+        ref_display=b+response_map.display(case_raw)
+        ref_errors=actual-ref_display
+        accuracy_reference=float((1.75*np.maximum(ref_errors,0.)
+                        +np.maximum(-ref_errors,0.)).sum()/len(train))
         def oracle(items,d,k):
-            return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
+            return cache.solve(items,d,"vf_outer_"+str(k),tie=True)
         state=mm_vf(train,b,X,response_map,actual,start=start,root=root,
                  lam=vf_lam,
                  iterations=args.vf_outers,radius=args.vf_radius,
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
-                 backend=args.backend,solve_plans=oracle,penalize=penalty)
+                 backend=args.backend,solve_plans=oracle,penalize=penalty,
+                 accuracy_mu=args.accuracy_mu,
+                 accuracy_reference=accuracy_reference,
+                 accuracy_budget=args.accuracy_budget)
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
         save(root/"selected_policy.json",dict(
@@ -365,6 +378,17 @@ def work(ctx,root,args):
                vf_feature_names=list(feature_names(args.vf_features)),link=args.link,
                cap=args.cap,alpha=args.alpha,h=args.h,
                train_components=len(train),train_cases=len(b),
+               accuracy_kind="displayed_asymmetric",
+               accuracy_mu=float(args.accuracy_mu),
+               accuracy_budget=float(args.accuracy_budget),
+               accuracy_reference=float(accuracy_reference),
+               accuracy_limit=float(accuracy_reference*(1+args.accuracy_budget)),
+               accuracy_achieved=float((1.75*np.maximum(
+                    actual-b-response_map.display(vf_raw),0.)
+                    +np.maximum(b+response_map.display(vf_raw)-actual,0.)
+                    ).sum()/len(train)),
+               training_uses_deployment_ties=True,
+               relaxed_required_days=True,turnover_minutes=30.,
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
                         vf_raw,H,response_map,args.vf_features)
@@ -540,6 +564,10 @@ def main():
     ap.add_argument("--vf-lambda-absolute",type=float,default=None)
     ap.add_argument("--vf-plan-penalty",type=float,default=1.)
     ap.add_argument("--vf-loading",choices=("uniform","score"),default="uniform")
+    ap.add_argument("--accuracy-mu",type=float,default=5.,
+                    help="Multiplier of displayed recommendation asymmetric loss")
+    ap.add_argument("--accuracy-budget",type=float,default=.05,
+                    help="Relative training accuracy degradation permitted vs reference")
     ap.add_argument("--vf-features",choices=("structural",),default="structural")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
@@ -550,6 +578,9 @@ def main():
     if not (np.isfinite(args.vf_lambda_scale) and args.vf_lambda_scale>0.
             and np.isfinite(args.vf_plan_penalty) and args.vf_plan_penalty>0.):
         ap.error("VF penalty multipliers must be positive and finite")
+    if (not np.isfinite(args.accuracy_mu) or args.accuracy_mu<0 or
+        not np.isfinite(args.accuracy_budget) or args.accuracy_budget<0):
+        raise ValueError("Accuracy multiplier/budget must be finite and nonnegative")
     if args.vf_lambda_absolute is not None and (
             not np.isfinite(args.vf_lambda_absolute) or args.vf_lambda_absolute<0.):
         ap.error("Absolute VF lambda must be finite and nonnegative")
@@ -565,6 +596,11 @@ def main():
         (sys.modules[__name__],core,weekly_planner,anchored_weekly_solver,vf_features)))
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
                   turnover=float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
+                  relaxed_required_days=True,
+                  vf_training_tie="squared_load_hash",
+                  accuracy_kind="displayed_asymmetric",
+                  accuracy_mu=float(args.accuracy_mu),
+                  accuracy_budget=float(args.accuracy_budget),
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
                   vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,
                   cuts=args.cuts,case_radius=args.case_radius,

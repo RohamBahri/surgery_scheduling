@@ -61,6 +61,10 @@ def parse_args(argv=None):
                    default="saturating")
     p.add_argument("--turnover",type=float,default=30.,
                    help="Per-between-case room time in minutes, 0 or 30")
+    p.add_argument("--accuracy-mu",type=float,default=5.,
+                   help="Lagrangian multiplier for displayed-advice accuracy")
+    p.add_argument("--accuracy-budget",type=float,default=.05,
+                   help="Relative allowed displayed accuracy loss vs reference")
     p.add_argument("--lambda-vf",type=float,default=LAMBDA_VF,
                    help="Absolute VF L1 coefficient (intercept excluded)")
     p.add_argument("--cores",type=int,default=15)
@@ -87,6 +91,9 @@ def parse_args(argv=None):
         p.error("Response alphas must be in (0,1); thresholds must be positive")
     if a.turnover not in (0.,30.):
         p.error("Supported turnover specifications are 0 and 30 minutes")
+    if not(np.isfinite(a.accuracy_mu) and a.accuracy_mu>=0 and
+           np.isfinite(a.accuracy_budget) and a.accuracy_budget>=0):
+        p.error("Accuracy multiplier/budget must be finite nonnegative")
     if not(np.isfinite(a.lambda_vf) and a.lambda_vf>=0):
         p.error("lambda-vf must be finite and nonnegative")
     if a.cores<1 or a.plan_seconds<=0 or a.case_steps<1 or a.vf_outers<1 or a.vf_pdca_steps<1 or a.cuts<1 or a.radius<=0:
@@ -119,7 +126,9 @@ def engine_args(a,stage):
         "--vf-pdca-steps",str(a.vf_pdca_steps),"--cuts",str(a.cuts),
         "--case-radius",str(a.radius),"--vf-radius",str(a.radius),
         "--backend","gurobi","--cap","180",
-        "--cores",str(a.cores),"--plan-seconds",str(a.plan_seconds)]
+        "--cores",str(a.cores),"--plan-seconds",str(a.plan_seconds),
+        "--accuracy-mu",str(a.accuracy_mu),
+        "--accuracy-budget",str(a.accuracy_budget)]
 
 
 def run_engine(a,stage):
@@ -139,9 +148,15 @@ def verified_context(a):
         case_steps=a.case_steps,vf_outers=a.vf_outers,
         vf_pdca_steps=a.vf_pdca_steps,cuts=a.cuts,
         case_radius=a.radius,vf_radius=a.radius,
-        plan_seconds=a.plan_seconds)
+        plan_seconds=a.plan_seconds,
+        accuracy_mu=a.accuracy_mu,accuracy_budget=a.accuracy_budget)
     if float(contract.get("turnover",0.))!=float(a.turnover):
         raise ValueError("Turnover setting differs from trained policy")
+    if contract.get("relaxed_required_days") is not True:
+        raise ValueError("Contract lacks relaxed surgeon-day retention")
+    if (contract.get("vf_training_tie")!="squared_load_hash" or
+        contract.get("accuracy_kind")!="displayed_asymmetric"):
+        raise ValueError("Contract lacks deployed-rule / displayed-accuracy specification")
     bad={k:(contract.get(k),v) for k,v in expected.items()
          if contract.get(k)!=v}
     if bad:raise ValueError("Frozen policy configuration mismatch: "+str(bad)+
@@ -150,6 +165,10 @@ def verified_context(a):
     if (selected.get("method")!="JOINT_VF" or
         selected.get("vf_features")!="structural" or
         selected.get("link")!=a.link or
+        selected.get("training_uses_deployment_ties") is not True or
+        selected.get("relaxed_required_days") is not True or
+        not np.isclose(selected.get("accuracy_mu",-1),a.accuracy_mu) or
+        not np.isclose(selected.get("accuracy_budget",-1),a.accuracy_budget) or
         not np.isclose(selected["lambda_vf"],a.lambda_vf) or
         not np.isclose(selected["alpha"],a.alpha) or
         not np.isclose(selected["h"],a.h) or

@@ -44,7 +44,10 @@ def run_seed(items,duration,folder,label,seed,cores,seconds,*,balance=True):
             str(key).encode()+d.tobytes()+
             repr((float(seconds),int(seed),"tie",float(
                 __import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
-                bool(balance),"turnover_tie_v2")).encode()).hexdigest()
+                bool(balance),
+                bool(__import__("surgery.weekly_planner",
+                     fromlist=["RELAX_REQUIRED_DAYS"]).RELAX_REQUIRED_DAYS),
+                "turnover_accuracy_tie_v3")).encode()).hexdigest()
         path=cache/(hashlib.sha256(str(key).encode()).hexdigest()+".json")
         if path.exists():
             record=json.loads(path.read_text())
