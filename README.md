@@ -67,7 +67,7 @@ Default frozen scientific configuration:
 | MM steps / pDCA steps | 30 / 50 |
 | DC-cut budget | 80 |
 | Coefficient bounds | +/-100 |
-| Scheduler | Fixed-roster eligibility MILP, 480-min room-days, zero turnover |
+| Scheduler | Fixed-roster eligibility MILP, 480-min room-days; default zero turnover, optionally 30 |
 | Planning weights | Idle=1, overtime=1.75 |
 | Deployment rule | Primary optimum, minimum sum of squared room loads, deterministic hash |
 
@@ -101,6 +101,8 @@ All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
 - `seeds`: explicitly reschedule frozen BOOKED/CASE/VF under hash seeds
   0,1,2,3,4; common certified cases and calendar-week paired bootstrap. Outputs
   `seed_robustness.json`. Other seeds: `--seeds 0 1 2`.
+- `hash-only`: frozen zero-turnover deployment comparison skipping squared-load
+  balancing, retaining deterministic hash selection; no retraining.
 - `audit`: audit BOOKED, CASE and VF test plans for peak load concentration.
   Only flagged instances (default >720 planned or realized minutes) trigger
   independent minimum-feasible-peak MILPs under reviewed durations (prospective
@@ -130,6 +132,60 @@ published research comparisons remain in the frozen archives, including
 by the cleaned repository. Historical source code is recoverable from commit
 `f14d9f140e6ff529319358838305a399f20475b2` (before cleanup), without
 keeping redundant executable study drivers on the current branch.
+
+
+## Targeted turnover and scheduling-selection diagnostics
+
+Run the existing paired training replay before changing the code checkout.
+The diagnostic branch \`vf-turnover-tie-diagnostics\` adds two explicit
+options without changing the learned VF method.
+
+**Frozen-policy hash-only check (no retraining, zero turnover):**
+
+\`\`\`bash
+git fetch origin
+git switch vf-turnover-tie-diagnostics
+git pull --ff-only
+caffeinate -i python -u -m pilot.run_joint_vf \
+  --stage hash-only --turnover 0 \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --out artifacts/vf_direct_no_turnover \
+  --cores 15 --plan-seconds 300 \
+  2>&1 | tee artifacts/vf_direct_no_turnover/hash_only.log
+\`\`\`
+
+The diagnostic strictly validates and reuses the original squared-load
+deployment caches. It then solves the same frozen reviewed durations with
+the squared-load stage skipped and the **same deterministic hash stages**.
+No value is chosen using test realized durations. The output is
+\`hash_only_diagnostic.json\`, with a paired comparison on instances for
+which all three policies have proven deployments under both rules.
+
+**One fresh 30-minute-turnover retraining experiment:**
+
+\`\`\`bash
+mkdir -p artifacts/vf_direct_turnover30
+set -o pipefail
+caffeinate -i python -u -m pilot.run_joint_vf \
+  --stage all --turnover 30 --lambda-vf 0.1 \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --out artifacts/vf_direct_turnover30 \
+  --cores 15 --plan-seconds 300 --audit-seconds 120 \
+  2>&1 | tee artifacts/vf_direct_turnover30/run.log
+\`\`\`
+
+The 30-minute allowance is applied consistently to room loads, the
+primary MILP, quadratic balancing, conservation shortcut, VF/DC/QP
+identities, contextual features, and independent peak-load audit.
+The turnover value is recorded in the run contract and included in
+planner/audit cache signatures. All changed training artifacts must live
+in a new \`--out\` directory. Never transplant saved VF coefficients or
+feature scalers across these turnover settings.
+
+Run \`--stage replay --turnover 30\` after completion, with the same
+\`--out\` and \`--plan-seconds\`, for a paired training-cost comparison.
+The 2013 evaluation remains exploratory and must not be used to choose
+the turnover assumption or regularization parameter on performance alone.
 
 ## Active code layout
 
