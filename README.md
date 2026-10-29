@@ -1,11 +1,12 @@
-# Structural, response-aware operating-room scheduling
+# Response-aware value-function (VF) learning for operating-room scheduling
 
-This repository contains **one retained learning method**: joint structural
-value-function (VF) learning. It learns one shared linear recommendation policy
+This repository contains **one retained learning method**: value-function
+(VF) learning. It learns one shared linear recommendation policy
 from **77 case features and six schedule-independent capacity/eligibility
 features**. A specified hypothetical surgeon response produces reviewed
 durations, and the unchanged Gurobi planner schedules them. All 83 policy
-coefficients are optimized jointly using schedule-library MM and pDCA. The
+coefficients are optimized jointly using direct MM/pDCA of the exact VF
+objective, without a finite schedule-library approximation. The
 case-only response-aware CASE model is retained only as an initializer and
 benchmark; BOOKED is the original-duration comparator.
 
@@ -40,14 +41,19 @@ All new runs use **one public entry point**:
 caffeinate -i python -u -m pilot.run_joint_vf \
   --stage all \
   --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-  --out artifacts/structural_vf_main \
-  --cores 15 --plan-seconds 180
+  --out artifacts/vf_direct_no_turnover \
+  --cores 15 --plan-seconds 300
 ```
 
 This fits CASE as a warm start, learns structural VF jointly, evaluates BOOKED,
 CASE and VF on commonly certified 2013 components, and reports realized training
 cost. It reuses complete checkpoints/cached planner solves where possible.
 Each distinct scientific configuration **must use its own `--out` folder**.
+Old context.pkl is input data only; the training, planning, and tie caches in
+the new folder must be generated afresh. The new audit outputs
+`operational_audit_summary.json` and per-policy `operational_audit_*.json`.
+Training progress and certified exact-VF improvements are logged in
+`vf_direct_progress.json`. Failed planner certifications remain explicit.
 
 Default frozen scientific configuration:
 
@@ -56,14 +62,14 @@ Default frozen scientific configuration:
 | Feature schema | Structural only: 77 case + 6 contextual columns |
 | Training response | Saturating, alpha=0.8, h=30 min |
 | Response display cap / duration floor | 180 min / 1 min |
-| VF L1 lambda | 0.10924129431614196, intercept excluded |
+| VF L1 lambda | 0.1 per independent training instance; intercept excluded |
 | Penalty | Uniform; case and structural coefficients trained jointly |
 | MM steps / pDCA steps | 30 / 50 |
 | DC-cut budget | 80 |
 | Coefficient bounds | +/-100 |
-| Scheduler | Original eligibility-constrained MILP, 480-min slots, 30-min turnover |
+| Scheduler | Fixed-roster eligibility MILP, 480-min room-days, zero turnover |
 | Planning weights | Idle=1, overtime=1.75 |
-| Primary tie rule | Hash seed 0; fully certified components only |
+| Deployment rule | Primary optimum, minimum sum of squared room loads, deterministic hash |
 
 **Same method, changed response configuration** (use a new output folder):
 
@@ -95,6 +101,12 @@ All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
 - `seeds`: explicitly reschedule frozen BOOKED/CASE/VF under hash seeds
   0,1,2,3,4; common certified cases and calendar-week paired bootstrap. Outputs
   `seed_robustness.json`. Other seeds: `--seeds 0 1 2`.
+- `audit`: audit BOOKED, CASE and VF test plans for peak load concentration.
+  Only flagged instances (default >720 planned or realized minutes) trigger an
+  independent minimum-feasible-peak MILP; the report distinguishes confirmed
+  avoidable concentration, capacity shortfalls, and solver-unresolved cases.
+  `all` runs this audit automatically. Use `--audit-seconds 120` and
+  `--audit-threshold 720` to adjust the audit.
 - `stress`: replay **the same frozen displayed advice**, but apply one
   alternative assumed true response before rescheduling, without refitting.
   Configured by `--true-alpha`, `--true-h`, `--true-link`. Outputs
@@ -120,13 +132,15 @@ keeping redundant executable study drivers on the current branch.
 ## Active code layout
 
 - `pilot/run_joint_vf.py`: **only documented workflow entry point**.
+- `pilot/operational_audit.py`: minimum-feasible-peak MILP diagnostic with
+  certified lower/upper bounds separating avoidable concentration from forced load.
 - `pilot/_joint_vf_engine.py`: CASE initialization, frozen joint VF training,
   checkpointing, and primary evaluation.
 - `pilot/_seed_solver.py`: explicit-seed certified planner audit helper.
 - `surgery/vf_features.py`: only the six structural feature functions and
   training-fitted normalization.
-- `surgery/nonmonotone_learning.py`: piecewise-linear response/DC compiler,
-  VF upper bound, MM and pDCA.
+- `surgery/nonmonotone_learning.py`: response/DC compiler and direct
+  MM/pDCA with gap-aware exact-VF acceptance (no persistent libraries).
 - `surgery/anchored_weekly_solver.py`, `weekly_planner.py`,
   `weekly_data.py`, `data.py`: unchanged planner and cohort logic.
 - `surgery/response_grid.py`: application of alternative true responses to
@@ -140,9 +154,10 @@ record of method selection.
 
 ## Claims and limits
 
-The finite-schedule objective is a valid upper bound on planned-value-based
-realized scheduling cost (with certified planner tie tolerance). The algorithm
-verifies descent of accepted MM/pDCA updates; it does **not** certify a global
+The exact VF objective bounds planned-value-based realized scheduling cost
+(with primary planner tolerance accounted for). Each accepted MM step verifies
+a majorizer decrease larger than the planner's primal-dual gap, giving a
+positive lower bound on exact-VF descent; it does **not** certify a global
 optimum or numerical stationarity of the learned nonconvex policy. A penalized
 training surrogate is not itself a realized-cost or regret certificate.
 

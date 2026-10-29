@@ -100,9 +100,19 @@ def _plan_job(job):
         bound=max(0.,min(float(bound),float(cost)))
     else:
         bound=0. # Valid, possibly weak dual lower bound; cost is nonnegative.
+    room_loads=loads(c,assignment,d)
     return key,dict(assignment=assignment,cost=float(cost),
                     bound=float(bound),complete=bool(result.complete),
-                    status=str(result.status))
+                    status=str(result.status),
+                    primary_status=str(getattr(result,"primary_status","")),
+                    balance_complete=bool(getattr(result,"balance_complete",False)),
+                    balance_objective=getattr(result,"balance_objective",None),
+                    balance_seconds=float(getattr(result,"balance_seconds",0.)),
+                    hash_status=str(getattr(result,"hash_status","")),
+                    uniqueness_status=str(getattr(result,"uniqueness_status","")),
+                    max_predicted_load=float(room_loads.max()),
+                    squared_loads=float(room_loads@room_loads),
+                    empty_roster_rooms=int(np.sum(room_loads==0.)))
 
 
 class PlannerCache:
@@ -289,14 +299,13 @@ def work(ctx,root,args):
             return
         draft_started=time.perf_counter()
         case_raw=np.asarray(data["X"],float)@coef
-        booked=cache.solve(train,b,"train_booked",tie=True)
         H,(mu,sd),_=five_features(
-            ctx,train,cache,"train",plans=booked,schema=args.vf_features)
+            ctx,train,cache,"train",schema=args.vf_features)
         save(root/"vf_features.json",dict(
             schema=args.vf_features,names=list(feature_names(args.vf_features)),
             mean=mu.tolist(),std=sd.tolist()))
-        case_draft=cache.solve(train,response_map.reviewed(case_raw),
-                               "train_case_draft",tie=True)
+        # No provisional BOOKED/CASE planner solves: exact VF queries only
+        # the current policy's planner in each direct-MM iteration.
         record_stage_time(root,"draft_and_booked",time.perf_counter()-draft_started)
         if args.stage=="draft":
             return

@@ -26,7 +26,10 @@ def explicit_job(job):
     z=(list(map(int,result.assignment))
        if result.assignment is not None else list(map(int,c.original)))
     return key,dict(assignment=z,complete=bool(result.complete),
-                    status=str(result.status),hash_seed=seed)
+                    status=str(result.status),hash_seed=seed,
+                    balance_complete=bool(getattr(result,"balance_complete",False)),
+                    balance_objective=getattr(result,"balance_objective",None),
+                    balance_seconds=float(getattr(result,"balance_seconds",0.)))
 
 
 def run_seed(items,duration,folder,label,seed,cores,seconds):
