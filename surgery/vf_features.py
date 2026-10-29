@@ -24,14 +24,14 @@ def feature_names(schema="structural"):
 
 
 def structural_features(items, booked, history, *, capacity=480.,
-                        turnover=30., pressure_scale=120.):
+                        pressure_scale=120.):
     """Six predeclared plan-free scheduling-context features.
 
     A set E of eligible slots must accommodate all cases whose eligibility
     sets lie inside E. Thus the necessary load lower bound for E is
-       sum(booked[M(E)]) + turnover*max(|M(E)|-|E|,0).
+       sum(booked[M(E)]).
     This does NOT assign cases to rooms. Overall and surgeon pressure use
-    the same conservative turnover lower bound. The asinh transform avoids
+    the same necessary booked-workload bound. The asinh transform avoids
     hard clipping while remaining finite and monotone.
     """
     b=np.asarray(booked,float)
@@ -40,7 +40,7 @@ def structural_features(items, booked, history, *, capacity=480.,
             h.ndim!=2 or h.shape[0]!=len(b) or h.shape[1]<2 or
             not np.isfinite(h[:,:2]).all()):
         raise ValueError("Invalid booked durations or historical spread array")
-    if not (capacity>0 and turnover>=0 and pressure_scale>0):
+    if not (capacity>0 and pressure_scale>0):
         raise ValueError("Invalid room-load normalization")
     out=np.empty((len(b),len(STRUCTURAL_NAMES)),float)
     seen=np.zeros(len(b),bool)
@@ -48,8 +48,7 @@ def structural_features(items, booked, history, *, capacity=480.,
     def pressure(load,n_cases,n_slots):
         if n_slots<=0:
             raise ValueError("No eligible scheduling slots")
-        t=turnover*max(0,n_cases-n_slots)
-        return float(np.arcsinh((load+t-capacity*n_slots)/
+        return float(np.arcsinh((load-capacity*n_slots)/
                                 (pressure_scale*n_slots)))
 
     for key,c,rows in items:
@@ -102,14 +101,13 @@ def structural_features(items, booked, history, *, capacity=480.,
 
 
 def booked_plan_features(items,booked,plans,history,schema="structural",
-                         capacity=480.,turnover=30.,reach=24.):
+                         capacity=480.,reach=24.):
     """Compatibility entry point; plans are deliberately ignored.
 
     Kept only for existing structural feature tests and reproducibility.
     """
     feature_names(schema)
-    return structural_features(items,booked,history,capacity=capacity,
-                               turnover=turnover)
+    return structural_features(items,booked,history,capacity=capacity)
 
 
 def standardize_features(raw, scaler=None):

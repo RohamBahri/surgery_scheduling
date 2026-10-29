@@ -51,7 +51,7 @@ def _model(week, seconds, threads):
 def conservation_certificate(week, duration):
     """Sufficient certificate: all slots forced open, original attains convex LB.
 
-    All opened K slots have total workload W=sum_i d_i+TURNOVER*(n-K);
+    With zero turnover, W=sum_i d_i regardless of the number of used slots;
     sum_j max(CAPACITY-L_j,0)+OVERTIME*max(L_j-CAPACITY,0)
     >= max(K*CAPACITY-W,0)+OVERTIME*max(W-K*CAPACITY,0).
     A feasible original assignment matching the bound is globally optimal.
@@ -60,7 +60,7 @@ def conservation_certificate(week, duration):
     if len(mandatory_slots(week)) != week.k:
         return None
     d = _feasible_duration(week, duration)
-    total = float(d.sum()) + TURNOVER * (week.n - week.k)
+    total = float(d.sum())
     excess = total - CAPACITY * week.k
     lb = max(-excess, 0.) + OVERTIME * max(excess, 0.)
     original = float(evaluate(week, week.original, d)['cost'])

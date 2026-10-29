@@ -121,7 +121,7 @@ class PlannerCache:
             d=np.asarray(durations[rows],float)
             keyhash=sha(str(key).encode())
             signature=sha(str(key).encode()+np.ascontiguousarray(d,dtype="<f8").tobytes()+
-                          repr((self.seconds,tie)).encode())
+                          repr((self.seconds,tie,"zero_turnover_sqload_v1")).encode())
             path=dest/(keyhash+".json")
             if path.exists():
                 entry=json.loads(path.read_text())

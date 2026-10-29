@@ -38,7 +38,7 @@ def run_seed(items,duration,folder,label,seed,cores,seconds):
         d=np.ascontiguousarray(np.asarray(duration[rows],float),dtype="<f8")
         signature=hashlib.sha256(
             str(key).encode()+d.tobytes()+
-            repr((float(seconds),int(seed),"tie")).encode()).hexdigest()
+            repr((float(seconds),int(seed),"tie","zero_turnover_sqload_v1")).encode()).hexdigest()
         path=cache/(hashlib.sha256(str(key).encode()).hexdigest()+".json")
         if path.exists():
             record=json.loads(path.read_text())

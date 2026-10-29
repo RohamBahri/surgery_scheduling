@@ -15,7 +15,7 @@ C_OVER = 1.75
 C_UNDER = 1.0
 KAPPA = C_OVER + C_UNDER
 CAPACITY = 480.
-TURNOVER = 30.
+TURNOVER = 0.  # No changeover time in room occupancy.
 
 
 def response(u, alpha=.8, h=30.):
@@ -218,7 +218,7 @@ class DCObjective:
         else:
             S=self.rooms
             counts=np.diff(S.indptr)
-            kappa=S@self.booked+TURNOVER*np.maximum(counts-1,0)-CAPACITY
+            kappa=S@self.booked-CAPACITY
             pp=S@P
             nn=S@N
             O=np.maximum(kappa+pp,nn)
@@ -255,7 +255,7 @@ def score_loadings(objective, w, items):
     e=objective.actual-objective.booked
     choose_a=np.where(P>e+N,1.,np.where(P<e+N,0.,.5))
     S=objective.rooms
-    k=S@objective.booked+TURNOVER*np.maximum(np.diff(S.indptr)-1,0)-CAPACITY
+    k=S@objective.booked-CAPACITY
     pp=S@P
     nn=S@N
     choose_o=np.where(k+pp>nn,1.,np.where(k+pp<nn,0.,.5))
@@ -286,13 +286,12 @@ def planned_cost_fast(week, assignment, durations):
 
     No surgeon-day diagnostics or eligibility loops on each re-score:
     loads() validates once when a schedule enters the library.
-    Turnover and unused roster block idle are both included.
+    Unused staffed room-day idle is included; turnover is excluded.
     """
     z=np.asarray(assignment,dtype=int)
     d=np.asarray(durations,dtype=float)
     counts=np.bincount(z,minlength=week.k)
-    room_load=(np.bincount(z,weights=d+TURNOVER,minlength=week.k)
-               -TURNOVER*(counts>0))
+    room_load=np.bincount(z,weights=d,minlength=week.k)
     return float((C_OVER*np.maximum(room_load-CAPACITY,0.)
                   +C_UNDER*np.maximum(CAPACITY-room_load,0.)).sum())
 

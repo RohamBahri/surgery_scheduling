@@ -28,11 +28,11 @@ def test_structural_eligibility_bottleneck_uses_competing_surgeons():
     c,items,h=sample()
     z=structural_features(items,c.booked,h)
     assert z.shape==(c.n,6)
-    # Component: 840 minutes booked, 2*(?) turnover minimal 60.
-    overall=np.arcsinh((840.+60.-960.)/(120.*2.))
+    # Component with 840 booked minutes and two 480-minute rooms.
+    overall=np.arcsinh((840.-960.)/(120.*2.))
     np.testing.assert_allclose(z[:,0],overall)
-    # E={1} must host BOTH S2 and S3; its minimum turnover is 30.
-    bottleneck=np.arcsinh((180.+210.+30.-480.)/120.)
+    # E={1} must host BOTH S2 and S3.
+    bottleneck=np.arcsinh((180.+210.-480.)/120.)
     assert z[2,1]==pytest.approx(bottleneck)
     assert z[3,1]==pytest.approx(bottleneck)
     assert z[0,1]==pytest.approx(overall)
