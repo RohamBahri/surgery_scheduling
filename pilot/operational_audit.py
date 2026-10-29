@@ -133,6 +133,28 @@ def audit_policy(items,durations,plans,folder,*,seconds=60.,threshold=720.):
                 result["min_peak_lb"]>CAPACITY+tol)
             out["unresolved_minpeak_gap"]=float(
                 result["min_peak_ub"]-result["min_peak_lb"])
+        # A separate ex-post diagnostic tests whether the REALIZED concentration
+        # could be reduced with hindsight. It is never used in learning or
+        # deployment and cannot be interpreted as a prospective improvement.
+        if actual_peak>threshold:
+            tag=repr((key,seconds,week.actual.tolist(),
+                      "minpeak_actual_zero_turnover_v1")).encode()
+            cache=folder/(hashlib.sha256(tag).hexdigest()+".json")
+            if cache.exists():
+                hindsight=json.loads(cache.read_text())
+            else:
+                hindsight=solve_minimum_peak(week,week.actual,seconds=seconds)
+                temp=cache.with_suffix(".tmp")
+                temp.write_text(json.dumps(hindsight,indent=2))
+                temp.replace(cache)
+            out["hindsight_min_peak_lb"]=hindsight["min_peak_lb"]
+            out["hindsight_min_peak_ub"]=hindsight["min_peak_ub"]
+            out["hindsight_min_peak_proven"]=hindsight["min_peak_proven"]
+            out["hindsight_min_peak_solver_status"]=hindsight["solver_status"]
+            out["hindsight_confirmed_avoidable_peak_minutes_at_least"]=float(
+                max(0.,actual_peak-hindsight["min_peak_ub"]))
+            out["hindsight_forced_peak_over_capacity_proven"]=bool(
+                hindsight["min_peak_lb"]>CAPACITY+1e-4)
         entries.append(out)
     flagged=[e for e in entries if "min_peak_lb" in e]
     output=dict(model="zero_turnover_fixed_roster",
@@ -143,6 +165,10 @@ def audit_policy(items,durations,plans,folder,*,seconds=60.,threshold=720.):
                 peak_unavoidable_proven=sum(e["unavoidable_at_chosen_peak_proven"] for e in flagged),
                 forced_over_capacity_proven=sum(e["forced_over_capacity_proven"] for e in flagged),
                 minpeak_unresolved=sum(not e["min_peak_proven"] for e in flagged),
+                hindsight_flagged_instances=sum("hindsight_min_peak_lb" in e for e in entries),
+                hindsight_confirmed_avoidable=sum(
+                    e.get("hindsight_confirmed_avoidable_peak_minutes_at_least",0.)>1e-4
+                    for e in entries),
                 aggregate_capacity_shortfall_instances=sum(
                    e["aggregate_overtime_minutes_lower_bound"]>0 for e in entries),
                 entries=entries)
