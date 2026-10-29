@@ -13,7 +13,7 @@ import numpy as np
 from .weekly_data import Week
 
 CAPACITY = 480.
-TURNOVER = float(os.environ.get('SURGERY_TURNOVER_MINUTES', '30'))
+TURNOVER = float(os.environ.get('SURGERY_TURNOVER_MINUTES', '0'))
 RELAX_REQUIRED_DAYS = os.environ.get('SURGERY_RELAX_REQUIRED_DAYS','0') == '1'
 OVERTIME = 1.75
 

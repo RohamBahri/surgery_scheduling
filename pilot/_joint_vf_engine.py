@@ -363,7 +363,8 @@ def work(ctx,root,args):
                  backend=args.backend,solve_plans=oracle,penalize=penalty,
                  accuracy_mu=args.accuracy_mu,
                  accuracy_reference=accuracy_reference,
-                 accuracy_budget=args.accuracy_budget)
+                 accuracy_budget=args.accuracy_budget,
+                 require_complete_deployment=True)
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
         save(root/"selected_policy.json",dict(

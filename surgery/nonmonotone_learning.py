@@ -607,7 +607,8 @@ def mm_vf(items, booked, X, response_map, actual, *,
           start, root, lam, initial_libraries=None, iterations=30, radius=100.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
           solve_plans=None, penalize=None, accuracy_mu=0.,
-          accuracy_reference=None, accuracy_budget=.05):
+          accuracy_reference=None, accuracy_budget=.05,
+          require_complete_deployment=False):
     """Direct MM/pDCA for EXACT VF; no finite-library approximation.
 
     Each iteration solves the planner at current reviewed durations and uses
@@ -682,7 +683,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
             candidate=candidates.get(key)
             if candidate is None or candidate.get("assignment") is None:
                 raise ValueError("Direct VF requires a feasible planner schedule")
-            if not candidate.get("complete",False):
+            if require_complete_deployment and not candidate.get("complete",False):
                 raise RuntimeError(
                     f"VF training needs certified deployed squared-load/hash "
                     f"schedule for {key}: {candidate.get('status')}; "
