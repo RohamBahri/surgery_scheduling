@@ -223,11 +223,19 @@ class DCObjective:
             display_a=np.maximum(e+N/a,P/a)
             display_choose=np.where(P/a>e+N/a,1.,
                                 np.where(P/a<e+N/a,0.,.5))
-            G=KAPPA*display_a.sum()-C_UNDER*e.sum()
-            H=(C_OVER*P.sum()+C_UNDER*N.sum())/a
-            dp=KAPPA*display_choose*Pp/a
-            dn=KAPPA*(1.-display_choose)*Np/a
-            hraw=(C_OVER*Pp+C_UNDER*Np)/a
+            if self.mode=="DISPLAY":
+                # |actual - displayed|; no overtime/idle asymmetry
+                G=2.*display_a.sum()-e.sum()
+                H=(P.sum()+N.sum())/a
+                dp=2.*display_choose*Pp/a
+                dn=2.*(1.-display_choose)*Np/a
+                hraw=(Pp+Np)/a
+            else:
+                G=KAPPA*display_a.sum()-C_UNDER*e.sum()
+                H=C_OVER*P.sum()+C_UNDER*N.sum()
+                dp=KAPPA*display_choose*Pp
+                dn=KAPPA*(1.-display_choose)*Np
+                hraw=C_OVER*Pp+C_UNDER*Np
         else:
             S=self.rooms
             counts=np.diff(S.indptr)
@@ -253,11 +261,11 @@ class DCObjective:
             display_A=np.maximum(e+showN,showP)
             display_choose=np.where(showP>e+showN,1.,
                               np.where(showP<e+showN,0.,.5))
-            G+=self.accuracy_mu*(KAPPA*display_A.sum()-C_UNDER*e.sum())
-            H+=self.accuracy_mu*(C_OVER*showP.sum()+C_UNDER*showN.sum())
-            dp+=self.accuracy_mu*KAPPA*display_choose*Pp/a
-            dn+=self.accuracy_mu*KAPPA*(1.-display_choose)*Np/a
-            hraw+=self.accuracy_mu*(C_OVER*Pp+C_UNDER*Np)/a
+            G+=self.accuracy_mu*(2.*display_A.sum()-e.sum())
+            H+=self.accuracy_mu*(showP.sum()+showN.sum())
+            dp+=self.accuracy_mu*2.*display_choose*Pp/a
+            dn+=self.accuracy_mu*2.*(1.-display_choose)*Np/a
+            hraw+=self.accuracy_mu*(Pp+Np)/a
         G/=self.components
         H/=self.components
         dg=self.X.T@(dp+dn)/self.components
@@ -422,14 +430,19 @@ class ConvexEpigraphQP:
         absw=m.addMVar(p,lb=0.,name="abs_coeff")
         m.addConstr(absw>=self.w)
         m.addConstr(absw>=-self.w)
-        self.base_G=(KAPPA/objective.components)*A.sum() \
-            -C_UNDER*float(e.sum())/objective.components \
-            +objective.lam*(objective.penalize@absw)
+        if objective.mode=="DISPLAY":
+            self.base_G=(2./objective.components)*A.sum() \
+                -float(e.sum())/objective.components \
+                +objective.lam*(objective.penalize@absw)
+        else:
+            self.base_G=(KAPPA/objective.components)*A.sum() \
+                -C_UNDER*float(e.sum())/objective.components \
+                +objective.lam*(objective.penalize@absw)
         if objective.mode=="VF":
             self.base_G+=(C_OVER*O.sum()+C_UNDER*I.sum())/objective.components
         if objective.accuracy_mu:
             self.base_G+=objective.accuracy_mu*(
-                KAPPA*B.sum()-C_UNDER*float(e.sum()))/objective.components
+                2.*B.sum()-float(e.sum()))/objective.components
 
     def solve(self, center, gradient, prox):
         center=np.asarray(center,float)
@@ -645,8 +658,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
     def displayed_accuracy(w):
         displayed=booked+response_map.display(X@np.asarray(w,float))
         error=actual-displayed
-        return float((C_OVER*np.maximum(error,0.)
-                     +C_UNDER*np.maximum(-error,0.)).sum()/len(items))
+        return float(np.abs(error).sum()/len(items))
     initial_accuracy=displayed_accuracy(theta)
     legacy=(accuracy_reference is None and accuracy_mu==0.
             and not require_complete_deployment and accuracy_gate)
