@@ -30,48 +30,48 @@ cost even if empty.
 **Deployment is unchanged:** minimize overtime and idle, then minimize the
 sum of squared predicted room loads, then apply deterministic hash ties.
 Training uses a primary-optimal assignment by default for an inexpensive
-and valid direct-MM majorizer. Use \`--train-tie deployed\` only if the
+and valid direct-MM majorizer. Use `--train-tie deployed` only if the
 additional optimization time is justified. This does not assert that
 the primary-value surrogate measures realized deployment regret.
 
 ### Credibility as displayed-duration accuracy
 
-\`displayed_duration = booked + ResponseDC.display(raw)\` is the actual
+`displayed_duration = booked + ResponseDC.display(raw)` is the actual
 canonical advice shown to the surgeon (under the assumed response model).
 Neither the raw unconstrained score nor the reviewed booking is the
 accuracy target.
 
-\`\`\`text
+```text
 A_display(theta) = sum_i abs(actual_i - displayed_duration_i(theta)) / train_components
 A_display(theta) <= 1.05 * A_display(reference)
-\`\`\`
+```
 
 A separate accuracy-only fit uses **the same 83 features** as VF and
 minimizes this displayed MAE, starting from the casewise predictor.
 Its coefficients, achieved accuracy, and optimizer status are saved in
-\`display_accuracy_reference.json\`. This is a fitted local reference;
+`display_accuracy_reference.json`. This is a fitted local reference;
 because the response is nonlinear, its global optimality is not claimed.
 
 VF uses the exact DC Lagrangian
-\`VF(theta) + mu*A_display(theta) + 0.1*||theta_nonintercept||_1\`.
+`VF(theta) + mu*A_display(theta) + 0.1*||theta_nonintercept||_1`.
 The scheduling value and its bound retain their original asymmetric
 overtime/idle cost parameters. The added absolute-error term is distinct.
 
 To operationalize a **predeclared 5% budget**, fit the grid
 **mu = {0.5, 1, 2, 5}** in separate directories, and select the **smallest**
-mu whose achieved **TRAINING** \`accuracy_ratio\` is at most 1.05.
+mu whose achieved **TRAINING** `accuracy_ratio` is at most 1.05.
 If none meets the budget, report that result and reconsider the grid
-without consulting 2013. Set \`--accuracy-gate off\` for this grid;
-\`--accuracy-gate on\` is a different, explicitly guarded algorithm and
+without consulting 2013. Set `--accuracy-gate off` for this grid;
+`--accuracy-gate on` is a different, explicitly guarded algorithm and
 would prevent the grid from measuring the multipliers' natural tradeoff.
 Nonconvexity precludes claiming exact constrained global optimality.
 
 ### Commands
 
-After installing dependencies and ensuring the private \`context.pkl\` is
+After installing dependencies and ensuring the private `context.pkl` is
 available:
 
-\`\`\`bash
+```bash
 git switch main
 git pull --ff-only
 python -m pytest -q
@@ -93,21 +93,21 @@ python -m pilot.select_accuracy_mu \
   artifacts/vf_display_mae_mu0.5 artifacts/vf_display_mae_mu1 \
   artifacts/vf_display_mae_mu2 artifacts/vf_display_mae_mu5 \
   --budget 0.05
-\`\`\`
+```
 
-For the selected multiplier/folder **only**, run \`--stage replay\` to
-obtain paired training realized cost, then \`--stage all
---audit-seconds 120\` for exploratory 2013 deployment evaluation. Keep
-the **same** \`--turnover 0 --train-tie primary --accuracy-gate off
+For the selected multiplier/folder **only**, run `--stage replay` to
+obtain paired training realized cost, then `--stage all
+--audit-seconds 120` for exploratory 2013 deployment evaluation. Keep
+the **same** `--turnover 0 --train-tie primary --accuracy-gate off
 --accuracy-mu ... --accuracy-budget 0.05 --lambda-vf 0.1
---cores 15 --plan-seconds 300\` flags.
+--cores 15 --plan-seconds 300` flags.
 
-Key artifacts: \`display_accuracy_reference.json\` (accuracy-only fitted
-reference), \`selected_policy.json\` (\`accuracy_ratio\`, \`train_tie\`,
-and turnover), \`vf_direct_progress.json\` (descent, planner bounds,
-accuracy and optional gate), \`training_replay_comparison.json\` (paired
-training realized costs), and \`summary.json\` and
-\`operational_audit_summary.json\` (exploratory 2013).
+Key artifacts: `display_accuracy_reference.json` (accuracy-only fitted
+reference), `selected_policy.json` (`accuracy_ratio`, `train_tie`,
+and turnover), `vf_direct_progress.json` (descent, planner bounds,
+accuracy and optional gate), `training_replay_comparison.json` (paired
+training realized costs), and `summary.json` and
+`operational_audit_summary.json` (exploratory 2013).
 
 ## Install
 
@@ -233,12 +233,12 @@ keeping redundant executable study drivers on the current branch.
 ## Targeted turnover and scheduling-selection diagnostics
 
 Run the existing paired training replay before changing the code checkout.
-The diagnostic branch \`vf-turnover-tie-diagnostics\` adds two explicit
+The diagnostic branch `vf-turnover-tie-diagnostics` adds two explicit
 options without changing the learned VF method.
 
 **Frozen-policy hash-only check (no retraining, zero turnover):**
 
-\`\`\`bash
+```bash
 git fetch origin
 git switch vf-turnover-tie-diagnostics
 git pull --ff-only
@@ -248,18 +248,18 @@ caffeinate -i python -u -m pilot.run_joint_vf \
   --out artifacts/vf_direct_no_turnover \
   --cores 15 --plan-seconds 300 \
   2>&1 | tee artifacts/vf_direct_no_turnover/hash_only.log
-\`\`\`
+```
 
 The diagnostic strictly validates and reuses the original squared-load
 deployment caches. It then solves the same frozen reviewed durations with
 the squared-load stage skipped and the **same deterministic hash stages**.
 No value is chosen using test realized durations. The output is
-\`hash_only_diagnostic.json\`, with a paired comparison on instances for
+`hash_only_diagnostic.json`, with a paired comparison on instances for
 which all three policies have proven deployments under both rules.
 
 **One fresh 30-minute-turnover retraining experiment:**
 
-\`\`\`bash
+```bash
 mkdir -p artifacts/vf_direct_turnover30
 set -o pipefail
 caffeinate -i python -u -m pilot.run_joint_vf \
@@ -268,18 +268,18 @@ caffeinate -i python -u -m pilot.run_joint_vf \
   --out artifacts/vf_direct_turnover30 \
   --cores 15 --plan-seconds 300 --audit-seconds 120 \
   2>&1 | tee artifacts/vf_direct_turnover30/run.log
-\`\`\`
+```
 
 The 30-minute allowance is applied consistently to room loads, the
 primary MILP, quadratic balancing, conservation shortcut, VF/DC/QP
 identities, contextual features, and independent peak-load audit.
 The turnover value is recorded in the run contract and included in
 planner/audit cache signatures. All changed training artifacts must live
-in a new \`--out\` directory. Never transplant saved VF coefficients or
+in a new `--out` directory. Never transplant saved VF coefficients or
 feature scalers across these turnover settings.
 
-Run \`--stage replay --turnover 30\` after completion, with the same
-\`--out\` and \`--plan-seconds\`, for a paired training-cost comparison.
+Run `--stage replay --turnover 30` after completion, with the same
+`--out` and `--plan-seconds`, for a paired training-cost comparison.
 The 2013 evaluation remains exploratory and must not be used to choose
 the turnover assumption or regularization parameter on performance alone.
 
