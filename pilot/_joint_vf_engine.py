@@ -429,6 +429,8 @@ def eval_2013(ctx,root,args,cache,selected):
     # Evaluate the response assumed for THIS configured policy.
     # Alternative true-response scenarios are separate frozen-display audits.
     ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(vf_raw)}
+    displayed={"BOOKED":b,"CASE":b+c.display(raw),
+               "VF":b+c.display(vf_raw)}
     save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
     for label,r in (("CASE",raw),("VF",vf_raw)):
         if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
@@ -445,7 +447,18 @@ def eval_2013(ctx,root,args,cache,selected):
                      status=rec["status"],cost=metrics["cost"],
                      idle_minutes=metrics["idle"],
                      overtime_minutes=metrics["overtime"],
-                     mae=float(np.abs(comp.actual-d[idx]).sum()))
+                     emptied_historical_surgeon_days=metrics[
+                         "emptied_historical_surgeon_days"],
+                     max_surgeon_day_minutes=metrics["max_surgeon_case_minutes"],
+                     mae=float(np.abs(comp.actual-d[idx]).sum()),
+                     displayed_mae=float(np.abs(
+                         comp.actual-displayed[label][idx]).sum()),
+                     displayed_asymmetric=float((
+                         1.75*np.maximum(comp.actual-displayed[label][idx],0.)
+                         +np.maximum(displayed[label][idx]-comp.actual,0.)).sum()),
+                     reviewed_asymmetric=float((
+                         1.75*np.maximum(comp.actual-d[idx],0.)
+                         +np.maximum(d[idx]-comp.actual,0.)).sum()))
             rows.append(row)
     save(root/"evaluation_2013.json",dict(
          label="EXPLORATORY_REUSED_2013_DATA",
@@ -512,7 +525,12 @@ def report(ctx,root):
                cost_per_case=sum(entry[method]["cost"] for entry in eligible)/N,
                mae_per_case=sum(entry[method]["mae"] for entry in eligible)/N,
                idle_minutes_per_case=sum(entry[method]["idle_minutes"] for entry in eligible)/N,
-               overtime_minutes_per_case=sum(entry[method]["overtime_minutes"] for entry in eligible)/N)
+               overtime_minutes_per_case=sum(entry[method]["overtime_minutes"] for entry in eligible)/N,
+               displayed_mae_per_case=sum(entry[method].get("displayed_mae",0.) for entry in eligible)/N,
+               displayed_asymmetric_per_case=sum(entry[method].get("displayed_asymmetric",0.) for entry in eligible)/N,
+               reviewed_asymmetric_per_case=sum(entry[method].get("reviewed_asymmetric",0.) for entry in eligible)/N,
+               emptied_historical_surgeon_days=sum(entry[method].get("emptied_historical_surgeon_days",0.) for entry in eligible),
+               max_surgeon_day_minutes=max((entry[method].get("max_surgeon_day_minutes",0.) for entry in eligible),default=0.))
     if N:
         weekdata={}
         for entry in eligible:
