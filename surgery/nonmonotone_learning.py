@@ -166,7 +166,8 @@ def room_matrix(items, plans, n_cases):
 class DCObjective:
     """Full asymmetric cost/envelope exactly as manuscript Section 4.
 
-    CASE: sum theta(actual - (booked+F(u))).
+    CASE: asymmetric error of surgeon-reviewed duration.
+    DISPLAY: asymmetric error of canonical displayed recommendation.
     VF: sum J(fixed_schedules,booked+F(u))
            + sum theta(actual-(booked+F(u))).
     Both divide by NUMBER OF TRAINING COMPONENTS, not number of cases.
@@ -182,8 +183,8 @@ class DCObjective:
         self.actual=np.asarray(actual,float)
         self.map=response_map
         self.mode=mode
-        if mode not in ("CASE","VF"):
-            raise ValueError("mode must be CASE or VF")
+        if mode not in ("CASE","DISPLAY","VF"):
+            raise ValueError("mode must be CASE, DISPLAY, or VF")
         self.n,self.p=self.X.shape
         if self.booked.shape!=(self.n,) or self.base.shape!=(self.n,) or self.actual.shape!=(self.n,):
             raise ValueError("CASE/VF array shape mismatch")
@@ -217,11 +218,16 @@ class DCObjective:
         A=np.maximum(e+N,P)
         choose_a=np.where(P>e+N,1.,np.where(P<e+N,0.,.5))
         G=KAPPA*A.sum()-C_UNDER*e.sum()
-        if self.mode=="CASE":
-            H=C_OVER*P.sum()+C_UNDER*N.sum()
-            dp=KAPPA*choose_a*Pp
-            dn=KAPPA*(1-choose_a)*Np
-            hraw=C_OVER*Pp+C_UNDER*Np
+        if self.mode in ("CASE","DISPLAY"):
+            a=(self.map.alpha if self.mode=="DISPLAY" else 1.)
+            display_a=np.maximum(e+N/a,P/a)
+            display_choose=np.where(P/a>e+N/a,1.,
+                                np.where(P/a<e+N/a,0.,.5))
+            G=KAPPA*display_a.sum()-C_UNDER*e.sum()
+            H=(C_OVER*P.sum()+C_UNDER*N.sum())/a
+            dp=KAPPA*display_choose*Pp/a
+            dn=KAPPA*(1.-display_choose)*Np/a
+            hraw=(C_OVER*Pp+C_UNDER*Np)/a
         else:
             S=self.rooms
             counts=np.diff(S.indptr)
@@ -351,13 +357,13 @@ def _save(path,payload):
 
 
 class ConvexEpigraphQP:
-    """Reusable exact convex epigraph QP for CASE and fixed-schedule VF."""
+    """Reusable exact convex epigraph QP for CASE, DISPLAY and fixed VF."""
 
     def __init__(self, objective, lower, upper):
         import gurobipy as gp
         from gurobipy import GRB
-        if objective.mode not in ("CASE","VF"):
-            raise ValueError("Exact QP requires CASE or VF")
+        if objective.mode not in ("CASE","DISPLAY","VF"):
+            raise ValueError("Exact QP requires a supported DC mode")
         self.gp=gp
         self.GRB=GRB
         self.objective=objective
@@ -393,8 +399,9 @@ class ConvexEpigraphQP:
                 N=N+minus@hinge
         A=m.addMVar(n,lb=-GRB.INFINITY,name="case_envelope")
         e=objective.actual-objective.booked
-        m.addConstr(A >= P,name="case_P")
-        m.addConstr(A >= e+N,name="case_e_plus_N")
+        factor=(objective.map.alpha if objective.mode=="DISPLAY" else 1.)
+        m.addConstr(A >= P/factor,name="case_P")
+        m.addConstr(A >= e+N/factor,name="case_e_plus_N")
         if objective.accuracy_mu:
             a=objective.map.alpha
             B=m.addMVar(n,lb=-GRB.INFINITY,name="display_accuracy_envelope")
@@ -547,7 +554,7 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
         print(f"{progress_label} pDCA: setting up optimizer "
               f"(maximum {outer} steps)",flush=True)
     solver=(ConvexEpigraphQP(objective,lower,upper)
-            if objective.mode in ("CASE","VF") and backend=="gurobi" else None)
+            if objective.mode in ("CASE","DISPLAY","VF") and backend=="gurobi" else None)
     if progress_label:
         print(f"{progress_label} pDCA: optimizer ready after "
               f"{time.perf_counter()-started:.1f}s",flush=True)
@@ -608,7 +615,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
           pdca_steps=50, max_cuts=80, backend="gurobi",
           solve_plans=None, penalize=None, accuracy_mu=0.,
           accuracy_reference=None, accuracy_budget=.05,
-          require_complete_deployment=False):
+          accuracy_gate=True, require_complete_deployment=False):
     """Direct MM/pDCA for EXACT VF; no finite-library approximation.
 
     Each iteration solves the planner at current reviewed durations and uses
@@ -642,7 +649,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
                      +C_UNDER*np.maximum(-error,0.)).sum()/len(items))
     initial_accuracy=displayed_accuracy(theta)
     legacy=(accuracy_reference is None and accuracy_mu==0.
-            and not require_complete_deployment)
+            and not require_complete_deployment and accuracy_gate)
     if accuracy_reference is None:
         accuracy_reference=initial_accuracy
     accuracy_reference=float(accuracy_reference)
@@ -650,7 +657,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
         raise ValueError("Missing positive displayed-accuracy reference")
     accuracy_limit=(1.e30 if legacy else
                     accuracy_reference*(1.+accuracy_budget))
-    if initial_accuracy>accuracy_limit+1e-7:
+    if accuracy_gate and initial_accuracy>accuracy_limit+1e-7:
         raise ValueError("Starting policy violates displayed-accuracy budget")
     root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
@@ -661,6 +668,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
               accuracy_mu=float(accuracy_mu),
               accuracy_reference=float(accuracy_reference),
               accuracy_budget=float(accuracy_budget),
+              accuracy_gate=bool(accuracy_gate),
               accuracy_limit=float(accuracy_limit)))
     if status.exists():
         state=json.loads(status.read_text())
@@ -717,9 +725,10 @@ def mm_vf(items, booked, X, response_map, actual, *,
         decrease=before-after
         tolerance=1e-8*max(1.,abs(before))
         trial_accuracy=displayed_accuracy(trial)
-        feasible=bool(trial_accuracy<=accuracy_limit+1e-7)
+        budget_met=bool(trial_accuracy<=accuracy_limit+1e-7)
+        feasible=bool(not accuracy_gate or budget_met)
         fraction=1.
-        if not feasible:
+        if accuracy_gate and not feasible:
             # Backtrack the pDCA proposal along the feasible CASE-to-VF
             # coefficient path. Accept only if both hard feasibility and
             # the original certified MM decrease test hold.
@@ -746,7 +755,8 @@ def mm_vf(items, booked, X, response_map, actual, *,
                  displayed_accuracy_before=displayed_accuracy(theta),
                  displayed_accuracy_trial=trial_accuracy,
                  displayed_accuracy_limit=accuracy_limit,
-                 accuracy_feasible=feasible,
+                 accuracy_feasible=bool(trial_accuracy<=accuracy_limit+1e-7),
+                 accuracy_gate_active=bool(accuracy_gate),
                  backtracking_fraction=float(fraction),
                  pdca_status=fitted["status"],
                  inner=fitted["iterations"],schedules=len(selected),
