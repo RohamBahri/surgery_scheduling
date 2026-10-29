@@ -273,6 +273,37 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             if evaluate(week,selected,d)["cost"]>primary_opt+tol+1e-6:
                 raise AssertionError("Squared-load stage changed primary cost")
             balance_tol=min(1.,max(.01,1e-8*max(1.,abs(balance_objective))))
+            # Before paying for a quadratic-constrained hash MIQCP, check
+            # whether the MIQP optimum already identifies a unique physical
+            # case assignment. This uses only a LINEAR exclusion plus the
+            # existing quadratic objective; an inconclusive check changes
+            # nothing and falls back to the original lexicographic rule.
+            winner=list(selected)
+            exclude=m.addConstr(
+                sum(x[i,int(winner[i])] for i in range(week.n))<=week.n-1,
+                name="exclude_secondary_winner")
+            m.setObjective(balance_expr,GRB.MINIMIZE)
+            m.Params.Cutoff=balance_objective+balance_tol
+            check_budget=min(20.,max(.001,.12*(seconds-(time.monotonic()-start))))
+            m.Params.TimeLimit=check_budget
+            check_started=time.monotonic()
+            m.optimize()
+            check_elapsed=time.monotonic()-check_started
+            secondary_unique=(m.Status in (GRB.INFEASIBLE,GRB.CUTOFF) or
+                (m.Status==GRB.OPTIMAL and m.SolCount
+                 and m.ObjVal>balance_objective+balance_tol))
+            hash_attempts.append(dict(stage="quadratic_unique_check",
+                status=str(m.Status),seconds=float(check_elapsed),
+                proven_unique=bool(secondary_unique)))
+            m.remove(exclude)
+            m.update()
+            m.Params.Cutoff=GRB.INFINITY
+            selected=winner
+            if secondary_unique:
+                hash_unique=True
+                uniqueness_status="UNIQUE_SECONDARY_CERTIFIED"
+                hash_status="HASH_SKIPPED_UNIQUE_SECONDARY"
+                return outcome("OPTIMAL",True,True,True)
             m.addQConstr(balance_expr<=balance_objective+balance_tol,
                          name="secondary_tie_set")
             m.update()
