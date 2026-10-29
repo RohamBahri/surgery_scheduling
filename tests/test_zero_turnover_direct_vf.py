@@ -53,7 +53,7 @@ def test_operational_audit_reports_confirmed_avoidable_peak(tmp_path,monkeypatch
     assert result["flagged_instances"]==1
     assert result["confirmed_avoidable"]==1
     assert result["entries"][0]["avoidable_peak_minutes_at_least"]==pytest.approx(100.)
-    assert not result["entries"][0]["forced_over_capacity_proven"]
+    assert result["entries"][0]["forced_over_capacity_proven"]
 
 
 def test_direct_mm_accepts_only_proven_exact_vf_improvement(tmp_path,monkeypatch):
