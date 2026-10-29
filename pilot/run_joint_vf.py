@@ -50,7 +50,7 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage",choices=("all","train","evaluate","probe",
-                    "replay","seeds","stress","audit"),default="all")
+                    "replay","seeds","stress","audit","hash-only"),default="all")
     p.add_argument("--context",type=Path,default=DEFAULT_CONTEXT)
     p.add_argument("--out",type=Path,default=Path("artifacts/vf_direct_no_turnover"))
     p.add_argument("--alpha",type=float,default=.8,
@@ -336,6 +336,127 @@ def audit_operational(a,ctx):
     return summary
 
 
+def audit_hash_only(a,ctx):
+    """Frozen-duration zero-turnover comparison: balanced vs hash-only.
+
+    Reuse the archived balanced deployment plans with strict signatures,
+    then solve hash-only deployments. Never refit or select a policy on 2013.
+    """
+    if a.turnover != 0.:
+        raise ValueError("hash-only comparison requires --turnover 0")
+    _,_,durations=frozen_test_durations(a,ctx)
+    items=ctx["eval"]
+    archived={}
+    hash_only={}
+    for method,d in durations.items():
+        archived[method]={}
+        for key,c,rows in items:
+            segment=np.ascontiguousarray(d[rows],dtype="<f8")
+            expected=engine.sha(
+                str(key).encode()+segment.tobytes()+
+                repr((float(a.plan_seconds),True,
+                      "zero_turnover_sqload_v1")).encode())
+            file=a.out/"plans"/("eval_"+method)/(
+                engine.sha(str(key).encode())+".json")
+            if not file.exists():
+                raise FileNotFoundError(
+                    f"Missing archived balanced plan: {file}")
+            record=read(file)
+            if record.get("signature")!=expected:
+                raise ValueError("Archived balanced plan signature mismatch: "+str(key))
+            archived[method][key]=record["result"]
+        hash_only[method]=run_seed(
+            items,d,a.out/"hash_only_audit","hash_only_"+method,
+            0,a.cores,a.plan_seconds,balance=False)
+
+    methods=("BOOKED","CASE","VF")
+    by_key={key:(c,rows) for key,c,rows in items}
+    common=[]
+    entries=[]
+    for key,c,rows in items:
+        record={"instance":str(key),"site":str(c.group),
+                "week":str(c.monday),"cases":int(c.n)}
+        verified=True
+        for rule,plans in (("balanced",archived),("hash_only",hash_only)):
+            for method in methods:
+                result=plans[method][key]
+                z=result["assignment"]
+                if z is None:
+                    verified=False
+                    continue
+                cost=float(evaluate(c,z,c.actual)["cost"])
+                load=np.asarray(__import__(
+                    "surgery.weekly_planner",fromlist=["loads"]).loads(
+                    c,z,durations[method][rows]),float)
+                record[f"{rule}_{method}_cost"]=cost
+                record[f"{rule}_{method}_peak"]=float(load.max())
+                record[f"{rule}_{method}_complete"]=bool(result["complete"])
+                if not result["complete"]:
+                    verified=False
+        for method in methods:
+            record[f"{method}_assignment_changed"]=(
+                archived[method][key]["assignment"]!=
+                hash_only[method][key]["assignment"])
+        record["common_certified"]=verified
+        entries.append(record)
+        if verified:
+            common.append(record)
+    if not common:
+        raise RuntimeError("No jointly proven deployment instances")
+    n=sum(r["cases"] for r in common)
+    totals={}
+    for rule in ("balanced","hash_only"):
+        totals[rule]={
+            method:sum(r[f"{rule}_{method}_cost"] for r in common)/n
+            for method in methods}
+        totals[rule]["VF_minus_CASE"]=(
+            totals[rule]["VF"]-totals[rule]["CASE"])
+        totals[rule]["VF_minus_BOOKED"]=(
+            totals[rule]["VF"]-totals[rule]["BOOKED"])
+    differences={}
+    for method in methods:
+        value=sum(r[f"hash_only_{method}_cost"]-
+                  r[f"balanced_{method}_cost"] for r in common)/n
+        differences[method]=dict(
+            hash_only_minus_balanced_per_case=float(value),
+            assignment_changed_instances=sum(
+                r[f"{method}_assignment_changed"] for r in common),
+            mean_peak_balanced=float(np.mean([
+                r[f"balanced_{method}_peak"] for r in common])),
+            mean_peak_hash_only=float(np.mean([
+                r[f"hash_only_{method}_peak"] for r in common])))
+    weeks=sorted({r["week"] for r in common})
+    widx={w:i for i,w in enumerate(weeks)}
+    den=np.zeros(len(weeks));weighted=np.zeros(len(weeks))
+    for row in common:
+        i=widx[row["week"]]
+        den[i]+=row["cases"]
+        weighted[i]+=(
+            (row["hash_only_VF_cost"]-row["hash_only_CASE_cost"])
+            -(row["balanced_VF_cost"]-row["balanced_CASE_cost"]))
+    rng=np.random.default_rng(20261029)
+    samples=rng.integers(0,len(weeks),size=(10000,len(weeks)))
+    effect=weighted[samples].sum(axis=1)/den[samples].sum(axis=1)
+    output=dict(
+        stage="frozen_hash_only_vs_squared_load",
+        turnover_minutes=0.,plan_seconds=float(a.plan_seconds),
+        sample_rule="same proven instances under both rules and all methods",
+        common_proven_instances=len(common),common_proven_cases=n,
+        excluded_instances=len(entries)-len(common),
+        comparison_cost_per_case=totals,
+        policy_rule_changes=differences,
+        hash_effect_on_VF_minus_CASE=dict(
+            difference_per_case=float(weighted.sum()/n),
+            paired_week_bootstrap_95=list(map(
+                float,np.quantile(effect,[.025,.975])))),
+        exploratory_2013=True,
+        instances=entries)
+    engine.save(a.out/"hash_only_diagnostic.json",output)
+    summary={k:v for k,v in output.items() if k!="instances"}
+    print(json.dumps(summary,indent=2))
+    return output
+
+
 def main(argv=None):
     a=parse_args(argv)
     if a.stage in ("all","train"):
@@ -355,10 +476,11 @@ def main(argv=None):
     if a.stage in ("all","audit"):
         ctx,_=verified_context(a)
         audit_operational(a,ctx)
-    if a.stage in ("replay","seeds","stress"):
+    if a.stage in ("replay","seeds","stress","hash-only"):
         ctx,_=verified_context(a)
         if a.stage=="replay":replay_training(a,ctx)
         elif a.stage=="seeds":audit_seeds(a,ctx)
+        elif a.stage=="hash-only":audit_hash_only(a,ctx)
         else:audit_stress(a,ctx)
 
 
