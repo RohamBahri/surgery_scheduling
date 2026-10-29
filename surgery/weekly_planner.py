@@ -13,7 +13,8 @@ import numpy as np
 from .weekly_data import Week
 
 CAPACITY = 480.
-TURNOVER = float(os.environ.get('SURGERY_TURNOVER_MINUTES', '0'))
+TURNOVER = float(os.environ.get('SURGERY_TURNOVER_MINUTES', '30'))
+RELAX_REQUIRED_DAYS = os.environ.get('SURGERY_RELAX_REQUIRED_DAYS','0') == '1'
 OVERTIME = 1.75
 
 
@@ -44,11 +45,12 @@ def loads(week: Week, assignment, durations):
     if any(not 0 <= int(j) < week.k or int(j) not in week.allowed[int(week.surgeon[i])]
            for i, j in enumerate(a)):
         raise ValueError("Ineligible case-to-room assignment")
-    for s, days in enumerate(week.required_days):
-        members = np.flatnonzero(week.surgeon == s)
-        for wd in days:
-            if not any(week.slots[a[i]][0] == wd for i in members):
-                raise ValueError("An observed surgeon-day was emptied")
+    if not RELAX_REQUIRED_DAYS:
+        for s, days in enumerate(week.required_days):
+            members = np.flatnonzero(week.surgeon == s)
+            for wd in days:
+                if not any(week.slots[a[i]][0] == wd for i in members):
+                    raise ValueError("An observed surgeon-day was emptied")
     counts=np.bincount(a,minlength=week.k)
     return (np.bincount(a,weights=d+TURNOVER,minlength=week.k)
             -TURNOVER*(counts>0))
@@ -64,7 +66,9 @@ def evaluate(week: Week, assignment, durations):
                       for i in range(week.n))
     # A workload diagnostic, NOT a feasibility constraint or surgeon-time cost.
     surgeon_day = {}
+    kept_days = {s:set() for s in range(len(week.surgeon_ids))}
     for i in range(week.n):
+        kept_days[int(week.surgeon[i])].add(week.slots[a[i]][0])
         key = (int(week.surgeon[i]), week.slots[a[i]][0])
         surgeon_day[key] = surgeon_day.get(key, 0.) + float(durations[i])
     return {
@@ -74,6 +78,9 @@ def evaluate(week: Week, assignment, durations):
         "room_days_over_720": int((room_load > 720).sum()),
         "max_surgeon_case_minutes": max(surgeon_day.values(), default=0.),
         "surgeon_days_over_480": int(sum(v > CAPACITY for v in surgeon_day.values())),
+        "emptied_historical_surgeon_days": int(sum(
+            wd not in kept_days[s] for s,days in enumerate(week.required_days)
+            for wd in days)),
         "moved_cases": int(changed), "moved_weekdays": int(changed_day),
         "used_extra_days": int(sum(
             any(week.surgeon[i] == week.surgeon_ids.index(s)
@@ -120,13 +127,14 @@ def _model(week, seconds, threads):
     x = m.addVars(arcs, vtype=GRB.BINARY, name="x")
     for i in range(week.n):
         m.addConstr(gp.quicksum(x[i, j] for j in week.allowed[int(week.surgeon[i])]) == 1)
-    for s, weekdays in enumerate(week.required_days):
-        cases = np.flatnonzero(week.surgeon == s)
-        for weekday in weekdays:
-            m.addConstr(gp.quicksum(
-                x[int(i), j] for i in cases for j in week.allowed[s]
-                if week.slots[j][0] == weekday
-            ) >= 1, name=f"retain_day_{s}_{weekday}")
+    if not RELAX_REQUIRED_DAYS:
+        for s, weekdays in enumerate(week.required_days):
+            cases = np.flatnonzero(week.surgeon == s)
+            for weekday in weekdays:
+                m.addConstr(gp.quicksum(
+                    x[int(i), j] for i in cases for j in week.allowed[s]
+                    if week.slots[j][0] == weekday
+                ) >= 1, name=f"retain_day_{s}_{weekday}")
 
     by_room = [[] for _ in week.slots]
     for i, j in arcs:

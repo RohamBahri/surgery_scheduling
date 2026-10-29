@@ -24,7 +24,7 @@ class Week:
     surgeon: np.ndarray          # local surgeon index for each case
     original: np.ndarray         # original physical room-day index for each case
     allowed: tuple               # allowed slot indices, one tuple per surgeon
-    required_days: tuple         # original operating weekdays, per surgeon
+    required_days: tuple         # observed operating weekdays (metadata when relaxed)
     booked: np.ndarray
     actual: np.ndarray
     added_days: tuple            # (surgeon id, weekday, room, evidence), if any
@@ -53,7 +53,9 @@ class Week:
                 raise ValueError(f"Original session unavailable for case {i}")
         for s, days in enumerate(self.required_days):
             if not days or any(not any(self.slots[j][0] == d for j in self.allowed[s]) for d in days):
-                raise ValueError("Original operating day cannot retain a case")
+                raise ValueError("Observed surgeon-day is not represented by eligible slots")
+            # These are historic metadata; whether retention is required
+            # is a scheduling-model setting, not an intrinsic Week property.
         return self
 
     def components(self):

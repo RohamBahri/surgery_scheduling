@@ -59,7 +59,7 @@ def parse_args(argv=None):
                    help="Training display saturation threshold (minutes)")
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
-    p.add_argument("--turnover",type=float,default=0.,
+    p.add_argument("--turnover",type=float,default=30.,
                    help="Per-between-case room time in minutes, 0 or 30")
     p.add_argument("--lambda-vf",type=float,default=LAMBDA_VF,
                    help="Absolute VF L1 coefficient (intercept excluded)")
@@ -99,10 +99,12 @@ def parse_args(argv=None):
     a.context=a.context.resolve()
     a.out=a.out.resolve()
     os.environ["SURGERY_TURNOVER_MINUTES"]=str(a.turnover)
+    os.environ["SURGERY_RELAX_REQUIRED_DAYS"]="1"
     # These modules were imported before parsing, while spawned solver
     # processes import them anew using the inherited environment setting.
     from surgery import weekly_planner, anchored_weekly_solver, nonmonotone_learning
     weekly_planner.TURNOVER=a.turnover
+    weekly_planner.RELAX_REQUIRED_DAYS=True
     anchored_weekly_solver.TURNOVER=a.turnover
     nonmonotone_learning.TURNOVER=a.turnover
     return a

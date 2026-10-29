@@ -27,6 +27,9 @@ from .weekly_planner import (
 
 def mandatory_slots(week):
     """Exactly forced-open physical room-days implied by surgeon-day retention."""
+    from .weekly_planner import RELAX_REQUIRED_DAYS
+    if RELAX_REQUIRED_DAYS:
+        return frozenset()  # No longer logically forced by historical days.
     forced = set()
     for s, days in enumerate(week.required_days):
         for day in days:
@@ -57,7 +60,8 @@ def conservation_certificate(week, duration):
     A feasible original assignment matching the bound is globally optimal.
     A cost proof does not select a unique deployed hash-optimal assignment.
     """
-    if len(mandatory_slots(week)) != week.k:
+    from .weekly_planner import RELAX_REQUIRED_DAYS
+    if RELAX_REQUIRED_DAYS or len(mandatory_slots(week)) != week.k:
         return None
     d = _feasible_duration(week, duration)
     total = float(d.sum()) + TURNOVER*(week.n-week.k)
