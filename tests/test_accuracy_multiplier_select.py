@@ -19,7 +19,7 @@ def _run(folder,mu,ratio,reference=100.):
         accuracy_gate="off",accuracy_mu=mu,accuracy_budget=.05,
         accuracy_reference=reference,
         accuracy_achieved=reference*ratio,accuracy_ratio=ratio,
-        vf_status="RELATIVE_IMPROVEMENT"))
+        vf_status="RELATIVE_IMPROVEMENT")))
 
 
 def test_first_feasible_grid_multiplier(tmp_path):
