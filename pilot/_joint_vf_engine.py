@@ -364,7 +364,7 @@ def work(ctx,root,args):
                  accuracy_mu=args.accuracy_mu,
                  accuracy_reference=accuracy_reference,
                  accuracy_budget=args.accuracy_budget,
-                 require_complete_deployment=True)
+                 require_complete_deployment=False)
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
         save(root/"selected_policy.json",dict(
@@ -389,6 +389,9 @@ def work(ctx,root,args):
                     +np.maximum(b+response_map.display(vf_raw)-actual,0.)
                     ).sum()/len(train)),
                training_uses_deployment_ties=True,
+               training_incomplete_tie_counts=[
+                   int(row["uncertified_planner_instances"])
+                   for row in state["history"]],
                relaxed_required_days=True,turnover_minutes=30.,
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
