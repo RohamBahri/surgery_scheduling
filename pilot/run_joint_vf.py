@@ -32,7 +32,7 @@ from surgery.nonmonotone_learning import ResponseDC
 from surgery.response_grid import Scenario, implemented_from_display
 from surgery.weekly_planner import evaluate
 
-LAMBDA_VF=0.10924129431614196
+LAMBDA_VF=0.1
 DEFAULT_CONTEXT=Path("artifacts/objective_selection_12h/objective_selection_2013/context.pkl")
 
 
@@ -50,7 +50,7 @@ def parse_args(argv=None):
     p.add_argument("--stage",choices=("all","train","evaluate","probe",
                     "replay","seeds","stress"),default="all")
     p.add_argument("--context",type=Path,default=DEFAULT_CONTEXT)
-    p.add_argument("--out",type=Path,default=Path("artifacts/structural_vf_main"))
+    p.add_argument("--out",type=Path,default=Path("artifacts/vf_direct_no_turnover"))
     p.add_argument("--alpha",type=float,default=.8,
                    help="Assumed adoption in TRAINING; policy is refitted when changed")
     p.add_argument("--h",type=float,default=30.,

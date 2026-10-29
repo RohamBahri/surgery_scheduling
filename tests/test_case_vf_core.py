@@ -154,14 +154,14 @@ def test_library_mm_trains_and_keeps_feasible_timeout_incumbent(tmp_path,backend
             np.array([[1.,1.],[1.,.5],[1.,-1.]]),
             m,week.actual,start=np.array([12.,0.]),
             root=tmp_path,lam=.001,
-            initial_libraries={"toy":[[0,0,0],[0,1,1]]},
+            initial_libraries=None,
             iterations=2,pdca_steps=3,max_cuts=25,
             backend=backend,solve_plans=oracle)
     assert calls
     for r in results["history"]:
         if r["accepted"]:
-            assert r["delta"]>0.
-    assert results["libraries"]["toy"]
+            assert r["guaranteed_exact_vf_decrease_lower_bound"]>0.
+    assert results["policy_spec"]=="joint_vf_direct_zero_turnover_v1"
 
 
 def test_runner_help_imports_without_training():

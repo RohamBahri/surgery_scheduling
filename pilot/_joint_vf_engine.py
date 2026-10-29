@@ -300,8 +300,7 @@ def work(ctx,root,args):
         record_stage_time(root,"draft_and_booked",time.perf_counter()-draft_started)
         if args.stage=="draft":
             return
-        libraries={key:[booked[key]["assignment"],case_draft[key]["assignment"]]
-                   for key,_,_ in train}
+        # Direct VF does not use a schedule library; caches only reuse identical solves.
         # CASE initializes VF, but all case and plan coefficients remain free.
         X=np.column_stack([data["X"],H])
         # Diagnose duplicate or nearly duplicate columns before optimization.
@@ -339,7 +338,7 @@ def work(ctx,root,args):
         def oracle(items,d,k):
             return cache.solve(items,d,"vf_outer_"+str(k),tie=False)
         state=mm_vf(train,b,X,response_map,actual,start=start,root=root,
-                 lam=vf_lam,initial_libraries=libraries,
+                 lam=vf_lam,
                  iterations=args.vf_outers,radius=args.vf_radius,
                  pdca_steps=args.vf_pdca_steps,max_cuts=args.cuts,
                  backend=args.backend,solve_plans=oracle,penalize=penalty)
@@ -552,7 +551,9 @@ def main():
     with args.context.open("rb") as f:
         ctx=pickle.load(f)
     from surgery import nonmonotone_learning as core
-    fingerprint=sha(Path(__file__).read_bytes()+Path(core.__file__).read_bytes())
+    from surgery import weekly_planner, anchored_weekly_solver, vf_features
+    fingerprint=sha(b"".join(Path(mod.__file__).read_bytes() for mod in
+        (sys.modules[__name__],core,weekly_planner,anchored_weekly_solver,vf_features)))
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
                   vf_outers=args.vf_outers,vf_pdca_steps=args.vf_pdca_steps,

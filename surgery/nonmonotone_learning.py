@@ -575,115 +575,108 @@ def pdca(objective, start, *, radius=64., outer=25, prox=1e-3,
 
 
 def mm_vf(items, booked, X, response_map, actual, *,
-          start, root, lam, initial_libraries, iterations=30, radius=100.,
+          start, root, lam, initial_libraries=None, iterations=30, radius=100.,
           pdca_steps=50, max_cuts=80, backend="gurobi",
           solve_plans=None, penalize=None):
-    """Joint VF library majorization and pDCA over all coefficients.
+    """Direct MM/pDCA for EXACT VF; no finite-library approximation.
 
-    CASE provides only the warm start; no coefficients are held fixed.
+    Each iteration solves the planner at current reviewed durations and uses
+    its feasible assignments to majorize the exact value function. A new
+    parameter vector is accepted only when the fixed-schedule decrease is
+    strictly larger than the certified aggregate planner gap. Historical
+    schedule libraries are never consulted or maintained.
     """
     X=np.asarray(X,float)
     booked=np.asarray(booked,float)
-    start=np.asarray(start,float)
-    if X.shape[0]!=len(booked) or start.shape!=(X.shape[1],):
-        raise ValueError("Joint VF feature/start dimension mismatch")
-    if np.any(np.abs(start)>radius):
-        raise ValueError("Joint VF initial coefficients outside bounds")
+    actual=np.asarray(actual,float)
+    theta=np.asarray(start,float)
+    if X.shape[0]!=len(booked) or theta.shape!=(X.shape[1],):
+        raise ValueError("Direct VF feature/start dimension mismatch")
+    if not np.isfinite(theta).all() or np.any(np.abs(theta)>radius):
+        raise ValueError("Direct VF initial coefficients outside bounds")
     penalty=(np.r_[0.,np.ones(X.shape[1]-1)] if penalize is None
              else np.asarray(penalize,float))
     if (penalty.shape!=(X.shape[1],) or penalty[0]!=0.
             or not np.isfinite(penalty).all() or np.any(penalty<0.)):
-        raise ValueError("Invalid VF coefficient penalty weights")
+        raise ValueError("Invalid VF penalty weights")
     if solve_plans is None:
         raise ValueError("Planner callback required")
     root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
-    status=root/"vf_library_progress.json"
+    status=root/"vf_direct_progress.json"
     if status.exists():
         state=json.loads(status.read_text())
-        if state.get("policy_spec")!="joint_vf_bookings_v1":
-            raise ValueError("Incompatible VF checkpoint: use a new directory")
+        if state.get("policy_spec")!="joint_vf_direct_zero_turnover_v1":
+            raise ValueError("Incompatible direct-VF checkpoint; use new directory")
         theta=np.asarray(state["theta"],float)
         if theta.shape!=start.shape:
-            raise ValueError("VF coefficient dimension mismatch")
-        libraries=state["libraries"]
+            raise ValueError("Direct VF checkpoint dimension mismatch")
     else:
-        theta=start.copy()
-        libraries={key:[list(map(int,z)) for z in initial_libraries[key]]
-                   for key,_,_ in items}
-        state=dict(theta=theta.tolist(),history=[],libraries=libraries,
-                   policy_spec="joint_vf_bookings_v1",status="RUNNING")
+        state=dict(theta=theta.tolist(),history=[],
+                   policy_spec="joint_vf_direct_zero_turnover_v1",
+                   status="RUNNING")
     if state.get("status") in ("NO_CONFIRMED_IMPROVEMENT",
-                               "RELATIVE_IMPROVEMENT",
-                               "OUTER_ITERATION_CAP"):
-        print(f"VF: reusing completed checkpoint "
-              f"({len(state['history'])} iterations)",flush=True)
+                               "RELATIVE_IMPROVEMENT","OUTER_ITERATION_CAP"):
+        print("VF: reusing completed direct-MM checkpoint",flush=True)
         return state
-    if not all(libraries.get(key) for key,_,_ in items):
-        raise ValueError("Every component requires a feasible initial assignment")
     run_started=time.perf_counter()
     for outer in range(len(state["history"]),iterations):
-        outer_started=time.perf_counter()
-        print(f"VF MM {outer+1}/{iterations}: obtaining planner schedules "
-              f"for {len(items)} components",flush=True)
+        tick=time.perf_counter()
         d=booked+response_map.correction(X@theta)
         candidates=solve_plans(items,d,outer)
+        selected={}
         gaps=[]
+        unresolved=0
         for key,c,rows in items:
             candidate=candidates.get(key)
-            if candidate is not None:
-                z=candidate.get("assignment") if isinstance(candidate,dict) else candidate
-                if z is not None:
-                    z=list(map(int,z))
-                    from surgery.weekly_planner import loads
-                    loads(c,z,d[rows])
-                    if z not in libraries[key]:
-                        libraries[key].append(z)
-            value=min(planned_cost_fast(c,z,d[rows]) for z in libraries[key])
-            bound=candidate.get("bound") if isinstance(candidate,dict) else None
-            gaps.append(max(0.,value-max(0.,float(bound))) if bound is not None else value)
-        selected=choose_library_schedules(items,libraries,d)
+            if candidate is None or candidate.get("assignment") is None:
+                raise ValueError("Direct VF requires a feasible planner schedule")
+            z=list(map(int,candidate["assignment"]))
+            from surgery.weekly_planner import loads
+            loads(c,z,d[rows])
+            primal=planned_cost_fast(c,z,d[rows])
+            dual=candidate.get("bound")
+            if dual is None or not np.isfinite(dual) or float(dual)>primal+1e-5:
+                raise ValueError("Direct VF requires a valid lower bound")
+            selected[key]=z
+            gaps.append(max(0.,primal-max(0.,float(dual))))
+            unresolved+=not bool(candidate.get("complete",False))
         S,_=room_matrix(items,selected,len(booked))
         objective=DCObjective(booked,X,np.zeros_like(booked),response_map,
                               mode="VF",actual=actual,components=len(items),
                               rooms=S,lam=lam,penalize=penalty)
-        before=library_value(items,libraries,d,actual,lam,theta,penalty)
-        if abs(before-objective.value(theta))>1e-5*max(1.,abs(before)):
-            raise AssertionError("MM touching identity failed: objective normalization/rooms")
+        before=float(objective.value(theta))
+        gap=float(np.sum(gaps)/len(items))
         fitted=pdca(objective,theta,radius=radius,outer=pdca_steps,
                     max_cuts=max_cuts,tolerance=1e-7,backend=backend)
         trial=np.asarray(fitted["weights"],float)
-        search=dict(pdca_status=fitted["status"],inner=fitted["iterations"])
-        new_d=booked+response_map.correction(X@trial)
-        after=library_value(items,libraries,new_d,actual,lam,trial,penalty)
-        accepted=bool(after<before-1e-8*max(1.,abs(before)))
-        improvement=max(0.,before-after) if accepted else 0.
-        state["history"].append(dict(outer=outer+1,
-                      before=float(before),candidate=float(after),
-                      delta=float(improvement),
-                      epsilon=float(np.mean(gaps)),
-                      accepted=accepted,
-                      added_schedules=sum(len(z) for z in libraries.values()),
-                      search=search))
+        after=float(objective.value(trial))
+        decrease=before-after
+        tolerance=1e-8*max(1.,abs(before))
+        accepted=bool(decrease>gap+tolerance)
+        row=dict(outer=outer+1,majorizer_before=before,
+                 majorizer_after=after,majorizer_decrease=float(decrease),
+                 certified_planner_gap=gap,uncertified_planner_instances=int(unresolved),
+                 guaranteed_exact_vf_decrease_lower_bound=float(decrease-gap),
+                 accepted=accepted,pdca_status=fitted["status"],
+                 inner=fitted["iterations"],schedules=len(selected),
+                 elapsed_seconds=round(time.perf_counter()-tick,3))
+        state["history"].append(row)
         if accepted:
             theta=trial
             state["theta"]=theta.tolist()
-        row=state["history"][-1]
-        row["elapsed_seconds"]=round(time.perf_counter()-outer_started,3)
-        print(f"VF MM {outer+1}/{iterations}: "
-              f"objective {before:.6f} -> {after:.6f}; "
-              f"delta={improvement:.6f}, epsilon={row['epsilon']:.6f}, "
-              f"accepted={accepted}; schedules={row['added_schedules']}; "
-              f"outer elapsed={row['elapsed_seconds']:.1f}s; "
-              f"total elapsed={time.perf_counter()-run_started:.1f}s",flush=True)
-        state["libraries"]=libraries
         state["status"]="RUNNING"
         _save(status,state)
+        print(f"VF direct-MM {outer+1}/{iterations}: majorizer "
+              f"{before:.6f} -> {after:.6f}; planner gap={gap:.6g}; "
+              f"unresolved={unresolved}; accepted={accepted}; "
+              f"elapsed={row['elapsed_seconds']:.1f}s; "
+              f"total={time.perf_counter()-run_started:.1f}s",flush=True)
         if not accepted:
             state["status"]="NO_CONFIRMED_IMPROVEMENT"
             _save(status,state)
             break
-        if improvement/max(1.,abs(before))<1e-6:
+        if decrease/max(1.,abs(before))<1e-6:
             state["status"]="RELATIVE_IMPROVEMENT"
             _save(status,state)
             break
