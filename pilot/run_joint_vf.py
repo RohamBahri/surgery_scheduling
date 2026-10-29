@@ -59,12 +59,16 @@ def parse_args(argv=None):
                    help="Training display saturation threshold (minutes)")
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
-    p.add_argument("--turnover",type=float,default=30.,
+    p.add_argument("--turnover",type=float,default=0.,
                    help="Per-between-case room time in minutes, 0 or 30")
     p.add_argument("--accuracy-mu",type=float,default=5.,
                    help="Lagrangian multiplier for displayed-advice accuracy")
     p.add_argument("--accuracy-budget",type=float,default=.05,
-                   help="Relative allowed displayed accuracy loss vs reference")
+                   help="Relative allowed displayed accuracy loss vs fitted display reference")
+    p.add_argument("--accuracy-gate",choices=("on","off"),default="off",
+                   help="on: reject MM steps violating budget; off: calibrate multiplier")
+    p.add_argument("--train-tie",choices=("primary","deployed"),default="primary",
+                   help="Primary-optimal or full deployment tie in MM outer loop")
     p.add_argument("--lambda-vf",type=float,default=LAMBDA_VF,
                    help="Absolute VF L1 coefficient (intercept excluded)")
     p.add_argument("--cores",type=int,default=15)
@@ -132,7 +136,8 @@ def engine_args(a,stage):
         "--backend","gurobi","--cap","180",
         "--cores",str(a.cores),"--plan-seconds",str(a.plan_seconds),
         "--accuracy-mu",str(a.accuracy_mu),
-        "--accuracy-budget",str(a.accuracy_budget)]
+        "--accuracy-budget",str(a.accuracy_budget),
+        "--accuracy-gate",a.accuracy_gate,"--train-tie",a.train_tie]
 
 
 def run_engine(a,stage):
@@ -158,9 +163,13 @@ def verified_context(a):
         raise ValueError("Turnover setting differs from trained policy")
     if contract.get("relaxed_required_days") is not True:
         raise ValueError("Contract lacks relaxed surgeon-day retention")
-    if (contract.get("vf_training_tie")!="squared_load_hash" or
+    required_tie=("squared_load_hash" if a.train_tie=="deployed"
+                  else "primary_optimum")
+    if (contract.get("vf_training_tie")!=required_tie or
+        contract.get("accuracy_gate")!=a.accuracy_gate or
+        contract.get("accuracy_reference_kind")!="fitted_accuracy_only_display" or
         contract.get("accuracy_kind")!="displayed_asymmetric"):
-        raise ValueError("Contract lacks deployed-rule / displayed-accuracy specification")
+        raise ValueError("Contract lacks requested training-tie or displayed-accuracy reference")
     bad={k:(contract.get(k),v) for k,v in expected.items()
          if contract.get(k)!=v}
     if bad:raise ValueError("Frozen policy configuration mismatch: "+str(bad)+
@@ -169,7 +178,9 @@ def verified_context(a):
     if (selected.get("method")!="JOINT_VF" or
         selected.get("vf_features")!="structural" or
         selected.get("link")!=a.link or
-        selected.get("training_uses_deployment_ties") is not True or
+        selected.get("training_uses_deployment_ties")!=(a.train_tie=="deployed") or
+        selected.get("accuracy_reference_kind")!="fitted_accuracy_only_display" or
+        selected.get("accuracy_gate")!=a.accuracy_gate or
         selected.get("relaxed_required_days") is not True or
         not np.isclose(selected.get("accuracy_mu",-1),a.accuracy_mu) or
         not np.isclose(selected.get("accuracy_budget",-1),a.accuracy_budget) or
