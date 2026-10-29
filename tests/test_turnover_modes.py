@@ -7,7 +7,7 @@ from surgery import weekly_planner as wp
 from surgery import nonmonotone_learning as nl
 from surgery import anchored_weekly_solver as anchor
 from surgery.vf_features import structural_features
-from pilot.run_joint_vf import parse_args
+from pilot.run_joint_vf import parse_args, configure_model
 
 
 def sample():
@@ -61,6 +61,7 @@ def test_turnover_cli_and_hash_only_stage(tmp_path,monkeypatch):
         a=parse_args(["--context",str(context),"--stage","train",
                       "--turnover","30"])
         assert a.turnover==30.
+        configure_model(a)
         assert wp.TURNOVER==nl.TURNOVER==anchor.TURNOVER==30.
 
 

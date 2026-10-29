@@ -105,6 +105,11 @@ def parse_args(argv=None):
         p.error("Hash seeds must be distinct and nonnegative")
     a.context=a.context.resolve()
     a.out=a.out.resolve()
+    return a
+
+
+def configure_model(a):
+    """Apply scientific settings only when a run actually starts."""
     os.environ["SURGERY_TURNOVER_MINUTES"]=str(a.turnover)
     os.environ["SURGERY_RELAX_REQUIRED_DAYS"]="1"
     # These modules were imported before parsing, while spawned solver
@@ -114,7 +119,6 @@ def parse_args(argv=None):
     weekly_planner.RELAX_REQUIRED_DAYS=True
     anchored_weekly_solver.TURNOVER=a.turnover
     nonmonotone_learning.TURNOVER=a.turnover
-    return a
 
 
 def engine_args(a,stage):
@@ -480,6 +484,7 @@ def audit_hash_only(a,ctx):
 
 def main(argv=None):
     a=parse_args(argv)
+    configure_model(a)
     if a.stage in ("all","train"):
         if not (a.out/"selected_policy.json").exists():
             run_engine(a,"all")
