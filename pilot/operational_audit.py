@@ -1,4 +1,4 @@
-"""Operational audit for zero-turnover room-day assignment.
+"""Operational audit for configured-turnover room-day assignment.
 
 Separates aggregate capacity shortfall, necessary eligibility bottlenecks,
 and avoidable peak-load concentration. The minimum-peak comparison is a
@@ -21,25 +21,32 @@ def necessary_peak_bounds(week, duration):
     d=np.asarray(duration,float)
     if len(d)!=week.n or np.any(d<=0) or not np.isfinite(d).all():
         raise ValueError("Invalid durations for operational audit")
-    aggregate=float(d.sum()/week.k)
+    from surgery.weekly_planner import TURNOVER
+    aggregate=float((d.sum()+TURNOVER*max(0,week.n-week.k))/week.k)
     eligible=[frozenset(int(j) for j in arcs) for arcs in week.allowed]
     candidates=set(eligible)
     candidates.add(frozenset(range(week.k)))
     by_surgeon=np.bincount(week.surgeon,weights=d,
                           minlength=len(eligible))
+    case_counts=np.bincount(week.surgeon,minlength=len(eligible))
     bottlenecks=[]
     for slots in candidates:
         if not slots:
             continue
-        forced=sum(float(by_surgeon[s]) for s,arcs in enumerate(eligible)
-                   if arcs.issubset(slots))
-        bottlenecks.append((forced/len(slots),len(slots),forced))
+        forced_surgeons=[s for s,arcs in enumerate(eligible)
+                         if arcs.issubset(slots)]
+        forced=sum(float(by_surgeon[s]) for s in forced_surgeons)
+        forced_cases=sum(int(case_counts[s]) for s in forced_surgeons)
+        lower_workload=forced+TURNOVER*max(0,forced_cases-len(slots))
+        bottlenecks.append(
+            (lower_workload/len(slots),len(slots),lower_workload))
     pressure=max((v[0] for v in bottlenecks),default=aggregate)
     return dict(aggregate_peak_lower_bound=aggregate,
                 eligibility_peak_lower_bound=float(pressure),
                 necessary_peak_lower_bound=float(max(aggregate,pressure)),
                 aggregate_overtime_minutes_lower_bound=
-                    float(max(0.,d.sum()-CAPACITY*week.k)),
+                    float(max(0.,d.sum()+
+                        TURNOVER*max(0,week.n-week.k)-CAPACITY*week.k)),
                 eligibility_excess_peak_lower_bound=
                     float(max(0.,pressure-CAPACITY)))
 
@@ -52,7 +59,7 @@ def solve_minimum_peak(week,duration,*,seconds=60.,threads=1):
     """
     from gurobipy import GRB
     import gurobipy as gp
-    from surgery.weekly_planner import _model, _assignment
+    from surgery.weekly_planner import _model, _assignment, TURNOVER
     d=np.asarray(duration,float)
     week.validate()
     original_peak=float(loads(week,week.original,d).max())
@@ -61,7 +68,9 @@ def solve_minimum_peak(week,duration,*,seconds=60.,threads=1):
     try:
         peak=m.addVar(lb=0.,name="peak_minutes")
         for j,cases in enumerate(by_room):
-            m.addConstr(peak>=gp.quicksum(float(d[i])*x[i,j] for i in cases))
+            m.addConstr(peak>=(
+                gp.quicksum((float(d[i])+TURNOVER)*x[i,j] for i in cases)
+                -TURNOVER*used[j]))
         m.setObjective(peak,GRB.MINIMIZE)
         m.optimize()
         best=original_peak
@@ -110,7 +119,9 @@ def audit_policy(items,durations,plans,folder,*,seconds=60.,threshold=720.):
                  over_720_room_days=int(np.sum(p>720.)),
                  **bound)
         if chosen>threshold or actual_peak>threshold:
-            payload=repr((key,seconds,d.tolist(),"minpeak_zero_turnover_v1")).encode()
+            from surgery.weekly_planner import TURNOVER
+            payload=repr((key,seconds,d.tolist(),float(TURNOVER),
+                          "minpeak_turnover_v2")).encode()
             cache=folder/(hashlib.sha256(payload).hexdigest()+".json")
             if cache.exists():
                 result=json.loads(cache.read_text())
@@ -137,8 +148,9 @@ def audit_policy(items,durations,plans,folder,*,seconds=60.,threshold=720.):
         # could be reduced with hindsight. It is never used in learning or
         # deployment and cannot be interpreted as a prospective improvement.
         if actual_peak>threshold:
-            tag=repr((key,seconds,week.actual.tolist(),
-                      "minpeak_actual_zero_turnover_v1")).encode()
+            from surgery.weekly_planner import TURNOVER
+            tag=repr((key,seconds,week.actual.tolist(),float(TURNOVER),
+                      "minpeak_actual_turnover_v2")).encode()
             cache=folder/(hashlib.sha256(tag).hexdigest()+".json")
             if cache.exists():
                 hindsight=json.loads(cache.read_text())
@@ -157,7 +169,8 @@ def audit_policy(items,durations,plans,folder,*,seconds=60.,threshold=720.):
                 hindsight["min_peak_lb"]>CAPACITY+1e-4)
         entries.append(out)
     flagged=[e for e in entries if "min_peak_lb" in e]
-    output=dict(model="zero_turnover_fixed_roster",
+    from surgery.weekly_planner import TURNOVER
+    output=dict(model="fixed_roster",turnover_minutes=float(TURNOVER),
                 flag_threshold_minutes=float(threshold),
                 total_instances=len(entries),
                 flagged_instances=len(flagged),
