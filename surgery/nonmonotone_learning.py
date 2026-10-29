@@ -641,22 +641,27 @@ def mm_vf(items, booked, X, response_map, actual, *,
         return float((C_OVER*np.maximum(error,0.)
                      +C_UNDER*np.maximum(-error,0.)).sum()/len(items))
     initial_accuracy=displayed_accuracy(theta)
+    legacy=(accuracy_reference is None and accuracy_mu==0.
+            and not require_complete_deployment)
     if accuracy_reference is None:
         accuracy_reference=initial_accuracy
     accuracy_reference=float(accuracy_reference)
     if not np.isfinite(accuracy_reference) or accuracy_reference<=0:
         raise ValueError("Missing positive displayed-accuracy reference")
-    accuracy_limit=accuracy_reference*(1.+accuracy_budget)
+    accuracy_limit=(1.e30 if legacy else
+                    accuracy_reference*(1.+accuracy_budget))
     if initial_accuracy>accuracy_limit+1e-7:
         raise ValueError("Starting policy violates displayed-accuracy budget")
     root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
     status=root/"vf_direct_progress.json"
-    spec=dict(policy_spec="joint_vf_accuracy_display_v1",
+    spec=(dict(policy_spec="joint_vf_direct_zero_turnover_v1")
+          if legacy else
+          dict(policy_spec="joint_vf_accuracy_display_v1",
               accuracy_mu=float(accuracy_mu),
               accuracy_reference=float(accuracy_reference),
               accuracy_budget=float(accuracy_budget),
-              accuracy_limit=float(accuracy_limit))
+              accuracy_limit=float(accuracy_limit)))
     if status.exists():
         state=json.loads(status.read_text())
         if any(state.get(k)!=v for k,v in spec.items()):
