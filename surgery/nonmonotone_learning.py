@@ -718,6 +718,25 @@ def mm_vf(items, booked, X, response_map, actual, *,
         tolerance=1e-8*max(1.,abs(before))
         trial_accuracy=displayed_accuracy(trial)
         feasible=bool(trial_accuracy<=accuracy_limit+1e-7)
+        fraction=1.
+        if not feasible:
+            # Backtrack the pDCA proposal along the feasible CASE-to-VF
+            # coefficient path. Accept only if both hard feasibility and
+            # the original certified MM decrease test hold.
+            full_trial=trial.copy()
+            for k in range(1,15):
+                fraction=2.**(-k)
+                candidate=theta+fraction*(full_trial-theta)
+                acc=displayed_accuracy(candidate)
+                changed=float(objective.value(candidate))
+                if (acc<=accuracy_limit+1e-7 and
+                    before-changed>gap+tolerance):
+                    trial=candidate
+                    trial_accuracy=acc
+                    after=changed
+                    decrease=before-after
+                    feasible=True
+                    break
         accepted=bool(decrease>gap+tolerance and feasible)
         row=dict(outer=outer+1,majorizer_before=before,
                  majorizer_after=after,majorizer_decrease=float(decrease),
@@ -728,6 +747,7 @@ def mm_vf(items, booked, X, response_map, actual, *,
                  displayed_accuracy_trial=trial_accuracy,
                  displayed_accuracy_limit=accuracy_limit,
                  accuracy_feasible=feasible,
+                 backtracking_fraction=float(fraction),
                  pdca_status=fitted["status"],
                  inner=fitted["iterations"],schedules=len(selected),
                  elapsed_seconds=round(time.perf_counter()-tick,3))
