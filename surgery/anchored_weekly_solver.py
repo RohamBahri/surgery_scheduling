@@ -84,6 +84,9 @@ class AnchoredResult(Result):
     hash_seed: int = 0
     hash_score: int | None = None
     hash_unique: bool = False
+    balance_complete: bool = False
+    balance_objective: float | None = None
+    balance_seconds: float = 0.
     primary_gurobi_seed: int | None = None
     primary_configuration: str = ""
     primary_attempts: tuple = ()
@@ -114,7 +117,7 @@ def _hash_expression(week, x, seed):
 
 def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
                hash_seed=None):
-    """Certify primary cost, then a unique fixed-hash winner inside its tau set.
+    """Certify primary cost, minimum squared room loads, then fixed-hash winner.
 
     Uncertified time-limited primary, hash, or uniqueness solves cannot be
     passed off as completed deployments. A bounded portfolio of Gurobi
@@ -138,7 +141,8 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
                               hash_status="ANALYTIC_UNIQUE",
                               uniqueness_status="UNIQUE_FEASIBLE",
                               hash_seed=seed, hash_score=hash_score(week,z,seed),
-                              hash_unique=True)
+                              hash_unique=True, balance_complete=True,
+                              balance_objective=float(np.sum(loads(week,z,d)**2)))
 
     cert = conservation_certificate(week, d)
     m, x, used, by_room = _model(week, seconds, threads)
@@ -156,6 +160,9 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
     hash_unique = False
     uniqueness_elapsed = 0.
     primary_elapsed = 0.
+    balance_complete = False
+    balance_objective = None
+    balance_seconds = 0.
     tol = 0.
 
     def outcome(status, complete=False, primary_ok=False, tie_ok=False):
@@ -168,6 +175,9 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             primary_status=primary_status, hash_status=hash_status,
             uniqueness_status=uniqueness_status, hash_seed=seed,
             hash_score=hash_best, hash_unique=hash_unique,
+            balance_complete=balance_complete,
+            balance_objective=balance_objective,
+            balance_seconds=balance_seconds,
             primary_gurobi_seed=config_seed, primary_configuration=config_name,
             primary_attempts=tuple(attempts),hash_attempts=tuple(hash_attempts),
             uniqueness_seconds=uniqueness_elapsed, primary_tolerance=tol)
@@ -236,6 +246,31 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             return outcome("OPTIMAL_PRIMARY", True, True, True)
 
         m.addConstr(primary <= primary_opt+tol, name="primary_tie_set")
+        # Secondary lexicographic criterion: use convex quadratic load balance,
+        # retaining the original primary optimum within numerical tolerance.
+        # No realized duration is used to select an assignment.
+        import gurobipy as gp
+        balance_started = time.monotonic()
+        room_loads = [gp.quicksum(float(d[i])*x[i,j] for i in cases)
+                      for j,cases in enumerate(by_room)]
+        balance_expr = gp.quicksum(load*load for load in room_loads)
+        m.setObjective(balance_expr, GRB.MINIMIZE)
+        m.Params.TimeLimit = max(.001,seconds-(time.monotonic()-start))
+        m.optimize()
+        balance_seconds = time.monotonic()-balance_started
+        if m.SolCount:
+            selected = _assignment(week,x)
+        if m.Status != GRB.OPTIMAL or not m.SolCount:
+            return outcome("BALANCE_UNRESOLVED",primary_ok=True)
+        balance_complete = True
+        balance_objective = float(m.ObjVal)
+        if evaluate(week,selected,d)["cost"]>primary_opt+tol+1e-6:
+            raise AssertionError("Squared-load stage changed the primary cost")
+        # Tiny numerical allowance for the subsequent hash MIQCP.
+        balance_tol = min(1.,max(.01,1e-8*max(1.,abs(balance_objective))))
+        m.addQConstr(balance_expr <= balance_objective+balance_tol,
+                     name="secondary_tie_set")
+        m.update()
         for ordinal in (0,1):
             priority = _hash_expression(week,x,seed+ordinal)
             m.setObjective(priority, GRB.MINIMIZE)
