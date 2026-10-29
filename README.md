@@ -15,6 +15,87 @@ All response assumptions and retrospective cost results must be described as
 conditional. The January–June 2013 cohort was reused during development;
 its comparisons are **exploratory, not a pristine confirmatory test**.
 
+## Accuracy-constrained VF experiment (30-minute turnover, relaxed days)
+
+This is the **current** experiment on branch `accuracy-constrained-vf-30min`.
+The fixed-roster eligibility graph, 480-minute capacity, response model, and
+83 policy features are unchanged. Observed surgeon weekdays remain metadata,
+but the optimizer may empty an original operating day. Room-days remain
+staffed and incur idle cost even when empty. No new surgeon workload cap or
+extra eligible room/day is introduced.
+
+The primary cost is followed lexicographically by minimum squared room loads
+and deterministic hash. Training requests this **same** scheduling selection,
+rather than using an arbitrary primary optimum. On timeout, the best feasible
+assignment and certified primary lower bound are retained; the direct-MM
+majorizer is accepted only if its improvement exceeds the aggregate gap.
+Incomplete secondary/hash selections are explicitly counted; they are **not**
+represented as certified deployment ties. A bounded quadratic-MIP uniqueness
+test can skip hash selection when it proves the squared-load optimum unique.
+
+The displayed-recommendation accuracy budget is
+
+```text
+A_display(theta) <= 1.05 * A_display(reference)
+A_display = sum[1.75*max(actual - (booked + display), 0)
+                + max((booked + display) - actual, 0)]
+```
+
+Both losses are averaged per training component. The reference is the
+internally fitted prediction-only policy's **displayed advice**, not its
+post-response reviewed booking. The display is the canonical recommendation
+`ResponseDC.display(raw)`; only the proposed schedule uses the surgeon's
+reviewed duration `ResponseDC.reviewed(raw)`. This models an accuracy
+requirement on advice, not on hypothetical surgeon compliance.
+
+The algorithm minimizes `VF + mu*A_display + lambda*L1`, using an exact DC
+representation of the extra loss, and additionally checks the stated 5%
+accuracy constraint at every accepted direct-MM iteration. A backtracking
+proposal must satisfy both feasibility and the certified descent test.
+The multiplier `mu=5` is a **predeclared computational choice**, not a
+guaranteed optimal Lagrange multiplier: nonconvexity prevents claiming
+equivalence with an exact constrained optimum. Check the final accuracy
+ratio and whether updates were blocked by the budget.
+
+### Run (fresh folder, private context, licensed Gurobi)
+
+```bash
+git switch main
+git pull --ff-only
+python -m pip install -r requirements-lock.txt
+python -m pip install -e . --no-deps
+python -m pytest -q
+
+mkdir -p artifacts/vf_accuracy_30min_relaxed
+set -o pipefail
+
+caffeinate -i python -u -m pilot.run_joint_vf \
+  --stage train --turnover 30 \
+  --accuracy-budget 0.05 --accuracy-mu 5 \
+  --lambda-vf 0.1 --cores 15 --plan-seconds 600 \
+  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
+  --out artifacts/vf_accuracy_30min_relaxed \
+  2>&1 | tee artifacts/vf_accuracy_30min_relaxed/train.log
+```
+
+Once training completes, use exactly the same scientific and solver flags
+with `--stage replay` for paired **training** scheduling costs.
+Then use `--stage all --audit-seconds 120` to reuse the trained policy and
+run the exploratory 2013 evaluation, probe, and overload audit. The model
+configuration is frozen by `run_contract.json`; changing the multiplier,
+budget, tie rules, turnover, or capacity requires a different output folder.
+
+Important outputs: `vf_direct_progress.json` (descent, planner gaps, accuracy
+and backtracking), `selected_policy.json` (budget, reference, achieved
+accuracy, status), `training_replay_comparison.json` (paired training cost),
+`summary.json` (common certified evaluation), `evaluation_2013.json`
+(displayed and adopted error, surgeon-day workload), and
+`operational_audit_summary.json` (forced vs avoidable overload).
+
+The 2013 period has been reused in prior experiments and is exploratory,
+not a pristine test for selecting `mu` or `lambda`.
+
+
 ## Install
 
 Python 3.12 and a valid Gurobi license are required for scheduling and
@@ -41,8 +122,9 @@ All new runs use **one public entry point**:
 caffeinate -i python -u -m pilot.run_joint_vf \
   --stage all \
   --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-  --out artifacts/vf_direct_no_turnover \
-  --cores 15 --plan-seconds 300
+  --out artifacts/vf_accuracy_30min_relaxed \
+  --accuracy-mu 5 --accuracy-budget .05 \
+  --turnover 30 --cores 15 --plan-seconds 600
 ```
 
 This fits CASE as a warm start, learns VF jointly, evaluates BOOKED,
@@ -67,7 +149,7 @@ Default frozen scientific configuration:
 | MM steps / pDCA steps | 30 / 50 |
 | DC-cut budget | 80 |
 | Coefficient bounds | +/-100 |
-| Scheduler | Fixed-roster eligibility MILP, 480-min room-days; default zero turnover, optionally 30 |
+| Scheduler | Fixed-roster eligibility MILP, 480-min room-days; experiment default 30-minute turnover |
 | Planning weights | Idle=1, overtime=1.75 |
 | Deployment rule | Primary optimum, minimum sum of squared room loads, deterministic hash |
 
