@@ -254,31 +254,36 @@ def summarize(rows, checks, a):
                     (booked - vf) / (booked - oracle)
                     if booked > oracle + 1e-9 else None)
             table.append(row)
-    # Calendar-week paired bootstrap, only on the same certified instances.
+    # Paired calendar-week bootstraps on exactly the samples reported in the table.
     rng = np.random.default_rng(20261029)
     confidence = {}
     for sid in scenario_ids:
-        weeks = defaultdict(lambda: defaultdict(float))
-        for key in sorted(certified[sid]):
-            block = by[(sid, key)]
-            week = block["BOOKED"]["week"]
-            weeks[week]["cases"] += block["BOOKED"]["cases"]
-            for m in METHODS:
-                weeks[week][m] += block[m]["cost"]
-        ordered = [weeks[k] for k in sorted(weeks)]
-        results = {}
-        if ordered:
-            draws = rng.integers(0, len(ordered), size=(5000, len(ordered)))
-            den = np.array([z["cases"] for z in ordered], float)[draws].sum(axis=1)
-            for baseline in ("BOOKED", "NAIVE"):
-                diffs = np.array([z["VF"] - z[baseline] for z in ordered])
-                samples = diffs[draws].sum(axis=1) / den
-                results["VF_minus_" + baseline] = dict(
-                    estimate=float(diffs.sum() / sum(z["cases"] for z in ordered)),
-                    calendar_week_bootstrap_95=np.quantile(samples, [.025, .975]).tolist(),
-                    better_weeks=int(np.sum(diffs < 0)),
-                    worse_weeks=int(np.sum(diffs > 0)), weeks=len(ordered))
-        confidence[sid] = results
+        confidence[sid] = {}
+        for sample, keys in (("scenario_certified", certified[sid]),
+                             ("grid_common_certified", global_common)):
+            weeks = defaultdict(lambda: defaultdict(float))
+            for key in sorted(keys):
+                block = by[(sid, key)]
+                week = block["BOOKED"]["week"]
+                weeks[week]["cases"] += block["BOOKED"]["cases"]
+                for m in METHODS:
+                    weeks[week][m] += block[m]["cost"]
+            ordered = [weeks[k] for k in sorted(weeks)]
+            results = {}
+            if ordered:
+                draws = rng.integers(0, len(ordered), size=(5000, len(ordered)))
+                den = np.array([z["cases"] for z in ordered], float)[draws].sum(axis=1)
+                for baseline in ("BOOKED", "NAIVE"):
+                    diffs = np.array([z["VF"] - z[baseline] for z in ordered])
+                    samples = diffs[draws].sum(axis=1) / den
+                    results["VF_minus_" + baseline] = dict(
+                        estimate=float(diffs.sum() / sum(z["cases"] for z in ordered)),
+                        calendar_week_bootstrap_95=np.quantile(
+                            samples, [.025, .975]).tolist(),
+                        better_weeks=int(np.sum(diffs < 0)),
+                        worse_weeks=int(np.sum(diffs > 0)),
+                        weeks=len(ordered), cases=int(sum(z["cases"] for z in ordered)))
+            confidence[sid][sample] = results
     return table, confidence, dict(
         status="EXPLORATORY_REUSED_2013_TEST", methods=list(METHODS),
         scenarios=scenario_ids,
