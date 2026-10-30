@@ -131,7 +131,7 @@ class PlannerCache:
             d=np.asarray(durations[rows],float)
             keyhash=sha(str(key).encode())
             signature=sha(str(key).encode()+np.ascontiguousarray(d,dtype="<f8").tobytes()+
-                          repr((self.seconds,tie,"accuracy_relaxed_retention_v1",
+                          repr((self.seconds,tie,"hash_only_final_v1",
                                 float(__import__("surgery.weekly_planner",
                                 fromlist=["TURNOVER"]).TURNOVER),
                                 bool(__import__("surgery.weekly_planner",
@@ -675,7 +675,7 @@ def main():
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
                   turnover=float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                   relaxed_required_days=True,
-                  vf_training_tie=("squared_load_hash" if args.train_tie=="deployed"
+                  vf_training_tie=("primary_hash" if args.train_tie=="deployed"
                                    else "primary_optimum"),
                   accuracy_gate=args.accuracy_gate,
                   accuracy_reference_kind="fitted_display_mae_reference",
