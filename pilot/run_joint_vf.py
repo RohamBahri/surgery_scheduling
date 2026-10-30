@@ -43,6 +43,7 @@ def parse_args(argv=None):
     p.add_argument("--h",type=float,default=30.)
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
+    p.add_argument("--vf-features",choices=("structural",),default="structural")
     p.add_argument("--turnover",type=float,default=0.)
     p.add_argument("--accuracy-mu",type=float,default=2.)
     p.add_argument("--accuracy-budget",type=float,default=.05)
@@ -90,7 +91,7 @@ def configure_model(a):
 def engine_args(a,stage):
     return ["--stage",stage,"--context",str(a.context),"--out",str(a.out),
         "--link",a.link,"--alpha",str(a.alpha),"--h",str(a.h),
-        "--vf-features","structural","--vf-lambda-absolute",str(a.lambda_vf),
+        "--vf-features",a.vf_features,"--vf-lambda-absolute",str(a.lambda_vf),
         "--vf-loading","uniform","--vf-plan-penalty","1",
         "--case-steps",str(a.case_steps),"--vf-outers",str(a.vf_outers),
         "--vf-pdca-steps",str(a.vf_pdca_steps),"--cuts",str(a.cuts),
