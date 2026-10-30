@@ -197,8 +197,12 @@ All stages use `python -u -m pilot.run_joint_vf` with `--stage`:
 - `seeds`: explicitly reschedule frozen BOOKED/CASE/VF under hash seeds
   0,1,2,3,4; common certified cases and calendar-week paired bootstrap. Outputs
   `seed_robustness.json`. Other seeds: `--seeds 0 1 2`.
-- `hash-only`: frozen zero-turnover deployment comparison skipping squared-load
-  balancing, retaining deterministic hash selection; no retraining.
+- `hash-only`: frozen zero-turnover **BOOKED vs VF** evaluation using
+  the exact primary-cost optimum followed by deterministic hash, without
+  squared-load optimization or VF retraining. It runs independently of
+  previous balanced 2013 plans and writes `hash_only_vf_comparison.json`.
+  When compatible balanced plans already exist, it also reports a matched,
+  commonly certified balanced-vs-hash comparison.
 - `audit`: audit BOOKED, CASE and VF test plans for peak load concentration.
   Only flagged instances (default >720 planned or realized minutes) trigger
   independent minimum-feasible-peak MILPs under reviewed durations (prospective
