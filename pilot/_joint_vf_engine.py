@@ -342,8 +342,20 @@ def work(ctx,root,args):
     root.mkdir(parents=True,exist_ok=True)
     cache=PlannerCache(root,args.cores,args.plan_seconds)
     if args.stage in ("case","all","draft","vf"):
-        coef=case_fit(ctx,train,response_map,root,args.case_steps,
-                      args.cuts,args.backend,args.case_radius)
+        if args.naive_start is None:
+            coef=case_fit(ctx,train,response_map,root,args.case_steps,
+                          args.cuts,args.backend,args.case_radius)
+        else:
+            init=json.loads(Path(args.naive_start).read_text())
+            coef=np.asarray(init["weights"],float)
+            if (coef.shape!=(data["X"].shape[1],) or
+                    not np.isfinite(coef).all() or
+                    np.max(np.abs(coef))>args.case_radius+1e-9):
+                raise ValueError("Invalid shared naive LAD initializer")
+            if init.get("context_sha")!=sha(args.context.read_bytes()):
+                raise ValueError("Naive LAD initializer fitted on another context")
+            print("VF: reusing scenario-independent naive LAD start",
+                  args.naive_start,flush=True)
         if args.stage=="case":
             return
         draft_started=time.perf_counter()
@@ -416,8 +428,11 @@ def work(ctx,root,args):
         save(root/"selected_policy.json",dict(
                method="JOINT_VF",case_coeff=coef.tolist(),
                vf_theta=chosen.tolist(),
-               lambda_case=json.loads(
-                    (root/"case_policy.json").read_text())["lambda_case"],
+               lambda_case=(json.loads(
+                    (root/"case_policy.json").read_text())["lambda_case"]
+                    if args.naive_start is None else None),
+               initialization=("CASE" if args.naive_start is None
+                               else "NAIVE_LAD"),
                lambda_vf=float(vf_lam),vf_penalty=penalty.tolist(),
                vf_lambda_scale=args.vf_lambda_scale,
                vf_plan_penalty=args.vf_plan_penalty,
@@ -645,6 +660,8 @@ def main():
     ap.add_argument("--train-tie",choices=("primary","deployed"),default="primary",
                     help="Training MM majorizer schedule; primary is faster")
     ap.add_argument("--vf-features",choices=("structural",),default="structural")
+    ap.add_argument("--naive-start",type=Path,default=None,
+                    help="Shared training-only LAD predictor used to initialize VF; skips CASE")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
     ap.add_argument("--backend",choices=("gurobi",),default="gurobi")
@@ -664,6 +681,8 @@ def main():
         ap.error("Choose either VF lambda scale or an absolute lambda, not both")
     if not args.context.exists():
         raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
+    if args.naive_start is not None and not args.naive_start.is_file():
+        raise FileNotFoundError("Naive initializer unavailable: "+str(args.naive_start))
     with args.context.open("rb") as f:
         ctx=pickle.load(f)
     from surgery import nonmonotone_learning as core
@@ -678,6 +697,8 @@ def main():
                   accuracy_gate=args.accuracy_gate,
                   accuracy_reference_kind="fitted_display_mae_reference",
                   accuracy_kind="displayed_mae",
+                  naive_start_sha=(sha(args.naive_start.read_bytes())
+                                   if args.naive_start is not None else None),
                   accuracy_mu=float(args.accuracy_mu),
                   accuracy_budget=float(args.accuracy_budget),
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
@@ -711,7 +732,7 @@ def main():
     else:
         save(contract,settings)
     print("UHN joint VF:",len(ctx["train"]),"train components;",
-          len(ctx["eval"]),"evaluation components; nominal response only",
+          len(ctx["eval"]),"evaluation components; configured response",
           flush=True)
     work(ctx,args.out,args)
 
