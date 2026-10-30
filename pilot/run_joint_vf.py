@@ -40,6 +40,8 @@ def parse_args(argv=None):
     p.add_argument("--context",type=Path,default=DEFAULT_CONTEXT)
     p.add_argument("--out",type=Path,default=Path("artifacts/vf_final_hash"))
     p.add_argument("--alpha",type=float,default=.8)
+    p.add_argument("--naive-start",type=Path,default=None,
+                   help="Shared train-only LAD start; bypass CASE training")
     p.add_argument("--h",type=float,default=30.)
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
@@ -74,6 +76,10 @@ def parse_args(argv=None):
         a.audit_seconds<=0 or a.audit_threshold<=0):
         p.error("Invalid numerical budget")
     a.context=a.context.resolve()
+    if a.naive_start is not None:
+        a.naive_start=a.naive_start.resolve()
+        if not a.naive_start.is_file():
+            p.error("Missing naive initializer: "+str(a.naive_start))
     a.out=a.out.resolve()
     return a
 
@@ -100,7 +106,8 @@ def engine_args(a,stage):
         "--cores",str(a.cores),"--plan-seconds",str(a.plan_seconds),
         "--accuracy-mu",str(a.accuracy_mu),
         "--accuracy-budget",str(a.accuracy_budget),
-        "--accuracy-gate",a.accuracy_gate,"--train-tie",a.train_tie]
+        "--accuracy-gate",a.accuracy_gate,"--train-tie",a.train_tie]+(
+        ["--naive-start",str(a.naive_start)] if a.naive_start else [])
 
 
 def run_engine(a,stage):
@@ -121,6 +128,7 @@ def verified_context(a):
                   vf_pdca_steps=a.vf_pdca_steps,cuts=a.cuts,
                   case_radius=a.radius,vf_radius=a.radius,
                   plan_seconds=a.plan_seconds,
+                  naive_start_sha=(file_sha(a.naive_start) if a.naive_start else None),
                   accuracy_mu=a.accuracy_mu,accuracy_budget=a.accuracy_budget)
     if (contract.get("turnover")!=0. or
         contract.get("relaxed_required_days") is not True or
@@ -143,7 +151,9 @@ def verified_context(a):
         not np.isclose(policy.get("accuracy_mu",-1),a.accuracy_mu) or
         not np.isclose(policy.get("accuracy_budget",-1),a.accuracy_budget) or
         not np.isclose(policy.get("lambda_vf",-1),a.lambda_vf) or
-        len(policy.get("vf_theta",[]))!=83):
+        len(policy.get("vf_theta",[]))!=83 or
+        policy.get("initialization")!=(
+            "NAIVE_LAD" if a.naive_start else "CASE")):
         raise ValueError("Frozen VF policy incompatible with requested settings")
     with a.context.open("rb") as stream:
         context=pickle.load(stream)
