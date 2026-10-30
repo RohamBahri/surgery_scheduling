@@ -152,7 +152,7 @@ def verified_context(a):
         not np.isclose(policy.get("accuracy_budget",-1),a.accuracy_budget) or
         not np.isclose(policy.get("lambda_vf",-1),a.lambda_vf) or
         len(policy.get("vf_theta",[]))!=83 or
-        policy.get("initialization")!=(
+        policy.get("initialization","CASE")!=(
             "NAIVE_LAD" if a.naive_start else "CASE")):
         raise ValueError("Frozen VF policy incompatible with requested settings")
     with a.context.open("rb") as stream:
