@@ -373,123 +373,168 @@ def audit_operational(a,ctx):
 
 
 def audit_hash_only(a,ctx):
-    """Frozen-duration zero-turnover comparison: balanced vs hash-only.
+    """Frozen VF vs BOOKED under primary-optimum + hash, no balance stage.
 
-    Reuse the archived balanced deployment plans with strict signatures,
-    then solve hash-only deployments. Never refit or select a policy on 2013.
+    Reuses the already trained VF coefficients. For comparison, reads
+    existing squared-load deployment plans when available and validates
+    their current PlannerCache signatures; it never recomputes balancing.
+    The hash-only results are valid even without prior 2013 evaluation.
     """
     if a.turnover != 0.:
-        raise ValueError("hash-only comparison requires --turnover 0")
-    _,_,durations=frozen_test_durations(a,ctx)
-    items=ctx["eval"]
-    archived={}
-    hash_only={}
-    for method,d in durations.items():
-        archived[method]={}
-        for key,c,rows in items:
-            segment=np.ascontiguousarray(d[rows],dtype="<f8")
-            expected=engine.sha(
-                str(key).encode()+segment.tobytes()+
-                repr((float(a.plan_seconds),True,
-                      "zero_turnover_sqload_v1")).encode())
-            file=a.out/"plans"/("eval_"+method)/(
-                engine.sha(str(key).encode())+".json")
-            if not file.exists():
-                raise FileNotFoundError(
-                    f"Missing archived balanced plan: {file}")
-            record=read(file)
-            if record.get("signature")!=expected:
-                raise ValueError("Archived balanced plan signature mismatch: "+str(key))
-            archived[method][key]=record["result"]
-        hash_only[method]=run_seed(
-            items,d,a.out/"hash_only_audit","hash_only_"+method,
-            0,a.cores,a.plan_seconds,balance=False)
+        raise ValueError("This frozen hash-only experiment requires --turnover 0")
 
-    methods=("BOOKED","CASE","VF")
-    by_key={key:(c,rows) for key,c,rows in items}
-    common=[]
-    entries=[]
-    for key,c,rows in items:
-        record={"instance":str(key),"site":str(c.group),
-                "week":str(c.monday),"cases":int(c.n)}
-        verified=True
-        for rule,plans in (("balanced",archived),("hash_only",hash_only)):
-            for method in methods:
-                result=plans[method][key]
-                z=result["assignment"]
-                if z is None:
-                    verified=False
-                    continue
-                cost=float(evaluate(c,z,c.actual)["cost"])
-                load=np.asarray(__import__(
-                    "surgery.weekly_planner",fromlist=["loads"]).loads(
-                    c,z,durations[method][rows]),float)
-                record[f"{rule}_{method}_cost"]=cost
-                record[f"{rule}_{method}_peak"]=float(load.max())
-                record[f"{rule}_{method}_complete"]=bool(result["complete"])
-                if not result["complete"]:
-                    verified=False
-        for method in methods:
-            record[f"{method}_assignment_changed"]=(
-                archived[method][key]["assignment"]!=
-                hash_only[method][key]["assignment"])
-        record["common_certified"]=verified
-        entries.append(record)
-        if verified:
-            common.append(record)
-    if not common:
-        raise RuntimeError("No jointly proven deployment instances")
+    items=ctx["eval"]
+    methods=("BOOKED","VF")
+    if (a.out/"cases_test.csv").is_file():
+        _,_,frozen=frozen_test_durations(a,ctx)
+        durations={m:frozen[m] for m in methods}
+    else:
+        # Form the frozen VF predictions directly; no balanced schedules
+        # or previous test-evaluation artifacts are required.
+        held=ctx["held"]
+        selected=read(a.out/"selected_policy.json")
+        scale=read(a.out/"vf_features.json")
+        if scale.get("schema")!="structural":
+            raise ValueError("Incompatible frozen VF feature schema")
+        H,_,_=engine.five_features(
+            ctx,items,engine.PlannerCache(a.out,a.cores,a.plan_seconds),"eval",
+            scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),
+            schema="structural")
+        X=np.column_stack([held["X"],H])
+        theta=np.asarray(selected["vf_theta"],float)
+        if X.shape[1]!=len(theta):
+            raise ValueError("Frozen VF coefficients have wrong dimension")
+        b=np.asarray(held["booked"],float)
+        response=ResponseDC(b,a.alpha,a.h,180.,1.,link=a.link)
+        durations={"BOOKED":b,"VF":response.reviewed(X@theta)}
+
+    hash_plans={
+        m:run_seed(items,durations[m],a.out/"hash_only_audit",
+                   "hash_only_"+m,0,a.cores,a.plan_seconds,balance=False)
+        for m in methods
+    }
+
+    # Read but never solve old balanced plans. The hash-only result is
+    # self-contained; optional matching-sample comparisons are diagnostics.
+    balanced={m:{} for m in methods}
+    for m in methods:
+        for key,c,idx in items:
+            d=np.ascontiguousarray(durations[m][idx],dtype="<f8")
+            sig=engine.sha(str(key).encode()+d.tobytes()+
+                repr((float(a.plan_seconds),True,
+                      "accuracy_relaxed_retention_v1",float(a.turnover),
+                      True)).encode())
+            path=a.out/"plans"/("eval_"+m)/(
+                engine.sha(str(key).encode())+".json")
+            if path.exists():
+                entry=read(path)
+                if entry.get("signature")==sig:
+                    balanced[m][key]=entry["result"]
+
+    rows=[]
+    for key,c,idx in items:
+        row=dict(instance=str(key),site=str(c.group),
+                 week=str(c.monday),cases=int(c.n))
+        for m in methods:
+            answer=hash_plans[m][key]
+            z=answer["assignment"]
+            metrics=evaluate(c,z,c.actual)
+            row[m+"_hash_cost"]=float(metrics["cost"])
+            row[m+"_hash_overtime"]=float(metrics["overtime"])
+            row[m+"_hash_idle"]=float(metrics["idle"])
+            row[m+"_hash_peak"]=float(__import__(
+                "surgery.weekly_planner",fromlist=["loads"]).loads(
+                c,z,durations[m][idx]).max())
+            row[m+"_hash_complete"]=bool(answer["complete"])
+            row[m+"_hash_status"]=answer["status"]
+            row[m+"_hash_emptied_days"]=int(
+                metrics["emptied_historical_surgeon_days"])
+            row[m+"_hash_max_surgeon_day"]=float(
+                metrics["max_surgeon_case_minutes"])
+            if key in balanced[m]:
+                old=balanced[m][key]
+                row[m+"_balanced_complete"]=bool(old["complete"])
+                if old.get("assignment") is not None:
+                    previous=evaluate(c,old["assignment"],c.actual)
+                    row[m+"_balanced_cost"]=float(previous["cost"])
+                    row[m+"_assignment_changed"]=(
+                        old["assignment"]!=z)
+        row["both_hash_certified"]=all(
+            row[m+"_hash_complete"] for m in methods)
+        row["both_balanced_certified"]=all(
+            row.get(m+"_balanced_complete",False) for m in methods)
+        rows.append(row)
+
+    all_n=sum(r["cases"] for r in rows)
+    common=[r for r in rows if r["both_hash_certified"]]
     n=sum(r["cases"] for r in common)
-    totals={}
-    for rule in ("balanced","hash_only"):
-        totals[rule]={
-            method:sum(r[f"{rule}_{method}_cost"] for r in common)/n
-            for method in methods}
-        totals[rule]["VF_minus_CASE"]=(
-            totals[rule]["VF"]-totals[rule]["CASE"])
-        totals[rule]["VF_minus_BOOKED"]=(
-            totals[rule]["VF"]-totals[rule]["BOOKED"])
-    differences={}
-    for method in methods:
-        value=sum(r[f"hash_only_{method}_cost"]-
-                  r[f"balanced_{method}_cost"] for r in common)/n
-        differences[method]=dict(
-            hash_only_minus_balanced_per_case=float(value),
-            assignment_changed_instances=sum(
-                r[f"{method}_assignment_changed"] for r in common),
-            mean_peak_balanced=float(np.mean([
-                r[f"balanced_{method}_peak"] for r in common])),
-            mean_peak_hash_only=float(np.mean([
-                r[f"hash_only_{method}_peak"] for r in common])))
+    if n==0:
+        raise RuntimeError("No common certified hash-only deployments")
+    def costs(part,kind):
+        d=sum(r["cases"] for r in part)
+        result={m:float(sum(r[m+"_"+kind+"_cost"] for r in part)/d)
+                for m in methods}
+        result["VF_minus_BOOKED"]=result["VF"]-result["BOOKED"]
+        result["VF_improvement_percent"]=float(
+            100.*(result["BOOKED"]-result["VF"])/result["BOOKED"])
+        return result
+
     weeks=sorted({r["week"] for r in common})
-    widx={w:i for i,w in enumerate(weeks)}
-    den=np.zeros(len(weeks));weighted=np.zeros(len(weeks))
+    wm={w:i for i,w in enumerate(weeks)}
+    den=np.zeros(len(weeks))
+    num=np.zeros(len(weeks))
     for row in common:
-        i=widx[row["week"]]
-        den[i]+=row["cases"]
-        weighted[i]+=(
-            (row["hash_only_VF_cost"]-row["hash_only_CASE_cost"])
-            -(row["balanced_VF_cost"]-row["balanced_CASE_cost"]))
+        k=wm[row["week"]]
+        den[k]+=row["cases"]
+        num[k]+=row["VF_hash_cost"]-row["BOOKED_hash_cost"]
     rng=np.random.default_rng(20261029)
-    samples=rng.integers(0,len(weeks),size=(10000,len(weeks)))
-    effect=weighted[samples].sum(axis=1)/den[samples].sum(axis=1)
+    draws=rng.integers(0,len(weeks),size=(10000,len(weeks)))
+    ci=list(map(float,np.quantile(
+        num[draws].sum(axis=1)/den[draws].sum(axis=1),[.025,.975])))
+
     output=dict(
-        stage="frozen_hash_only_vs_squared_load",
-        turnover_minutes=0.,plan_seconds=float(a.plan_seconds),
-        sample_rule="same proven instances under both rules and all methods",
-        common_proven_instances=len(common),common_proven_cases=n,
-        excluded_instances=len(entries)-len(common),
-        comparison_cost_per_case=totals,
-        policy_rule_changes=differences,
-        hash_effect_on_VF_minus_CASE=dict(
-            difference_per_case=float(weighted.sum()/n),
-            paired_week_bootstrap_95=list(map(
-                float,np.quantile(effect,[.025,.975])))),
-        exploratory_2013=True,
-        instances=entries)
-    engine.save(a.out/"hash_only_diagnostic.json",output)
-    summary={k:v for k,v in output.items() if k!="instances"}
-    print(json.dumps(summary,indent=2))
+        stage="frozen_vf_hash_only_no_balance",
+        turnover_minutes=0.,
+        vf_retrained=False,mu=float(a.accuracy_mu),
+        tie_rule="primary_optimum_then_hash",
+        all_components=len(rows),all_cases=all_n,
+        common_certified_components=len(common),common_certified_cases=n,
+        excluded_components=len(rows)-len(common),
+        excluded_cases=all_n-n,
+        hash_only_common_certified_cost_per_case=costs(common,"hash"),
+        hash_only_all_feasible_diagnostic_cost_per_case=costs(rows,"hash"),
+        hash_only_vf_minus_booked_week_bootstrap_95=ci,
+        hash_only_load_diagnostics={
+            m:dict(
+                peak_above_720_instances=int(sum(
+                    r[m+"_hash_peak"]>720. for r in common)),
+                max_predicted_room_load=float(max(
+                    r[m+"_hash_peak"] for r in common)),
+                emptied_historical_surgeon_days=int(sum(
+                    r[m+"_hash_emptied_days"] for r in common)),
+                max_surgeon_day_minutes=float(max(
+                    r[m+"_hash_max_surgeon_day"] for r in common)))
+            for m in methods},
+        exploratory_2013=True)
+
+    paired=[r for r in rows if (r["both_hash_certified"]
+                               and r["both_balanced_certified"])]
+    if paired:
+        output["balanced_vs_hash_same_certified_sample"]=dict(
+            components=len(paired),
+            cases=sum(r["cases"] for r in paired),
+            balanced_cost_per_case=costs(paired,"balanced"),
+            hash_only_cost_per_case=costs(paired,"hash"),
+            vf_changed_assignment_components=int(sum(
+                r.get("VF_assignment_changed",False) for r in paired)),
+            booked_changed_assignment_components=int(sum(
+                r.get("BOOKED_assignment_changed",False) for r in paired)))
+    else:
+        output["balanced_vs_hash_same_certified_sample"]=None
+    output["instances"]=rows
+    engine.save(a.out/"hash_only_vf_comparison.json",output)
+    print(json.dumps({k:v for k,v in output.items() if k!="instances"},
+                     indent=2),flush=True)
     return output
 
 
