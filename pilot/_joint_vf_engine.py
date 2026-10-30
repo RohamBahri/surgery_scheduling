@@ -697,8 +697,6 @@ def main():
                   accuracy_gate=args.accuracy_gate,
                   accuracy_reference_kind="fitted_display_mae_reference",
                   accuracy_kind="displayed_mae",
-                  naive_start_sha=(sha(args.naive_start.read_bytes())
-                                   if args.naive_start is not None else None),
                   accuracy_mu=float(args.accuracy_mu),
                   accuracy_budget=float(args.accuracy_budget),
                   alpha=args.alpha,h=args.h,cap=args.cap,case_steps=args.case_steps,
@@ -708,6 +706,8 @@ def main():
                   vf_lambda_scale=args.vf_lambda_scale,
                   vf_plan_penalty=args.vf_plan_penalty,vf_loading=args.vf_loading,
                   plan_seconds=args.plan_seconds,backend=args.backend)
+    if args.naive_start is not None:
+        settings["naive_start_sha"]=sha(args.naive_start.read_bytes())
     # Absent defaults retain compatibility with prior tuning checkpoints.
     settings["vf_features"]="structural"
     if args.vf_lambda_absolute is not None:
