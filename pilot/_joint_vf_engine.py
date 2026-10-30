@@ -480,9 +480,8 @@ def eval_2013(ctx,root,args,cache,selected):
     vf_raw=np.column_stack([held["X"],H])@theta
     # Evaluate the response assumed for THIS configured policy.
     # Alternative true-response scenarios are separate frozen-display audits.
-    ds={"BOOKED":b,"CASE":c.reviewed(raw),"VF":c.reviewed(vf_raw)}
-    displayed={"BOOKED":b,"CASE":b+c.display(raw),
-               "VF":b+c.display(vf_raw)}
+    ds={"BOOKED":b,"VF":c.reviewed(vf_raw)}
+    displayed={"BOOKED":b,"VF":b+c.display(vf_raw)}
     save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
     for label,r in (("CASE",raw),("VF",vf_raw)):
         if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
@@ -561,7 +560,7 @@ def report(ctx,root):
     by={}
     for row in records:
         by.setdefault(row["component"],{})[row["method"]]=row
-    methods=("BOOKED","CASE","VF")
+    methods=("BOOKED","VF")
     eligible=[entry for entry in by.values()
               if all(m in entry and entry[m]["complete"] for m in methods)]
     N=sum(entry["BOOKED"]["cases"] for entry in eligible)
@@ -598,7 +597,7 @@ def report(ctx,root):
         take=rng.integers(0,len(weeks),size=(10000,len(weeks)))
         resamples=denom[take].sum(axis=1)
         differences={}
-        for compared,reference in (("VF","CASE"),("CASE","BOOKED"),("VF","BOOKED")):
+        for compared,reference in (("VF","BOOKED"),):
             vector=np.array([weekdata[t]["costs"][compared]-
                              weekdata[t]["costs"][reference] for t in weeks])
             distribution=vector[take].sum(axis=1)/resamples
