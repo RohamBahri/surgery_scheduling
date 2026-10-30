@@ -71,7 +71,8 @@ def test_only_public_runner_exposes_structural_configuration():
     p=subprocess.run([sys.executable,"-m","pilot.run_joint_vf","--help"],
                      cwd=script.parents[1],capture_output=True,text=True,check=True)
     for flag in ("--stage","--alpha","--h","--link","--lambda-vf",
-                 "--true-alpha","--true-h","--true-link","--seeds"):
+                 "--accuracy-mu","--accuracy-budget","--vf-features"):
         assert flag in p.stdout
-    assert "--vf-features" not in p.stdout
+    for obsolete in ("--true-alpha","--true-h","--true-link","--seeds"):
+        assert obsolete not in p.stdout
     assert "--vf-loading" not in p.stdout
