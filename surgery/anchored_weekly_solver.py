@@ -146,7 +146,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
                               hash_status="ANALYTIC_UNIQUE",
                               uniqueness_status="UNIQUE_FEASIBLE",
                               hash_seed=seed, hash_score=hash_score(week,z,seed),
-                              hash_unique=True, balance_complete=True,
+                              hash_unique=True, balance_complete=False,
                               balance_objective=float(np.sum(loads(week,z,d)**2)))
 
     cert = conservation_certificate(week, d)
