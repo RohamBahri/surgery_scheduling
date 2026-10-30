@@ -49,7 +49,7 @@ def test_grid_uses_four_way_common_certified_components():
     assert all(r["BOOKED_cost_per_case"] == 5. for r in global_rows)
     assert all(r["VF_minus_NAIVE"] == -0.5 for r in global_rows)
     assert all(r["VF_gap_closed_fraction"] == .4 for r in global_rows)
-    assert all("VF_minus_BOOKED" in confidence[r["scenario"]] for r in global_rows)
+    assert all("VF_minus_BOOKED" in confidence[r["scenario"]]["grid_common_certified"] for r in global_rows)
 
 
 def test_naive_is_fitted_only_once_and_has_no_response_parameters(tmp_path, monkeypatch):
