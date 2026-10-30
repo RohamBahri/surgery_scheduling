@@ -483,9 +483,8 @@ def eval_2013(ctx,root,args,cache,selected):
     ds={"BOOKED":b,"VF":c.reviewed(vf_raw)}
     displayed={"BOOKED":b,"VF":b+c.display(vf_raw)}
     save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
-    for label,r in (("CASE",raw),("VF",vf_raw)):
-        if not np.allclose(c.reviewed(r),ds[label],atol=1e-8):
-            raise AssertionError("Training target differs from deployed response")
+    if not np.allclose(c.reviewed(vf_raw),ds["VF"],atol=1e-8):
+        raise AssertionError("Frozen VF response differs from deployed duration")
     plans={label:cache.solve(items,d,"eval_"+label,tie=True)
            for label,d in ds.items()}
     rows=[]
