@@ -81,20 +81,22 @@ def test_direct_mm_accepts_only_proven_exact_vf_improvement(tmp_path,monkeypatch
     assert out["theta"]==[20.]
 
 
-def test_secondary_squared_loads_when_gurobi_available():
+def test_hash_only_primary_cost_when_gurobi_available():
     gp=pytest.importorskip("gurobipy")
     try:
-        probe=gp.Model(); probe.Params.OutputFlag=0
+        probe=gp.Model()
+        probe.Params.OutputFlag=0
         z=probe.addVar(lb=0.,ub=1.)
-        probe.setObjective(z*z);probe.optimize();probe.dispose()
+        probe.setObjective(z)
+        probe.optimize()
+        probe.dispose()
     except gp.GurobiError:
         pytest.skip("No working Gurobi license")
     from surgery.anchored_weekly_solver import solve_week
     w=example()
     out=solve_week(w,w.booked,seconds=40.,threads=1,tie=True,hash_seed=0)
-    assert out.complete,(out.status,out.balance_complete)
-    assert out.balance_complete
-    assert sorted(loads(w,out.assignment,w.booked))==pytest.approx([700.,700.])
-    assert out.balance_objective==pytest.approx(2*700.**2)
+    assert out.complete,(out.status,out.hash_status)
+    assert out.hash_unique
+    assert not out.balance_complete
     assert evaluate(w,out.assignment,w.booked)["cost"]==pytest.approx(
         evaluate(w,[0,0,1,1],w.booked)["cost"])
