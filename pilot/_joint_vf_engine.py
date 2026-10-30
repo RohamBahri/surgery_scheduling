@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Internal engine: structural joint-VF learning, CASE warm start and benchmark.
+"""Internal engine: structural joint-VF learning with reusable initialization.
 
 Invoked through pilot.run_joint_vf. The feature representation is frozen;
 behavioral parameters and numerical budgets may vary as explicit configurations.
@@ -312,7 +312,7 @@ def displayed_reference_fit(data, items, X, response_map, start, folder,
         lam=0.,penalize=np.r_[0.,np.ones(X.shape[1]-1)])
     start=np.asarray(start,float)
     initial=float(objective.value(start))
-    print("DISPLAY reference: fitting accuracy-only advice from CASE warm start",
+    print("DISPLAY reference: fitting accuracy-only advice from supplied start",
           flush=True)
     result=pdca(objective,start,radius=radius,outer=steps,
                 backend=backend,progress_label="DISPLAY",
@@ -371,7 +371,7 @@ def work(ctx,root,args):
         if args.stage=="draft":
             return
         # Direct VF does not use a schedule library; caches only reuse identical solves.
-        # CASE initializes VF, but all case and plan coefficients remain free.
+        # The provided predictor initializes VF; all 83 coefficients remain free.
         X=np.column_stack([data["X"],H])
         # Diagnose duplicate or nearly duplicate columns before optimization.
         Xcase=np.asarray(data["X"],float)
@@ -406,7 +406,7 @@ def work(ctx,root,args):
                 mode="VF",actual=actual,components=len(train),rooms=S)
             penalty[1:]*=score_loadings(objective,start,train)[1:]
         # Reference minimizes error of the displayed recommendation itself,
-        # with the SAME 83 features as VF; CASE is only its warm start.
+        # with the SAME 83 features as VF; initialization is not a comparator.
         _,accuracy_reference=displayed_reference_fit(
             data,train,X,response_map,start,root,args.case_steps,
             args.backend,args.vf_radius)
