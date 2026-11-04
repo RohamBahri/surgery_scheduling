@@ -659,7 +659,7 @@ def main():
                     help="Optional in-iteration hard safeguard; off permits multiplier calibration")
     ap.add_argument("--train-tie",choices=("primary","deployed"),default="primary",
                     help="Training MM majorizer schedule; primary is faster")
-    ap.add_argument("--vf-features",choices=("structural",),default="structural")
+    ap.add_argument("--features",choices=("structural",),default="structural")
     ap.add_argument("--initial-weights",type=Path,default=None,
                     help="Shared training-only LAD predictor used to initialize VF; skips CASE")
     ap.add_argument("--cores",type=int,default=15)
