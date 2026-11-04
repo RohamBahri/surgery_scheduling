@@ -200,7 +200,7 @@ def train_decision_policy(args, scenario):
         ratio = float(policy["accuracy_ratio"])
         record = dict(mu=mu, accuracy_ratio=ratio,
                       accuracy_met=ratio <= 1 + args.accuracy_budget + 1e-9,
-                      status=policy["vf_status"])
+                      status=policy["decision_status"])
         candidates.append(record)
         if record["accuracy_met"]:
             selected = dict(mu=mu, candidates=candidates, accuracy_met=True)
@@ -297,7 +297,7 @@ def evaluate_scenario(context, args, scenario, shared, cache):
     scores = {
         "ACCURACY_TRAINED": X @ np.asarray(accuracy_fit["weights"], float),
         "RESPONSE_AWARE": X @ np.asarray(response_fit["weights"], float),
-        "DECISION_AWARE": X @ np.asarray(policy["vf_theta"], float),
+        "DECISION_AWARE": X @ np.asarray(policy["decision_weights"], float),
     }
     displays = {method: response.display(score) for method, score in scores.items()}
     displays["PERFECT_ADVICE"] = np.clip((realized - booked)/alpha, -h, h)
