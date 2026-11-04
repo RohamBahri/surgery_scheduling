@@ -1,6 +1,4 @@
 """UHN cohort, offline cross-fitted features, and room-group/day instances."""
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 
@@ -10,7 +8,6 @@ ROOMS = {
     'TWH-main': tuple(f'OR{i}' for i in (*range(101, 112), 114, 115)),
     'TWH-day': tuple(f'DS{i}' for i in range(101, 105)),
 }
-SCENARIOS = ((0.5, 30), (0.5, 60), (0.8, 30), (0.8, 60))
 TIMESTAMPS = {'Enter Room': 'rin', 'Actual Start': 'start',
               'Actual Stop': 'stop', 'Leave Room': 'rout'}
 COLUMNS = ['Operating_Room', 'Surgeon_Code', 'Main_Procedure_Id', 'Case_Service',
@@ -312,83 +309,3 @@ class Encoder:
                 'spread_reliability': 'reuses the matching mean-effect shrinkage constant'}
 
 
-@dataclass
-class Day:
-    key: str
-    group: str
-    date: str
-    rooms: tuple
-    case_ids: np.ndarray
-    surgeon_ids: tuple
-    case_surgeon: np.ndarray
-    eligible: tuple
-    booked: np.ndarray
-    actual: np.ndarray
-    historical: np.ndarray
-    rows: np.ndarray
-    weekday_fallback_surgeons: int = 0
-    weekday_fallback_cases: int = 0
-    fallback_surgeons: int = 0
-    fallback_cases: int = 0
-    eligibility_source: tuple = ()
-
-    @property
-    def n_surgeons(self):
-        return len(self.surgeon_ids)
-
-    @property
-    def n_rooms(self):
-        return len(self.rooms)
-
-    def signature(self):
-        return {'key': self.key, 'cases': self.case_ids, 'surgeons': self.case_surgeon,
-                'surgeon_ids': self.surgeon_ids, 'rooms': self.rooms, 'eligible': self.eligible}
-
-
-def build_days(frame, training):
-    all_week = {(g, s): set(rows.room) for (g, s), rows in training.groupby(['group', 'service'])}
-    weekday_training = training.assign(weekday=training.date.dt.weekday)
-    by_weekday = {(g, int(w), s): set(rows.room)
-                  for (g, w, s), rows in weekday_training.groupby(['group', 'weekday', 'service'])}
-    days = []
-    for (group, date), rows in frame.groupby(['group', 'date'], sort=True):
-        rooms = tuple(sorted(rows.room.unique()))
-        surgeons = tuple(sorted(rows.surgeon.unique()))
-        eligible, source = [], []
-        weekday_fallback_surgeons = weekday_fallback_cases = 0
-        fallback_surgeons = fallback_cases = 0
-        weekday = int(date.weekday())
-        for surgeon in surgeons:
-            cases = rows[rows.surgeon == surgeon]
-            services = cases.service.unique()
-
-            allowed = set(rooms)
-            for service in services:
-                allowed &= by_weekday.get((group, weekday, service), set())
-            level = 'weekday'
-
-            if not allowed:
-                weekday_fallback_surgeons += 1
-                weekday_fallback_cases += len(cases)
-                allowed = set(rooms)
-                for service in services:
-                    allowed &= all_week.get((group, service), set())
-                level = 'all_week_fallback'
-
-            if not allowed:
-                fallback_surgeons += 1
-                fallback_cases += len(cases)
-                allowed = set(rooms)
-                level = 'candidate_room_fallback'
-
-            eligible.append(tuple(i for i, room in enumerate(rooms) if room in allowed))
-            source.append(level)
-
-        days.append(Day(f'{group}_{date:%Y-%m-%d}', group, str(date.date()), rooms,
-                        rows.case_id.to_numpy(), surgeons,
-                        np.array([surgeons.index(s) for s in rows.surgeon]), tuple(eligible),
-                        rows.booked.to_numpy(float), rows.actual.to_numpy(float),
-                        np.array([rooms.index(r) for r in rows.room]), rows.index.to_numpy(),
-                        weekday_fallback_surgeons, weekday_fallback_cases,
-                        fallback_surgeons, fallback_cases, tuple(source)))
-    return days
