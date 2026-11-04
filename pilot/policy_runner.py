@@ -153,7 +153,7 @@ def verified_context(a):
         not np.isclose(policy.get("accuracy_mu",-1),a.accuracy_mu) or
         not np.isclose(policy.get("accuracy_budget",-1),a.accuracy_budget) or
         not np.isclose(policy.get("lambda_vf",-1),a.lambda_vf) or
-        len(policy.get("vf_theta",[]))!=int(context["fit"]["X"].shape[1])+6 or
+        len(policy.get("decision_weights",[]))!=int(context["fit"]["X"].shape[1])+6 or
         policy.get("initialization","CASE")!=(
             "LAD_INITIALIZER" if a.initial_weights else "CASE")):
         raise ValueError("Frozen VF policy incompatible with requested settings")
@@ -175,8 +175,8 @@ def frozen_durations(a,ctx,split):
                 [float(z[name]) for z in rows],data[name],atol=1e-9,rtol=0):
             raise ValueError(f"Frozen {name} does not match context")
     b=np.asarray(data["booked"],float)
-    raw=np.array([float(z["vf_raw"]) for z in rows])
-    expected=np.array([float(z["vf_reviewed"]) for z in rows])
+    raw=np.array([float(z["decision_score"]) for z in rows])
+    expected=np.array([float(z["decision_reviewed"]) for z in rows])
     response=ResponseDC(b,a.alpha,a.h,180.,1.,link=a.link)
     reviewed=response.reviewed(raw)
     if not np.allclose(reviewed,expected,atol=1e-8,rtol=0):
