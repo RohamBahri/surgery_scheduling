@@ -59,12 +59,17 @@ def descriptive_statistics(cases, tables, figures):
         "mean_booked_minutes": float(booked.mean()),
         "mean_realized_minutes": float(actual.mean()),
         "rounded_30_minute_bookings_share": float(np.mean(
-            np.isclose((booked - 1) % 30, 0))),
+            np.isclose(booked % 30, 0))),
     }
-    table = cases.groupby(["group", "split"], as_index=False).agg(
+    output["scope"] = "All retained UHN cases, July 2011 through June 2013"
+    table = cases.groupby(["group"], as_index=False).agg(
         cases=("case_id", "count"), mean_booked=("booked", "mean"),
         mean_realized=("actual", "mean"))
     table.to_csv(tables / "cohort_by_site.csv", index=False)
+    cases.groupby(["group", "split"], as_index=False).agg(
+        cases=("case_id", "count"), mean_booked=("booked", "mean"),
+        mean_realized=("actual", "mean")).to_csv(
+            tables / "cohort_by_site_and_period.csv", index=False)
 
     # Measured on the raw retained booking in minutes, not the +1 model floor.
     quartiles = pd.qcut(cases.booked, 4, labels=False, duplicates="drop")
@@ -75,7 +80,7 @@ def descriptive_statistics(cases, tables, figures):
                 mean_booking=("booked", "mean"))
     detail.to_csv(tables / "booking_error_by_quartile.csv", index=False)
 
-    # The validation period is never used to fit these descriptive summaries.
+    # Temporal stability diagnostic only; headline statistics use all cases.
     train = cases.loc[cases.split.eq("train")].copy()
     test = cases.loc[cases.split.eq("test")].copy()
     for frame in (train, test):
@@ -207,22 +212,36 @@ def main_tables(main, components, weekly, intervals, output):
                 mean_weekly_overtime=row[f"{method}_overtime_per_week"],
                 mean_weekly_idle=row[f"{method}_idle_per_week"],
                 post_review_mae=row[f"{method}_mae_per_case"],
+                gap_closed_fraction=row[f"{method}_gap_closed_fraction"],
+                mean_weekly_upper_bound=row[f"{method}_loss_bound_per_week"],
+                mean_weekly_bound_slack=row[f"{method}_loss_bound_per_week"] -
+                                         row[f"{method}_cost_per_week"],
                 mean_weekly_saving_vs_booked=(
                     row["BOOKED_cost_per_week"]-row[f"{method}_cost_per_week"])))
     long = pd.DataFrame(scenarios)
     long.to_csv(tables / "scenario_method_results.csv", index=False)
 
     bounds = []
-    for scenario, comparison in intervals.items():
-        for baseline, values in comparison.items():
-            bounds.append(dict(scenario=scenario,
-                comparison=f"Decision-aware - {METHOD_NAMES[baseline]}",
+    for scenario, comparisons in intervals.items():
+        for name, values in comparisons.items():
+            left, right = name.split("_minus_")
+            bounds.append(dict(
+                scenario=scenario, first_method=METHOD_NAMES[left],
+                second_method=METHOD_NAMES[right],
+                comparison=f"{METHOD_NAMES[left]} minus {METHOD_NAMES[right]}",
                 weekly_difference=values["mean_weekly_difference"],
                 confidence_low=values["confidence_95"][0],
                 confidence_high=values["confidence_95"][1],
                 weeks_better=values["better_weeks"],
                 weeks_worse=values["worse_weeks"]))
     pd.DataFrame(bounds).to_csv(tables / "paired_weekly_intervals.csv", index=False)
+    long[["scenario", "alpha", "h", "method", "mean_weekly_cost",
+          "mean_weekly_upper_bound", "mean_weekly_bound_slack"]].to_csv(
+              tables / "bound_diagnostics.csv", index=False)
+    main[["scenario", "alpha", "h",
+          "fraction_booking_errors_unreachable",
+          "perfect_advice_minimum_mae_per_case"]].to_csv(
+              tables / "advice_reachability.csv", index=False)
 
     # Report site-specific results from the exact same complete calendar weeks.
     selected_weeks = set(weekly.week.astype(str))
@@ -239,7 +258,7 @@ def main_tables(main, components, weekly, intervals, output):
     return long, site_summary
 
 
-def main_figures(long, weekly, output):
+def main_figures(long, weekly, intervals, output):
     import matplotlib.pyplot as plt
     figures = output / "figures"
     figures.mkdir(exist_ok=True, parents=True)
@@ -257,14 +276,33 @@ def main_figures(long, weekly, output):
     savings = long.loc[long.method.eq("Decision-aware")]
     fig, ax = plt.subplots(figsize=(6.8, 4.0))
     for alpha, group in savings.groupby("alpha"):
+        group = group.sort_values("h")
+        intervals_for_group = [intervals[scenario]["DECISION_AWARE_minus_BOOKED"]["confidence_95"]
+                               for scenario in group.scenario]
         ax.plot(group.h, group.mean_weekly_saving_vs_booked,
                 marker="o", label=f"Adoption {alpha:g}")
+        ax.fill_between(group.h.to_numpy(),
+                        [-pair[1] for pair in intervals_for_group],
+                        [-pair[0] for pair in intervals_for_group],
+                        alpha=.15)
     ax.axhline(0, linewidth=.9, color="black")
     ax.set(xlabel="Response threshold h (minutes)",
            ylabel="Mean weekly cost saving versus Booked",
            title="Cost savings across response scenarios")
     ax.legend(frameon=False)
     save_figure(fig, figures, "weekly_savings_by_threshold")
+
+    diagnostics = long.loc[long.method.eq("Decision-aware")].copy()
+    fig, ax = plt.subplots(figsize=(7.0, 4.0))
+    for alpha, group in diagnostics.groupby("alpha"):
+        group = group.sort_values("h")
+        ax.plot(group.h, group.mean_weekly_bound_slack, marker="o",
+                label=f"Adoption {alpha:g}")
+    ax.set(xlabel="Credibility threshold h (minutes)",
+           ylabel="Mean weekly upper bound minus realized cost",
+           title="Fixed-schedule bound slack (not a regret certificate)")
+    ax.legend(frameon=False)
+    save_figure(fig, figures, "bound_slack")
 
     anchor = long.loc[(np.isclose(long.alpha, .5)) &
                       (np.isclose(long.h, 30.))].copy()
@@ -306,7 +344,7 @@ def report(run: Path, context: Path, output: Path):
     tables.mkdir(exist_ok=True)
     figures.mkdir(exist_ok=True)
     long, site = main_tables(main, components, weekly, intervals, output)
-    main_figures(long, weekly, output)
+    main_figures(long, weekly, intervals, output)
     conceptual_figures(figures)
     tuning_figures(run, output)
     convergence_figure(run, output)
