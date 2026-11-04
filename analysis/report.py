@@ -15,6 +15,19 @@ import pandas as pd
 from pilot.experiment import METHODS, METHOD_NAMES
 
 
+def json_safe(value):
+    """Convert pandas/numpy scalars and missing values to strict JSON."""
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value) if np.isfinite(value) else None
+    return value
+
+
 def read_csv(path):
     if not path.is_file():
         raise FileNotFoundError(f"Missing frozen result {path}")
@@ -228,7 +241,7 @@ def report(run: Path, context: Path, output: Path):
     if coverage.exists():
         numbers["certification"] = json.loads(coverage.read_text())
     (output / "numbers.json").write_text(json.dumps(
-        numbers, indent=2, sort_keys=True, allow_nan=False))
+        json_safe(numbers), indent=2, sort_keys=True, allow_nan=False))
     with (output / "summary.md").open("w") as file:
         file.write("# Surgery scheduling: reproducible results\n\n")
         file.write(f"Calendar weeks: {numbers['sample']['calendar_weeks']}; "
