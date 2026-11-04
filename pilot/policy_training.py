@@ -342,20 +342,20 @@ def work(ctx,root,args):
     root.mkdir(parents=True,exist_ok=True)
     cache=PlannerCache(root,args.cores,args.plan_seconds)
     if args.stage in ("case","all","draft","vf"):
-        if args.naive_start is None:
+        if args.initial_weights is None:
             coef=case_fit(ctx,train,response_map,root,args.case_steps,
                           args.cuts,args.backend,args.case_radius)
         else:
-            init=json.loads(Path(args.naive_start).read_text())
+            init=json.loads(Path(args.initial_weights).read_text())
             coef=np.asarray(init["weights"],float)
             if (coef.shape!=(data["X"].shape[1],) or
                     not np.isfinite(coef).all() or
                     np.max(np.abs(coef))>args.case_radius+1e-9):
                 raise ValueError("Invalid shared naive LAD initializer")
             if init.get("context_sha256")!=sha(args.context.read_bytes()):
-                raise ValueError("Naive LAD initializer fitted on another context")
+                raise ValueError("Initial LAD initializer fitted on another context")
             print("VF: reusing scenario-independent naive LAD start",
-                  args.naive_start,flush=True)
+                  args.initial_weights,flush=True)
         if args.stage=="case":
             return
         draft_started=time.perf_counter()
@@ -430,9 +430,9 @@ def work(ctx,root,args):
                vf_theta=chosen.tolist(),
                lambda_case=(json.loads(
                     (root/"case_policy.json").read_text())["lambda_case"]
-                    if args.naive_start is None else None),
-               initialization=("CASE" if args.naive_start is None
-                               else "NAIVE_LAD"),
+                    if args.initial_weights is None else None),
+               initialization=("CASE" if args.initial_weights is None
+                               else "LAD_INITIALIZER"),
                lambda_vf=float(vf_lam),vf_penalty=penalty.tolist(),
                vf_lambda_scale=args.vf_lambda_scale,
                vf_plan_penalty=args.vf_plan_penalty,
@@ -634,7 +634,7 @@ def main():
     ap.add_argument("--stage",choices=("case","draft","vf","all","evaluate","probe","report"),
                     default="all")
     ap.add_argument("--context",type=Path,default=Path(
-       "artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))
+       "artifacts/context.pkl"))
     ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_decision_aware_mm"))
     ap.add_argument("--cap",type=float,default=180.)
     ap.add_argument("--case-steps",type=int,default=200)
@@ -660,7 +660,7 @@ def main():
     ap.add_argument("--train-tie",choices=("primary","deployed"),default="primary",
                     help="Training MM majorizer schedule; primary is faster")
     ap.add_argument("--vf-features",choices=("structural",),default="structural")
-    ap.add_argument("--naive-start",type=Path,default=None,
+    ap.add_argument("--initial-weights",type=Path,default=None,
                     help="Shared training-only LAD predictor used to initialize VF; skips CASE")
     ap.add_argument("--cores",type=int,default=15)
     ap.add_argument("--plan-seconds",type=float,default=180.)
@@ -681,8 +681,8 @@ def main():
         ap.error("Choose either VF lambda scale or an absolute lambda, not both")
     if not args.context.exists():
         raise FileNotFoundError("Context checkpoint unavailable: "+str(args.context))
-    if args.naive_start is not None and not args.naive_start.is_file():
-        raise FileNotFoundError("Naive initializer unavailable: "+str(args.naive_start))
+    if args.initial_weights is not None and not args.initial_weights.is_file():
+        raise FileNotFoundError("Initial initializer unavailable: "+str(args.initial_weights))
     with args.context.open("rb") as f:
         ctx=pickle.load(f)
     from surgery import learning as core
@@ -706,8 +706,8 @@ def main():
                   vf_lambda_scale=args.vf_lambda_scale,
                   vf_plan_penalty=args.vf_plan_penalty,vf_loading=args.vf_loading,
                   plan_seconds=args.plan_seconds,backend=args.backend)
-    if args.naive_start is not None:
-        settings["naive_start_sha"]=sha(args.naive_start.read_bytes())
+    if args.initial_weights is not None:
+        settings["initial_weights_sha"]=sha(args.initial_weights.read_bytes())
     # Absent defaults retain compatibility with prior tuning checkpoints.
     settings["features"]="structural"
     if args.vf_lambda_absolute is not None:
