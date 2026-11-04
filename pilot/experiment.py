@@ -322,6 +322,13 @@ def evaluate_scenario(context, args, scenario, shared, cache):
             metrics = evaluate(component, assignment, component.actual)
             planned = evaluate(component, assignment, durations[method][positions])
             realized_loads = loads(component, assignment, component.actual)
+            duration_error = component.actual - durations[method][positions]
+            asymmetric_error = float(
+                (1.75 * np.maximum(duration_error, 0.)
+                 + np.maximum(-duration_error, 0.)).sum())
+            upper_bound = float(planned["cost"] + asymmetric_error)
+            if upper_bound + 1e-5 < metrics["cost"]:
+                raise AssertionError("Realized cost exceeds fixed-schedule error bound")
             rows.append(dict(
                 scenario=sid, alpha=alpha, h=h, link=link,
                 method=method, method_name=METHOD_NAMES[method],
@@ -329,6 +336,7 @@ def evaluate_scenario(context, args, scenario, shared, cache):
                 week=str(component.monday), cases=int(component.n),
                 complete=bool(solved["complete"]), status=solved["status"],
                 cost=float(metrics["cost"]), planned_cost=float(planned["cost"]),
+                asymmetric_error=asymmetric_error, loss_bound=upper_bound,
                 idle=float(metrics["idle"]), overtime=float(metrics["overtime"]),
                 mae=float(np.abs(component.actual-durations[method][positions]).sum()),
                 displayed_mae=float(np.abs(component.actual -
