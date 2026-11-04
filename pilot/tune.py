@@ -42,7 +42,8 @@ def mean_validation_cost(context, predictions, cache, label, validation_weeks):
     return float(total / weeks)
 
 
-def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
+def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300,
+         accuracy_mu=2.):
     output.mkdir(parents=True, exist_ok=True)
     context_file = output / "context.pkl"
     if not context_file.exists():
@@ -85,8 +86,11 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
     if base is None:
         raise RuntimeError("Booked validation plans are not all certified")
     records = []
+    accuracy_references = {}
 
-    for method in ("RESPONSE_AWARE", "DECISION_AWARE"):
+    # The decision-aware runs also fit the prediction-only reference; reuse it
+    # when screening Response-aware rather than fitting it repeatedly.
+    for method in ("DECISION_AWARE", "RESPONSE_AWARE"):
         for lam in lambdas:
             for scenario in ANCHORS:
                 link, alpha, threshold = scenario
@@ -107,15 +111,15 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
                             response_fit, mode="CASE", actual=actual,
                             components=len(context["train"]), lam=lam,
                             penalize=np.r_[0., np.ones(fit_design.shape[1] - 1)],
-                            accuracy_mu=2.)
-                        fit = pdca(objective, start, radius=100.,
+                            accuracy_mu=accuracy_mu)
+                        fit = pdca(objective, accuracy_references[scenario_name][0], radius=100.,
                                    outer=50, backend="gurobi")
                         weights = np.asarray(fit["weights"], float)
                         experiment.save(candidate_file, dict(weights=weights.tolist(),
                                                               status=fit["status"]))
                 else:
                     arguments = experiment.policy_args(
-                        initialization_args, scenario, 2., folder, "train")
+                        initialization_args, scenario, accuracy_mu, folder, "train")
                     option = arguments.index("--lambda-vf")
                     arguments[option + 1] = str(lam)
                     option = arguments.index("--vf-outers")
@@ -125,13 +129,31 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
                     policy_runner.main(arguments)
                     policy = json.loads((folder / "selected_policy.json").read_text())
                     weights = np.asarray(policy["decision_weights"], float)
+                    reference_record = json.loads(
+                        (folder / "display_accuracy_reference.json").read_text())
+                    reference_weights = np.asarray(reference_record["weights"], float)
+                    reference_score = float(reference_record["accuracy_per_component"])
+                    if scenario_name in accuracy_references:
+                        previous_weights, previous_score = accuracy_references[scenario_name]
+                        if (not np.allclose(previous_weights, reference_weights) or
+                                not np.isclose(previous_score, reference_score)):
+                            raise ValueError("Inconsistent accuracy references across L1 candidates")
+                    accuracy_references[scenario_name] = (reference_weights, reference_score)
+                reference_score = accuracy_references[scenario_name][1]
+                training_display = booked + response_fit.display(fit_design @ weights)
+                accuracy_ratio = float(
+                    np.abs(actual - training_display).sum() /
+                    len(context["train"]) / reference_score)
+                accuracy_met = accuracy_ratio <= 1.05 + 1e-9
                 reviewed = response_validation.reviewed(validation_design @ weights)
                 value = mean_validation_cost(
                     context, reviewed, cache,
                     f"{method}_lambda_{lam:g}_{scenario_name}", validation_weeks)
                 records.append(dict(method=method, lambda_value=float(lam),
                     scenario=scenario_name, validation_weekly_cost=value,
-                    saving_vs_booked=None if value is None else base-value))
+                    saving_vs_booked=None if value is None else base-value,
+                    training_display_accuracy_ratio=accuracy_ratio,
+                    accuracy_met=bool(accuracy_met)))
                 experiment.save(output / "tuning_progress.json", records)
 
     selected = {}
@@ -142,11 +164,14 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
                         record["method"] == method and
                         record["lambda_value"] == float(lam)]
             if len(matching) == len(ANCHORS) and all(
-                    record["validation_weekly_cost"] is not None for record in matching):
+                    record["validation_weekly_cost"] is not None and record["accuracy_met"]
+                    for record in matching):
                 feasible[float(lam)] = float(np.mean([
                     record["validation_weekly_cost"] for record in matching]))
         if not feasible:
-            raise RuntimeError(f"No fully certified validation setting for {method}")
+            raise RuntimeError(
+                f"No accuracy-feasible, fully certified L1 setting for {method}; "
+                "inspect tuning_progress.json and consider a different --accuracy-mu")
         selected[method] = min(feasible, key=lambda lam: (feasible[lam], lam))
     experiment.save(output / "selected_hyperparameters.json", dict(
         lambda_response=selected["RESPONSE_AWARE"],
@@ -155,6 +180,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
         anchors=[dict(alpha=s[1], h=s[2]) for s in ANCHORS],
         validation_booked_weekly_cost=base,
         validation_weeks=sorted(validation_weeks),
+        tuning_accuracy_mu=float(accuracy_mu),
         end_date="2013-01-01",
         candidates=records))
     print(json.dumps(selected, indent=2))
@@ -166,13 +192,14 @@ def main():
     parser.add_argument("--workbook", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("artifacts/lambda_tuning"))
     parser.add_argument("--lambdas", type=float, nargs="+", default=[.03, .1, .3])
+    parser.add_argument("--accuracy-mu", type=float, default=2.)
     parser.add_argument("--cores", type=int, default=15)
     parser.add_argument("--plan-seconds", type=float, default=300.)
     args = parser.parse_args()
     if any(not np.isfinite(value) or value < 0 for value in args.lambdas):
         parser.error("L1 penalties must be finite and nonnegative")
     tune(args.workbook, args.out, args.lambdas,
-         cores=args.cores, seconds=args.plan_seconds)
+         cores=args.cores, seconds=args.plan_seconds, accuracy_mu=args.accuracy_mu)
 
 
 if __name__ == "__main__":
