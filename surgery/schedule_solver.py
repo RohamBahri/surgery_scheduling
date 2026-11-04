@@ -1,18 +1,10 @@
-"""Anchored-experiment exact weekly scheduling solver.
+"""Certified weekly scheduling solver with deterministic hash tie-breaking.
 
-Single implementation for every scheduling decision made by the anchored
-experiment: reference proposals, actual deployment, training acceptance,
-regret certificates, and validation. The original weekly_planner is left
-byte-for-byte unchanged to preserve frozen historical feature matrices.
-
-The feasible integer schedules are unchanged, but deployment now uses a fixed
-history-independent hash, not movement and room-index tie stages. Valid
-strengthening adds x[i,j] <= used[j] and provably mandatory room-day openings.
-Time-limited solves remain uncertified.
+The mathematical model and realized-cost evaluation live in weekly_planner;
+this module strengthens its MILP and certifies deployed assignments.
 """
 import hashlib
 import math
-import os
 import time
 from dataclasses import dataclass
 
@@ -89,9 +81,6 @@ class ScheduleResult(Result):
     hash_seed: int = 0
     hash_score: int | None = None
     hash_unique: bool = False
-    balance_complete: bool = False
-    balance_objective: float | None = None
-    balance_seconds: float = 0.
     primary_gurobi_seed: int | None = None
     primary_configuration: str = ""
     primary_attempts: tuple = ()
@@ -130,8 +119,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
     feasible set, duration data, or optimality requirements.
     """
     from gurobipy import GRB
-    seed = int(os.getenv("SURGERY_HASH_SEED", "0")
-               if hash_seed is None else hash_seed)
+    seed = 0 if hash_seed is None else int(hash_seed)
     if seed < 0 or not math.isfinite(seconds) or seconds <= 0 or threads < 1:
         raise ValueError("Invalid hash seed, time budget, or thread count")
     d = _feasible_duration(week, duration)
@@ -146,8 +134,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
                               hash_status="ANALYTIC_UNIQUE",
                               uniqueness_status="UNIQUE_FEASIBLE",
                               hash_seed=seed, hash_score=hash_score(week,z,seed),
-                              hash_unique=True, balance_complete=False,
-                              balance_objective=float(np.sum(loads(week,z,d)**2)))
+                              hash_unique=True)
 
     cert = conservation_certificate(week, d)
     m, x, used, by_room = _model(week, seconds, threads)
@@ -165,9 +152,6 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
     hash_unique = False
     uniqueness_elapsed = 0.
     primary_elapsed = 0.
-    balance_complete = False
-    balance_objective = None
-    balance_seconds = 0.
     tol = 0.
 
     def outcome(status, complete=False, primary_ok=False, tie_ok=False):
@@ -180,9 +164,6 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
             primary_status=primary_status, hash_status=hash_status,
             uniqueness_status=uniqueness_status, hash_seed=seed,
             hash_score=hash_best, hash_unique=hash_unique,
-            balance_complete=balance_complete,
-            balance_objective=balance_objective,
-            balance_seconds=balance_seconds,
             primary_gurobi_seed=config_seed, primary_configuration=config_name,
             primary_attempts=tuple(attempts),hash_attempts=tuple(hash_attempts),
             uniqueness_seconds=uniqueness_elapsed, primary_tolerance=tol)
