@@ -382,7 +382,8 @@ def summarize(rows, scenarios, checks):
             for component in by_scenario[sid][week].values():
                 for method in METHODS:
                     rec = component[method]
-                    for quantity in ("cost", "planned_cost", "idle", "overtime", "mae",
+                    for quantity in ("cost", "planned_cost", "asymmetric_error",
+                                     "loss_bound", "idle", "overtime", "mae",
                                      "displayed_mae"):
                         policy_totals[method][quantity] += rec[quantity]
             week_data[week] = policy_totals
@@ -397,7 +398,8 @@ def summarize(rows, scenarios, checks):
         result = dict(scenario=sid, alpha=scenario[1], h=scenario[2],
                       weeks=number_weeks, cases=counts, **checks[sid])
         for method in METHODS:
-            for quantity in ("cost", "planned_cost", "idle", "overtime"):
+            for quantity in ("cost", "planned_cost", "asymmetric_error",
+                             "loss_bound", "idle", "overtime"):
                 result[f"{method}_{quantity}_per_week"] = float(np.mean([
                     week_data[w][method][quantity] for w in week_data]))
             result[f"{method}_mae_per_case"] = float(
