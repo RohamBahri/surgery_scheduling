@@ -20,7 +20,7 @@ import numpy as np
 from pilot import policy_training as training
 from pilot import policy_runner
 from surgery.learning import DCObjective, ResponseDC, pdca
-from surgery.weekly_planner import evaluate, loads
+from surgery.weekly_planner import evaluate, loads, OVERTIME
 
 
 METHODS = (
@@ -327,7 +327,7 @@ def evaluate_scenario(context, args, scenario, shared, cache):
             realized_loads = loads(component, assignment, component.actual)
             duration_error = component.actual - durations[method][positions]
             asymmetric_error = float(
-                (1.75 * np.maximum(duration_error, 0.)
+                (OVERTIME * np.maximum(duration_error, 0.)
                  + np.maximum(-duration_error, 0.)).sum())
             upper_bound = float(planned["cost"] + asymmetric_error)
             if upper_bound + 1e-5 < metrics["cost"]:
@@ -346,7 +346,12 @@ def evaluate_scenario(context, args, scenario, shared, cache):
                     booked[positions]-displays[method][positions]).sum()),
                 max_realized_load=float(realized_loads.max()),
                 over_720_rooms=int((realized_loads > 720).sum())))
-    return rows, dict(decision_accuracy_ratio=float(policy["accuracy_ratio"]),
+    return rows, dict(
+        fraction_booking_errors_unreachable=float(
+            np.mean(np.abs(realized-booked)>alpha*h)),
+        perfect_advice_minimum_mae_per_case=float(
+            np.mean(np.maximum(np.abs(realized-booked)-alpha*h, 0.))),
+        decision_accuracy_ratio=float(policy["accuracy_ratio"]),
                       decision_accuracy_met=bool(selected["accuracy_met"]),
                       response_accuracy_ratio=float(response_fit["ratio"]),
                       response_accuracy_met=bool(response_fit["accuracy_met"]),
@@ -410,21 +415,32 @@ def summarize(rows, scenarios, checks):
             result[f"{method}_displayed_mae_per_case"] = float(
                 sum(week_data[w][method]["displayed_mae"] for w in week_data)/counts)
         denominator = values["BOOKED"].mean() - values["HINDSIGHT"].mean()
-        result["DECISION_AWARE_gap_closed_fraction"] = (
-            float((values["BOOKED"].mean()-values["DECISION_AWARE"].mean())/denominator)
-            if denominator > 1e-9 else None)
+        for method in METHODS:
+            result[f"{method}_gap_closed_fraction"] = (
+                float((values["BOOKED"].mean()-values[method].mean())/denominator)
+                if denominator > 1e-9 else None)
         draws = rng.integers(0, number_weeks, size=(5000, number_weeks))
         bootstraps[sid] = {}
-        for baseline in ("BOOKED", "ACCURACY_TRAINED", "RESPONSE_AWARE",
-                         "PERFECT_ADVICE"):
-            differences = values["DECISION_AWARE"] - values[baseline]
-            bootstraps[sid][baseline] = dict(
-                mean_weekly_difference=float(differences.mean()),
-                confidence_95=np.quantile(differences[draws].mean(axis=1),
-                                          [.025, .975]).tolist(),
-                better_weeks=int((differences < 0).sum()),
-                worse_weeks=int((differences > 0).sum()),
-                weeks=number_weeks)
+
+        def compare(left, right):
+            differences = values[left] - values[right]
+            bounds = np.quantile(differences[draws].mean(axis=1),
+                                 [.025, .975]).tolist()
+            return dict(mean_weekly_difference=float(differences.mean()),
+                        confidence_95=bounds,
+                        better_weeks=int((differences < 0).sum()),
+                        worse_weeks=int((differences > 0).sum()),
+                        weeks=number_weeks)
+
+        # One explicit sign convention for all intervals: left minus right.
+        for method in METHODS:
+            if method != "BOOKED":
+                bootstraps[sid][f"{method}_minus_BOOKED"] = compare(
+                    method, "BOOKED")
+        for method in ("ACCURACY_TRAINED", "RESPONSE_AWARE",
+                       "PERFECT_ADVICE", "HINDSIGHT"):
+            bootstraps[sid][f"DECISION_AWARE_minus_{method}"] = compare(
+                "DECISION_AWARE", method)
         table.append(result)
     return table, bootstraps, weekly_rows, sorted(common_weeks)
 
@@ -458,13 +474,23 @@ def evaluate_grid(context, args):
     export_rows(args.out / "weekly_results.csv", weekly_rows)
     export_rows(args.out / "main_results.csv", table)
     save(args.out / "paired_bootstrap.json", uncertainty)
+    coverage = {}
+    for scenario in args.scenarios:
+        sid = scenario_id(*scenario)
+        subset = [row for row in rows if row["scenario"] == sid]
+        coverage[sid] = dict(
+            by_method={method: dict(
+                certified_components=sum(row["complete"] for row in subset
+                                         if row["method"] == method),
+                total_components=len(context["eval"]))
+                for method in METHODS},
+            complete_calendar_weeks=len(complete_week_keys(rows, sid)),
+            total_calendar_weeks=len({c.monday for _, c, _ in context["eval"]}),
+        )
     save(args.out / "coverage.json", dict(
         total_components=len(context["eval"]), common_complete_weeks=weeks,
         total_calendar_weeks=len({c.monday for _, c, _ in context["eval"]}),
-        certified_by_scenario={
-            scenario_id(*sc): sum(r["complete"] for r in rows
-                if r["scenario"] == scenario_id(*sc) and r["method"] == "DECISION_AWARE")
-            for sc in args.scenarios},
+        certified_by_scenario_and_method=coverage,
         response_accuracy_safeguard=checks))
     return table
 
