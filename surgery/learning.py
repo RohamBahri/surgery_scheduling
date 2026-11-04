@@ -126,6 +126,21 @@ class ResponseDC:
     def reviewed(self, raw):
         return self.booked+self.correction(raw)
 
+    def reviewed_from_display(self, displayed_correction):
+        """Apply this response to fixed, actually displayed advice.
+
+        Do not canonicalize under the true response: that would invalidate
+        experiments on response misspecification.
+        """
+        advice=np.asarray(displayed_correction,float)
+        if advice.shape!=self.booked.shape or not np.isfinite(advice).all():
+            raise ValueError("Displayed advice has incorrect dimensions")
+        fn=response_saturating if self.link=="saturating" else response
+        return np.maximum(
+            self.booked+fn(np.clip(advice,-self.cap,self.cap),self.alpha,self.h),
+            self.floor,
+        )
+
     def verify(self, raw):
         P,N,_,_=self.parts(raw)
         correction=self.correction(raw)
@@ -198,8 +213,8 @@ class DCObjective:
         self.accuracy_mu=float(accuracy_mu)
         if not np.isfinite(self.accuracy_mu) or self.accuracy_mu<0:
             raise ValueError("Accuracy multiplier must be nonnegative")
-        if self.mode!="VF" and self.accuracy_mu:
-            raise ValueError("Displayed-accuracy penalty is VF-only")
+        if self.mode=="DISPLAY" and self.accuracy_mu:
+            raise ValueError("An accuracy-only objective cannot penalize itself")
         self.penalize=np.ones(self.p) if penalize is None else np.asarray(penalize,float)
         if self.penalize.shape!=(self.p,):
             raise ValueError("Penalty mask length mismatch")
