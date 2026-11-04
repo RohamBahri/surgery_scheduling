@@ -404,8 +404,8 @@ def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
     with out.open(newline="") as handle:
         records=list(csv.DictReader(handle))
     assert len(records)==2
-    assert "case_display" in records[0]
-    assert "vf_reviewed" in records[0]
+    assert "initial_display" in records[0]
+    assert "decision_reviewed" in records[0]
     assert sum(k.startswith("feature_") for k in records[0])==6
-    assert float(records[1]["case_reviewed"]) == pytest.approx(
+    assert float(records[1]["initial_reviewed"]) == pytest.approx(
         m.reviewed(np.array([18.,-160.]))[1])
