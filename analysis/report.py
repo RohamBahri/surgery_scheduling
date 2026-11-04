@@ -104,6 +104,93 @@ def descriptive_statistics(cases, tables, figures):
     return output
 
 
+def conceptual_figures(folder):
+    """Paper-ready study-timing and response-model diagrams."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    from surgery.learning import response, response_saturating
+
+    steps = ["Surgeon\nbooking", "Displayed\nadvice", "Surgeon\nreview",
+             "Weekly\nplanner", "Realized\ncost"]
+    fig, ax = plt.subplots(figsize=(10.4, 2.0))
+    ax.set(xlim=(0, 10.4), ylim=(0, 2))
+    ax.axis("off")
+    for index, title in enumerate(steps):
+        left = .13 + index * 2.08
+        ax.add_patch(FancyBboxPatch((left, .55), 1.72, .9,
+            boxstyle="round,pad=0.07", facecolor="white",
+            edgecolor="black", linewidth=1.1))
+        ax.text(left + .86, 1.0, title, ha="center", va="center", fontsize=10)
+        if index < len(steps) - 1:
+            ax.annotate("", xy=(left + 2.0, 1.0),
+                        xytext=(left + 1.81, 1.0),
+                        arrowprops=dict(arrowstyle="->", lw=1.3))
+    save_figure(fig, folder, "workflow")
+
+    grid = np.linspace(-110, 110, 500)
+    fig, ax = plt.subplots(figsize=(6.5, 3.8))
+    ax.plot(grid, response_saturating(grid, .8, 30.),
+            label="Saturating response")
+    ax.plot(grid, response(grid, .8, 30.),
+            label="Attenuation and rejection")
+    ax.axhline(0, color="black", linewidth=.6)
+    ax.axvline(0, color="black", linewidth=.6)
+    ax.set(xlabel="Displayed correction (minutes)",
+           ylabel="Implemented correction (minutes)",
+           title="Illustrative surgeon response (adoption 0.8, threshold 30)")
+    ax.legend(frameon=False)
+    save_figure(fig, folder, "surgeon_response")
+
+
+def tuning_figures(run, output):
+    path = run / "selected_hyperparameters.json"
+    if not path.exists():
+        return
+    selected = json.loads(path.read_text())
+    candidates = pd.DataFrame(selected["candidates"])
+    candidates.to_csv(output / "tables" / "lambda_validation.csv", index=False)
+    pd.DataFrame([dict(method=key, selected_lambda=value)
+                  for key, value in selected.items()
+                  if key.startswith("lambda_")]).to_csv(
+                      output / "tables" / "selected_lambdas.csv", index=False)
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(6.8, 4.0))
+    means = candidates.groupby(["method", "lambda_value"], as_index=False)[
+        "validation_weekly_cost"].mean()
+    for method, sample in means.groupby("method"):
+        ax.plot(sample.lambda_value, sample.validation_weekly_cost,
+                marker="o", label=method.replace("_", " ").title())
+    ax.set(xlabel="L1 coefficient penalty",
+           ylabel="Mean weekly validation cost",
+           title="Training-period regularization screening")
+    ax.legend(frameon=False)
+    save_figure(fig, output / "figures", "lambda_validation")
+
+
+def convergence_figure(run, output):
+    chosen = run / "scenarios" / "saturating_a0p5_h30" / "selected.json"
+    if not chosen.exists():
+        return
+    mu = json.loads(chosen.read_text())["mu"]
+    suffix = format(float(mu), ".8g").replace(".", "p")
+    progress = chosen.parent / f"mu_{suffix}" / "vf_direct_progress.json"
+    if not progress.exists():
+        return
+    history = json.loads(progress.read_text()).get("history", [])
+    if not history:
+        return
+    pd.DataFrame(history).drop(columns=["inner"], errors="ignore").to_csv(
+        output / "tables" / "decision_training_convergence.csv", index=False)
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(6.8, 3.8))
+    ax.plot([v["outer"] for v in history],
+            [v["majorizer_after"] for v in history], marker="o")
+    ax.set(xlabel="Majorization iteration",
+           ylabel="Penalized fixed-schedule majorizer",
+           title="Decision-aware training diagnostics (adoption 0.5, h=30)")
+    save_figure(fig, output / "figures", "training_convergence")
+
+
 def main_tables(main, components, weekly, intervals, output):
     tables = output / "tables"
     figures = output / "figures"
@@ -220,6 +307,9 @@ def report(run: Path, context: Path, output: Path):
     figures.mkdir(exist_ok=True)
     long, site = main_tables(main, components, weekly, intervals, output)
     main_figures(long, weekly, output)
+    conceptual_figures(figures)
+    tuning_figures(run, output)
+    convergence_figure(run, output)
 
     numbers = {
         "evaluation_status": "Exploratory: Jan-Jun 2013 was inspected during development",
