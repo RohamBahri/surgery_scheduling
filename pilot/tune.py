@@ -46,7 +46,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
     output.mkdir(parents=True, exist_ok=True)
     context_file = output / "context.pkl"
     if not context_file.exists():
-        context = prepare(workbook, context_file, "2012-07-01")
+        context = prepare(workbook, context_file, "2012-07-01", "2013-01-01")
     else:
         import pickle
         with context_file.open("rb") as stream:
@@ -54,6 +54,15 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
         if context["metadata"]["workbook_sha256"] != hashlib.sha256(
                 workbook.read_bytes()).hexdigest():
             raise ValueError("Validation context belongs to a different workbook")
+        if (context["metadata"].get("split_date") != "2012-07-01" or
+                context["metadata"].get("end_date") != "2013-01-01"):
+            raise ValueError("Old or incompatible tuning context; use a fresh --out directory")
+    # This must hold even when reusing a locally cached tuning context.
+    if (context["metadata"].get("split_date") != "2012-07-01" or
+            context["metadata"].get("end_date") != "2013-01-01"):
+        raise ValueError("Tuning requires July-2012 split and Dec-2012 end")
+    if any(component.monday >= "2013-01-01" for _, component, _ in context["eval"]):
+        raise AssertionError("2013 scheduling weeks entered tuning validation")
     policy_runner.configure_model(argparse.Namespace(turnover=0.))
     fit_design, validation_design = tuning_features(context)
     booked = np.asarray(context["fit"]["booked"], float)
@@ -70,6 +79,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
     positions = np.linspace(0, len(available_weeks)-1,
                             num=min(8, len(available_weeks)), dtype=int)
     validation_weeks = {available_weeks[i] for i in positions}
+    assert max(validation_weeks) < "2013-01-01", "Tuning validation crossed into 2013"
     base = mean_validation_cost(
         context, validation_booked, cache, "Booked", validation_weeks)
     if base is None:
@@ -145,6 +155,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
         anchors=[dict(alpha=s[1], h=s[2]) for s in ANCHORS],
         validation_booked_weekly_cost=base,
         validation_weeks=sorted(validation_weeks),
+        end_date="2013-01-01",
         candidates=records))
     print(json.dumps(selected, indent=2))
     return selected
