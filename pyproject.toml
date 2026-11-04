@@ -3,17 +3,17 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "surgery-vf-planning"
+name = "surgery-scheduling-study"
 version = "1.0.0"
-description = "CASE and value-function MM/pDCA for operating-room planning"
+description = "Single-dataset response-aware operating-room scheduling study"
 requires-python = ">=3.12"
-dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "openpyxl>=3.1", "gurobipy>=12,<14", "scikit-learn>=1.4,<2"]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.10", "openpyxl>=3.1", "gurobipy>=12,<14", "scikit-learn>=1.4,<2", "matplotlib>=3.8"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-include = ["surgery*"]
+include = ["surgery*", "pilot*", "analysis*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
