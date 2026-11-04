@@ -73,7 +73,7 @@ def parse_args(argv=None):
     parser.add_argument("--lambda-decision", type=float, default=.1)
     parser.add_argument("--lambda-response", type=float, default=.1)
     parser.add_argument("--mu-candidates", type=float, nargs="+",
-                        default=[.5, 1., 2., 4., 8.])
+                        default=[2., 4., 8.])
     parser.add_argument("--tuning", type=Path, default=None,
                         help="Training-only selected_hyperparameters.json from pilot.tune")
     args = parser.parse_args(argv)
