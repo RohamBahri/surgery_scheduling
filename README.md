@@ -1,51 +1,17 @@
-# Response-aware value-function learning for operating-room scheduling
+# Surgeon-aware operating-room scheduling study
 
-This repository contains the **direct VF method and its main behavioral-grid experiment**.
-A shared linear policy displays case-duration recommendations; a specified
-surgeon response maps the displayed advice into the durations used by an
-operating-room planner. The policy is trained with **direct MM/pDCA** of the
-exact value-function surrogate and an accuracy safeguard. No finite schedule
-library or workload-balancing secondary optimization is used.
+One retrospective research experiment on the UHN 2011–2013 operating-room
+workbook. The project learns case-duration recommendations that pass through
+a **specified** surgeon response before a weekly mixed-integer planner.
 
-The experiment is retrospective. Historical UHN records do **not** contain
-actual responses to displayed recommendations. Results are conditional on
-the stated behavioral model. The Jan–Jun 2013 evaluation has been examined
-during development and is **exploratory, not a new untouched holdout**.
-
-## Final scientific specification
-
-| Component | Setting |
-|---|---|
-| Duration recommendation | Shared linear policy, 77 case + 6 structural features |
-| Surgeon response | Saturating link; grid alpha in {0.5, 0.8}, h in {20, 30, 60} minutes; display bound +/-h |
-| Display credibility | Displayed-duration MAE <= 1.05 times fitted accuracy-only reference |
-| Accuracy penalty | mu=2 fixed in every scenario; report whether the 5% safeguard is satisfied |
-| VF regularization | L1 lambda=0.1, intercept excluded |
-| Learning algorithm | Exact direct-MM/pDCA, primary-optimal scheduling majorizers |
-| Hospital roster | Fixed eligible room-days, capacity 480 minutes |
-| Surgeon-day retention | Relaxed; observed original days kept only as metadata |
-| Turnover in primary model | 0 minutes |
-| Scheduling primary objective | Idle cost 1 and overtime cost 1.75 |
-| Scheduling tie | **Deterministic hash only**, after optimal primary cost |
-| Training | Jul 2011–Dec 2012, TGH/TWH |
-| Evaluation | Jan–Jun 2013, TGH/TWH |
-
-The fitted displayed-MAE reference is an internal calibration target, not a
-second proposed scheduling method. The hard accuracy gate is off during
-multiplier calibration; the selected fitted policy is checked against the
-predeclared 5% budget on training data. This is a penalized solution with
-verified feasibility, **not a globally certified constrained optimum**.
-
-Training chooses any primary-optimal assignment as a valid majorizer.
-Deployment uses the same primary objective followed by two deterministic
-hash priorities and a canonical fallback if necessary. No squared-load
-quadratic objective is solved. The planner logs both its feasible solutions
-and optimization certifications. Uncertified instances are explicitly
-excluded from comparisons labeled "common certified".
+**This is not a clinical deployment tool.** The historical data contain no
+responses to displayed advice. Every behavioral result is conditional on
+assumptions, and January–June 2013 was inspected during development (an
+exploratory retrospective evaluation, not an untouched holdout).
 
 ## Installation
 
-Python 3.12 and a valid Gurobi license are required:
+Python 3.12 and a working Gurobi license:
 
 ```bash
 python -m pip install -r requirements-lock.txt
@@ -53,157 +19,142 @@ python -m pip install -e . --no-deps
 python -m pytest -q
 ```
 
-Private data and fitted artifacts are **not tracked** by Git. The context
-checkpoint must exist locally at:
+Keep the private workbook under `data/`; all data and outputs under
+`data/` and `artifacts/` are ignored by Git.
 
-```text
-artifacts/objective_selection_12h/objective_selection_2013/context.pkl
-```
+## Reproduce the paper experiment
 
-Do not delete this context or the original UHN workbook when cleaning local
-ignored files.
+Run these commands at the repository root. The training and scheduling steps
+are substantial; they run locally on the research machine, not in GitHub CI.
 
-## Main experiment: behavioral-scenario grid
-
-There is **no designated main behavioral scenario**. The primary retrospective
-experiment trains one independent **direct VF policy** for each combination of
-the following saturating surgeon-response assumptions:
-
-- Advice adoption alpha = 0.5 or 0.8.
-- Credibility/saturation threshold h = 20, 30 or 60 minutes.
-
-For each of these **six scenarios**, the comparison consists of exactly
-four scheduling policies:
-
-- **BOOKED:** plan directly on historical surgeon bookings.
-- **NAIVE:** one shared 77-feature, regularized absolute-error duration predictor,
-  trained without behavioral response or scheduling costs. Its predictions are
-  displayed to the surgeon and passed through the same scenario's response.
-- **VF:** the 83-feature response- and decision-aware policy, independently
-  trained for that scenario using direct MM/pDCA and a fitted displayed-accuracy
-  reference. The shared NAIVE coefficients are used only as the optimizer
-  initialization; CASE is neither trained nor compared.
-- **ORACLE:** a hindsight planner using realized surgery durations. It is a
-  lower bound on realized scheduling cost when its plan is certified.
-
-BOOKED and ORACLE schedules are solved once and reused across scenarios. The
-training/test chronology, fixed roster, 480-minute capacity, zero turnover,
-hash-only deployment tie rule, lambda=0.1, mu=2 and accuracy budget=5% remain
-unchanged. Every policy uses the same test cases. A single primary grid reports
-all four methods on **components certified for all four methods in all six
-scenarios**; separate scenario-certified and all-feasible summaries remain
-available. A failed 5% training accuracy safeguard is explicitly flagged; it is
-not silently described as a feasible constrained solution.
-
-**Run from repository root on the machine holding your private context:**
+**1. Prepare the single dataset**
 
 ```bash
-git pull --ff-only origin main
-python -m pip install -r requirements-lock.txt
-python -m pip install -e . --no-deps
-python -m pytest -q
-
-caffeinate -i python -u -m pilot.run_vf_grid \
-  --stage all \
-  --context artifacts/objective_selection_12h/objective_selection_2013/context.pkl \
-  --out artifacts/vf_behavior_grid \
-  --cores 15 --plan-seconds 300
+python -m pilot.prepare_data \
+  --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --out artifacts/context.pkl
 ```
 
-For separate training and evaluation runs, use the identical command and
-output directory with `--stage train`, then `--stage evaluate`.
-Compatible completed policies and planner schedules are reused on restart.
-Do not change the grid parameters or training settings in a populated output
-directory. The optional `--alphas`, `--hs`, and `--links` arguments permit
-**explicitly separately labeled** sensitivity grids (a changed grid requires a
-new output directory).
+This creates the case features, surgeon-eligible scheduling components and
+auditable cohort/quality tables. It uses July 2011–December 2012 for training
+and January–June 2013 for evaluation.
 
-**Primary files:**
-
-- `grid.md`: readable six-scenario comparison using the common-certified test.
-- `grid.csv`: all-feasible, scenario-certified and grid-common-certified
-  costs, error measures, overtime, idle time and extreme-room-load counts.
-- `grid_summary.json`: certification coverage, training accuracy checks,
-  and paired calendar-week bootstrap intervals for VF minus BOOKED/NAIVE,
-  on both scenario-specific and grid-common-certified samples.
-- `component_results.csv`: complete component-level method outcomes and
-  certification flags.
-- `naive_lad.json`: the shared response-blind predictor.
-- `scenarios/<scenario-id>/`: frozen VF coefficients, optimization history,
-  accuracy reference, and scenario-specific evaluation details.
-
-The 2013 evaluation has been inspected during prior development; this main
-experiment gives a consistent final comparison, **not** an untouched
-confirmatory holdout. No unrun grid result is claimed in the repository.
-
-## Single-scenario diagnostic runner (not the main experiment)
-
-After pulling the latest `main`, you can reuse an existing trained
-`mu=2` policy if its scientific settings match. The final hash-only planner
-cache has a new signature: previously computed **balanced** plans are not
-silently reused, and hash-only deployments will be solved again as needed.
-
-**Reproduce the paired training comparison:**
+**2. Tune the L1 penalties on earlier training data**
 
 ```bash
-caffeinate -i python -u -m pilot.run_joint_vf \
-  --stage replay --accuracy-mu 2 --accuracy-budget .05 \
-  --turnover 0 --train-tie primary --accuracy-gate off \
-  --lambda-vf .1 --cores 15 --plan-seconds 300 \
-  --out artifacts/vf_display_mae_mu2
+python -m pilot.tune \
+  --workbook data/UHNOperating_RoomScheduling2011-2013.xlsx \
+  --out artifacts/lambda_tuning --cores 15
 ```
 
-**Reproduce the final exploratory evaluation and operational audit:**
+This creates an independent July 2011–June 2012 fitting and July–December
+2012 validation split. It screens λ = 0.03, 0.1, 0.3 separately for
+Response-aware and Decision-aware, under two anchor response assumptions.
+Decision-aware uses shortened fits **only for screening**. The chosen λ for
+each method is shared across all final scenarios. No 2013 outcomes are used
+for tuning. The selected file is `artifacts/lambda_tuning/selected_hyperparameters.json`.
+
+**3. Train and evaluate the eight prespecified response scenarios**
 
 ```bash
-caffeinate -i python -u -m pilot.run_joint_vf \
-  --stage all --accuracy-mu 2 --accuracy-budget .05 \
-  --turnover 0 --train-tie primary --accuracy-gate off \
-  --lambda-vf .1 --cores 15 --plan-seconds 300 \
-  --audit-seconds 120 \
-  --out artifacts/vf_display_mae_mu2
+python -u -m pilot.experiment --stage all \
+  --context artifacts/context.pkl \
+  --tuning artifacts/lambda_tuning/selected_hyperparameters.json \
+  --out artifacts/paper_experiment --cores 15 --plan-seconds 300
 ```
 
-The combined run fits VF only if a compatible frozen policy is absent.
-It otherwise reuses the learned coefficients and re-solves the requested
-hash-only deployment schedules. Save an archive of old results before
-overwriting prior evaluation summaries.
+To split a run across sessions, use `--stage train` followed by
+`--stage evaluate` with *exactly the same arguments and output directory*.
+Finished policy and scheduling checkpoints are reused only when their
+scientific settings match. Use a new output directory after changing settings.
 
-**Core outputs:**
+Default assumptions:
 
-- `selected_policy.json`: coefficients, displayed-MAE reference and
-  achieved training accuracy ratio.
-- `vf_direct_progress.json`: optimizer convergence, verified penalized
-  descent and planner gaps.
-- `training_replay_comparison.json`: BOOKED versus VF paired training costs.
-- `evaluation_2013.json` and `summary.json`: BOOKED versus VF realized
-  2013 cost on a common certified sample, displayed MAE and workloads.
-- `operational_audit_summary.json`: extreme loads and audited feasibility.
+- Saturating surgeon response; adoption α = 0.5 or 0.8 with credibility
+  thresholds h = 20, 30 or 60 minutes, plus (0.3, 15) and (0.8, 90).
+- Weekly physical room-days with fixed 480-minute capacity, no turnover,
+  eligibility restrictions and relaxed observed surgeon-day retention.
+- Primary scheduling cost: 1 × idle minutes + 1.75 × overtime minutes.
+- A deterministic hash chooses among optimal primary schedules.
+- Shared 83 features (77 case features + 6 structural planning features) for
+  all three learned comparators.
+- A displayed-duration accuracy safeguard of 5% relative to the *fitted*,
+  non-globally-certified Accuracy-trained reference.
+- Scenario-specific accuracy-penalty μ selected using training data only.
+  The default tries 2, then 4 and 8 if necessary; alternative candidate
+  lists can be supplied explicitly.
 
-The previously used multiplier grid can still be reproduced with
-`--stage train --accuracy-mu <value>`, using one distinct `--out`
-directory for each candidate. Select using:
+The comparison consists of exactly six policies:
+
+| Paper name | Description |
+|---|---|
+| Booked | Planner uses the surgeon's historical duration |
+| Accuracy-trained | Fitted displayed-duration MAE policy; ignores planning |
+| Response-aware | Asymmetric case-local post-review loss; no scheduling in training |
+| Decision-aware | Proposed direct value-function MM/pDCA policy |
+| Perfect advice | Hindsight accuracy-optimal displayed advice subject to surgeon review |
+| Hindsight | Planner uses realized durations directly |
+
+Perfect advice is an **informative hindsight benchmark**, not a guaranteed
+scheduling-cost lower bound. Hindsight is the unrestricted cost reference.
+An expensive bilevel "best under review" method is intentionally excluded.
+
+Results are aggregated over **complete calendar weeks certified for every
+method and scenario**. Missing components are never interpreted as complete
+weekly totals. The experiment saves component- and week-level results and
+paired bootstrap intervals. Prediction MAE is in minutes per case; scheduling
+cost, overtime and idle time are reported per calendar week.
+
+**4. Test response misspecification without retraining**
 
 ```bash
-python -m pilot.select_accuracy_mu \
-  artifacts/vf_display_mae_mu0.5 artifacts/vf_display_mae_mu1 \
-  artifacts/vf_display_mae_mu2 artifacts/vf_display_mae_mu5 \
-  --budget 0.05
+python -u -m pilot.experiment --stage cross-evaluate \
+  --context artifacts/context.pkl \
+  --tuning artifacts/lambda_tuning/selected_hyperparameters.json \
+  --out artifacts/paper_experiment --cores 15 --plan-seconds 300
 ```
 
-Do not use the reused 2013 evaluation to revise the accuracy multiplier,
-forecast features, scheduling rule or other scientific choices.
+Two representative trained scenarios are evaluated with lower actual
+acceptance and with a nonmonotone true response with a lower threshold.
+**Displayed recommendations stay fixed** when the true response changes.
+
+**5. Generate tables, figures and the source-of-truth numbers**
+
+```bash
+python -m analysis.report \
+  --run artifacts/paper_experiment --context artifacts/context.pkl
+```
+
+This consumes frozen results without calling an optimizer. Outputs under
+`artifacts/paper_experiment/publication/` include:
+
+- `numbers.json`: verified numerical source for paper revisions;
+- `tables/*.csv`: main results, weekly comparisons, site breakdowns,
+  accuracy statistics and paired uncertainty;
+- `figures/*.svg` and `*.png`: accuracy versus weekly cost,
+  savings by scenario, overtime/idle, weekly differences and booking errors;
+- `summary.md`: concise overview.
+
+Not every generated table or figure must be included in the manuscript.
 
 ## Repository layout
 
-- `pilot/run_joint_vf.py`: single public entry point.
-- `pilot/_joint_vf_engine.py`: initialization, displayed-MAE reference,
-  direct VF training, deployment evaluation, and reporting.
-- `pilot/select_accuracy_mu.py`: training-only accuracy-budget calibration.
-- `pilot/operational_audit.py`: feasibility and peak-load diagnostics.
-- `surgery/`: data construction, response model, exact DC learning,
-  structural features, and hash-only scheduling solver.
-- `tests/`: mathematical identities, data contracts and regression checks.
+| Path | Purpose |
+|---|---|
+| `surgery/data.py` | Audited cohort and leakage-conscious history features |
+| `surgery/weekly_data.py` | Eligible room-day weeks and independent components |
+| `surgery/weekly_planner.py` | Scheduling model, load, and cost identity |
+| `surgery/schedule_solver.py` | Exact primary solver, deterministic tie-breaking, certificates |
+| `surgery/learning.py` | Surgeon response, DC objectives, pDCA, value-function majorization |
+| `surgery/features.py` | Six structural planning-context features |
+| `pilot/prepare_data.py` | Single-workbook study context |
+| `pilot/tune.py` | Training-only L1 screening |
+| `pilot/experiment.py` | Main six-policy, eight-scenario run |
+| `pilot/policy_runner.py` | Reusable single-policy training invocation |
+| `pilot/policy_training.py` | Direct decision-aware training and planner cache |
+| `pilot/response_stress.py` | Fixed-display behavioral stress tests |
+| `pilot/operational_audit.py` | Difficult room-load diagnostics |
+| `analysis/report.py` | CSV/JSON and SVG/PNG publication outputs |
 
-No generated artifacts, private clinical data, old branches, or competing
-experimental runners belong in the tracked tree.
+The code intentionally does not support unrelated datasets, large-scale
+services or a zoo of alternative learning algorithms.
