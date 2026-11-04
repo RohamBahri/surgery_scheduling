@@ -1,8 +1,14 @@
-"""Main behavioral-grid experiment: NAIVE, BOOKED, ORACLE, and direct VF."""
+"""Single-dataset retrospective experiment: train, evaluate, and export components.
+
+All scheduling policies use the same room roster, cost objective, response
+assumptions, and deployment tie rule. Paper-facing method names are defined
+here; internal mathematical implementations can retain short labels.
+"""
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import pickle
@@ -11,347 +17,453 @@ from pathlib import Path
 
 import numpy as np
 
-from pilot import policy_training as engine
-from pilot import policy_runner as single
-from surgery.learning import ResponseDC
+from pilot import policy_training as training
+from pilot import policy_runner
+from surgery.learning import DCObjective, ResponseDC, pdca
 from surgery.weekly_planner import evaluate, loads
 
-METHODS = ("BOOKED", "NAIVE", "VF", "ORACLE")
+
+METHODS = (
+    "BOOKED", "ACCURACY_TRAINED", "RESPONSE_AWARE",
+    "DECISION_AWARE", "PERFECT_ADVICE", "HINDSIGHT",
+)
+METHOD_NAMES = {
+    "BOOKED": "Booked",
+    "ACCURACY_TRAINED": "Accuracy-trained",
+    "RESPONSE_AWARE": "Response-aware",
+    "DECISION_AWARE": "Decision-aware",
+    "PERFECT_ADVICE": "Perfect advice",
+    "HINDSIGHT": "Hindsight",
+}
+DEFAULT_SCENARIOS = [(alpha, h) for alpha in (0.5, 0.8)
+                     for h in (20., 30., 60.)] + [(0.3, 15.), (0.8, 90.)]
+
+
+def save(path, obj):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(obj, indent=2, sort_keys=True, allow_nan=False))
+    temp.replace(path)
 
 
 def scenario_id(link, alpha, h):
-    def enc(x):
-        return format(x, ".8g").replace(".", "p")
-    return f"{link}_a{enc(alpha)}_h{enc(h)}"
+    def token(number):
+        return format(float(number), ".8g").replace(".", "p")
+    return f"{link}_a{token(alpha)}_h{token(h)}"
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--stage", choices=("all", "train", "evaluate"), default="all")
-    p.add_argument("--context", type=Path, default=single.DEFAULT_CONTEXT)
-    p.add_argument("--out", type=Path, default=Path("artifacts/vf_behavior_grid"))
-    p.add_argument("--alphas", type=float, nargs="+", default=[0.5, 0.8])
-    p.add_argument("--hs", type=float, nargs="+", default=[20., 30., 60.])
-    p.add_argument("--links", nargs="+", choices=("saturating", "nonmonotone"),
-                   default=["saturating"])
-    p.add_argument("--cores", type=int, default=15)
-    p.add_argument("--plan-seconds", type=float, default=300.)
-    p.add_argument("--case-steps", type=int, default=200,
-                   help="Accuracy-only reference pDCA iterations")
-    p.add_argument("--vf-outers", type=int, default=30)
-    p.add_argument("--vf-pdca-steps", type=int, default=50)
-    p.add_argument("--cuts", type=int, default=80)
-    p.add_argument("--radius", type=float, default=100.)
-    p.add_argument("--accuracy-mu", type=float, default=2.)
-    p.add_argument("--accuracy-budget", type=float, default=.05)
-    p.add_argument("--lambda-vf", type=float, default=.1)
-    a = p.parse_args(argv)
-    if not a.context.is_file():
-        p.error("Missing private context checkpoint: " + str(a.context))
-    if any(not np.isfinite(v) or not 0 < v < 1 for v in a.alphas):
-        p.error("Each alpha must be strictly between zero and one")
-    if any(not np.isfinite(v) or v <= 0 for v in a.hs):
-        p.error("Each h must be positive and finite")
-    if (a.cores < 1 or a.plan_seconds <= 0 or a.case_steps < 1 or
-        a.vf_outers < 1 or a.vf_pdca_steps < 1 or a.cuts < 1 or
-        a.radius <= 0 or any(not np.isfinite(v) or v < 0 for v in
-            (a.accuracy_mu, a.accuracy_budget, a.lambda_vf))):
-        p.error("Invalid optimization or accuracy configuration")
-    a.context = a.context.resolve()
-    a.out = a.out.resolve()
-    a.scenarios = [(link, float(alpha), float(h)) for link, alpha, h in
-                   itertools.product(dict.fromkeys(a.links),
-                                     dict.fromkeys(a.alphas), dict.fromkeys(a.hs))]
-    if len({scenario_id(*x) for x in a.scenarios}) != len(a.scenarios):
-        p.error("Scenario identifiers collide; supply distinct alpha/h values")
-    return a
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stage", choices=("all", "train", "evaluate", "cross-evaluate"),
+                        default="all")
+    parser.add_argument("--context", type=Path, default=policy_runner.DEFAULT_CONTEXT)
+    parser.add_argument("--out", type=Path, default=Path("artifacts/paper_experiment"))
+    parser.add_argument("--scenarios", nargs="*", default=None,
+                        help="Optional alpha:h pairs (e.g. 0.5:30). Defaults to 8 prespecified scenarios.")
+    parser.add_argument("--cores", type=int, default=15)
+    parser.add_argument("--plan-seconds", type=float, default=300.)
+    parser.add_argument("--retry-seconds", type=float, default=900.)
+    parser.add_argument("--case-steps", type=int, default=200)
+    parser.add_argument("--vf-outers", type=int, default=30)
+    parser.add_argument("--vf-pdca-steps", type=int, default=50)
+    parser.add_argument("--cuts", type=int, default=80)
+    parser.add_argument("--radius", type=float, default=100.)
+    parser.add_argument("--accuracy-budget", type=float, default=.05)
+    parser.add_argument("--lambda-decision", type=float, default=.1)
+    parser.add_argument("--lambda-response", type=float, default=.1)
+    parser.add_argument("--mu-candidates", type=float, nargs="+",
+                        default=[.5, 1., 2., 4., 8.])
+    args = parser.parse_args(argv)
+    if not args.context.is_file():
+        parser.error(f"Study context missing: {args.context}; run python -m pilot.prepare_data")
+    if args.cores < 1 or args.plan_seconds <= 0 or args.retry_seconds < args.plan_seconds:
+        parser.error("Invalid planning time or worker count")
+    if min(args.case_steps, args.vf_outers, args.vf_pdca_steps, args.cuts) < 1:
+        parser.error("Training iteration limits must be positive")
+    if min(args.radius, args.accuracy_budget + 1, args.lambda_decision + 1,
+           args.lambda_response + 1) <= 0 or not all(np.isfinite(x) for x in (
+               args.radius, args.accuracy_budget, args.lambda_decision, args.lambda_response)):
+        parser.error("Invalid training settings")
+    if any(not np.isfinite(mu) or mu < 0 for mu in args.mu_candidates):
+        parser.error("Accuracy penalties must be finite and nonnegative")
+    pairs = DEFAULT_SCENARIOS if args.scenarios is None else [
+        tuple(float(v) for v in entry.split(":")) for entry in args.scenarios]
+    if not pairs or any(len(pair) != 2 or not 0 < pair[0] < 1 or pair[1] <= 0
+                        for pair in pairs):
+        parser.error("Scenarios must be alpha:h with 0<alpha<1 and h>0")
+    args.scenarios = [("saturating", alpha, h) for alpha, h in dict.fromkeys(pairs)]
+    args.mu_candidates = sorted(set(args.mu_candidates))
+    args.context = args.context.resolve()
+    args.out = args.out.resolve()
+    return args
 
 
-def contract(a):
-    return dict(spec="direct_vf_behavior_grid_v1", context_sha=single.file_sha(a.context),
-                scenarios=[dict(link=l, alpha=x, h=h, id=scenario_id(l, x, h))
-                           for l, x, h in a.scenarios],
-                cores=a.cores, plan_seconds=a.plan_seconds,
-                case_steps=a.case_steps, vf_outers=a.vf_outers,
-                vf_pdca_steps=a.vf_pdca_steps, cuts=a.cuts, radius=a.radius,
-                accuracy_mu=a.accuracy_mu, accuracy_budget=a.accuracy_budget,
-                lambda_vf=a.lambda_vf, turnover=0, train_tie="primary",
-                deploy_tie="hash_only", features="77_case_plus_6_structural")
+def contract(args):
+    return {
+        "schema": "paper_experiment_v2",
+        "context_sha256": hashlib.sha256(args.context.read_bytes()).hexdigest(),
+        "methods": list(METHODS),
+        "scenarios": [dict(link=link, alpha=alpha, h=h)
+                      for link, alpha, h in args.scenarios],
+        "cores": args.cores, "plan_seconds": args.plan_seconds,
+        "retry_seconds": args.retry_seconds, "case_steps": args.case_steps,
+        "vf_outers": args.vf_outers, "vf_pdca_steps": args.vf_pdca_steps,
+        "cuts": args.cuts, "radius": args.radius,
+        "accuracy_budget": args.accuracy_budget,
+        "lambda_decision": args.lambda_decision,
+        "lambda_response": args.lambda_response,
+        "mu_candidates": args.mu_candidates,
+        "turnover": 0, "deploy_tie": "hash_only",
+    }
 
 
-def ensure_contract(a):
-    a.out.mkdir(parents=True, exist_ok=True)
-    dest = a.out / "grid_contract.json"
-    expected = contract(a)
-    if dest.is_file():
-        if json.loads(dest.read_text()) != expected:
-            raise ValueError("Grid configuration changed; select a different --out")
-    else:
-        engine.save(dest, expected)
+def prepare_output(args):
+    args.out.mkdir(parents=True, exist_ok=True)
+    path = args.out / "experiment_contract.json"
+    expected = contract(args)
+    if path.exists() and json.loads(path.read_text()) != expected:
+        raise ValueError("Experiment settings changed: use a fresh output directory")
+    save(path, expected)
 
 
-def fit_naive(ctx, a):
-    """Train one response-blind, decision-blind regularized LAD predictor."""
-    path = a.out / "naive_lad.json"
-    if path.is_file():
-        saved = json.loads(path.read_text())
-        if saved.get("context_sha") != single.file_sha(a.context):
-            raise ValueError("Naive predictor belongs to another dataset")
-        w = np.asarray(saved["weights"], float)
-    else:
-        X = np.asarray(ctx["fit"]["X"], float)
-        errors = np.asarray(ctx["fit"]["actual"], float) - np.asarray(
-            ctx["fit"]["booked"], float)
-        lam = engine.train_lambda(X, len(ctx["train"]), intercept=True)
-        w, result = engine.lad_start(X, errors, lam, len(ctx["train"]), a.radius)
-        if w is None:
-            raise RuntimeError("Naive LAD optimizer did not converge: " + str(result))
-        engine.save(path, dict(method="NAIVE_LAD", weights=w.tolist(),
-                               lambda_lad=lam, optimizer=result,
-                               features="77_case_only", context_sha=single.file_sha(a.context),
-                               training_cases=len(X)))
-    if (w.shape != (np.asarray(ctx["fit"]["X"]).shape[1],) or
-        not np.isfinite(w).all() or np.max(np.abs(w)) > a.radius + 1e-8):
-        raise ValueError("Invalid saved NAIVE coefficients")
-    return w
+def fit_initializer(context, args):
+    """Shared 77-feature LAD fit used ONLY as an optimizer initialization."""
+    path = args.out / "lad_initializer.json"
+    if path.exists():
+        record = json.loads(path.read_text())
+        if record["context_sha256"] != contract(args)["context_sha256"]:
+            raise ValueError("Initializer belongs to another training dataset")
+        return np.asarray(record["weights"], float)
+    fit = context["fit"]
+    X = np.asarray(fit["X"], float)
+    residual = np.asarray(fit["actual"]) - np.asarray(fit["booked"])
+    penalty = training.train_lambda(X, len(context["train"]), intercept=True)
+    coefficients, status = training.lad_start(
+        X, residual, penalty, len(context["train"]), args.radius)
+    if coefficients is None:
+        raise RuntimeError(f"LAD initialization failed: {status}")
+    save(path, dict(weights=coefficients.tolist(),
+                    context_sha256=contract(args)["context_sha256"],
+                    optimization=status))
+    return coefficients
 
 
-def single_args(a, scenario, stage):
+def policy_args(args, scenario, mu, root, stage):
     link, alpha, h = scenario
-    return ["--stage", stage, "--context", str(a.context),
-            "--out", str(a.out / "scenarios" / scenario_id(*scenario)),
-            "--naive-start", str(a.out / "naive_lad.json"),
-            "--link", link, "--alpha", str(alpha), "--h", str(h),
-            "--cores", str(a.cores), "--plan-seconds", str(a.plan_seconds),
-            "--case-steps", str(a.case_steps), "--vf-outers", str(a.vf_outers),
-            "--vf-pdca-steps", str(a.vf_pdca_steps), "--cuts", str(a.cuts),
-            "--radius", str(a.radius), "--accuracy-mu", str(a.accuracy_mu),
-            "--accuracy-budget", str(a.accuracy_budget),
-            "--lambda-vf", str(a.lambda_vf), "--turnover", "0",
-            "--train-tie", "primary", "--accuracy-gate", "off"]
+    return [
+        "--stage", stage, "--context", str(args.context),
+        "--out", str(root), "--naive-start", str(args.out / "lad_initializer.json"),
+        "--link", link, "--alpha", str(alpha), "--h", str(h),
+        "--cores", str(args.cores), "--plan-seconds", str(args.plan_seconds),
+        "--case-steps", str(args.case_steps), "--vf-outers", str(args.vf_outers),
+        "--vf-pdca-steps", str(args.vf_pdca_steps), "--cuts", str(args.cuts),
+        "--radius", str(args.radius), "--accuracy-mu", str(mu),
+        "--accuracy-budget", str(args.accuracy_budget),
+        "--lambda-vf", str(args.lambda_decision),
+        "--turnover", "0", "--train-tie", "primary", "--accuracy-gate", "off",
+    ]
 
 
-def evaluate_rows(ctx, a, naive):
-    """Cache common plans once; report all four methods on each scenario."""
-    items = ctx["eval"]
-    held = ctx["held"]
-    b = np.asarray(held["booked"], float)
-    y = np.asarray(held["actual"], float)
-    X = np.asarray(held["X"], float)
-    if len(b) != len(y) or X.shape[0] != len(b):
-        raise ValueError("Evaluation context has inconsistent case dimensions")
-    cache = engine.PlannerCache(a.out, a.cores, a.plan_seconds)
-    shared = {"BOOKED": cache.solve(items, b, "test_BOOKED", tie=True),
-              "ORACLE": cache.solve(items, y, "test_ORACLE", tie=True)}
-    result = []
-    policy_checks = {}
-    for scenario in a.scenarios:
-        link, alpha, h = scenario
+def root_for(args, scenario, mu):
+    return args.out / "scenarios" / scenario_id(*scenario) / (
+        "mu_" + format(mu, ".8g").replace(".", "p"))
+
+
+def train_decision_policy(args, scenario):
+    """Train candidates until the first feasible accuracy multiplier is found."""
+    scenario_dir = args.out / "scenarios" / scenario_id(*scenario)
+    selection = scenario_dir / "selected.json"
+    if selection.exists():
+        return json.loads(selection.read_text())
+    initial_reference = None
+    candidates = []
+    for mu in args.mu_candidates:
+        root = root_for(args, scenario, mu)
+        if initial_reference is not None and not (root / "display_accuracy_reference.json").exists():
+            # Same scenario, features and accuracy reference for every mu.
+            import shutil
+            shutil.copyfile(initial_reference, root / "display_accuracy_reference.json")
+        policy_runner.main(policy_args(args, scenario, mu, root, "train"))
+        policy = json.loads((root / "selected_policy.json").read_text())
+        reference = root / "display_accuracy_reference.json"
+        initial_reference = reference
+        ratio = float(policy["accuracy_ratio"])
+        record = dict(mu=mu, accuracy_ratio=ratio,
+                      accuracy_met=ratio <= 1 + args.accuracy_budget + 1e-9,
+                      status=policy["vf_status"])
+        candidates.append(record)
+        if record["accuracy_met"]:
+            selected = dict(mu=mu, candidates=candidates, accuracy_met=True)
+            save(selection, selected)
+            return selected
+    selected = dict(mu=args.mu_candidates[-1], candidates=candidates, accuracy_met=False)
+    save(selection, selected)
+    return selected
+
+
+def load_decision_policy(args, scenario):
+    selected = json.loads((args.out / "scenarios" / scenario_id(*scenario) /
+                           "selected.json").read_text())
+    mu = selected["mu"]
+    root = root_for(args, scenario, mu)
+    check_args = policy_runner.parse_args(policy_args(args, scenario, mu, root, "evaluate"))
+    _, policy = policy_runner.verified_context(check_args)
+    return root, selected, policy
+
+
+def full_features(context, args, scenario, root, items, partition):
+    """The same 83 features for all learned comparators."""
+    case_features = np.asarray(context["fit" if partition == "train" else "held"]["X"])
+    scaling = json.loads((root / "features.json").read_text())
+    structural, _, _ = training.five_features(
+        context, items, None, partition,
+        scaler=(np.asarray(scaling["mean"]), np.asarray(scaling["std"])),
+        schema="structural")
+    return np.column_stack([case_features, structural])
+
+
+def fit_response_policy(context, args, scenario, root):
+    """Case-local asymmetric loss and displayed-accuracy safeguard; no planner training."""
+    path = args.out / "scenarios" / scenario_id(*scenario) / "response_aware.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    response = ResponseDC(context["fit"]["booked"], scenario[1], scenario[2],
+                          180., 1., link=scenario[0])
+    design = full_features(context, args, scenario, root, context["train"], "train")
+    reference = json.loads((root / "display_accuracy_reference.json").read_text())
+    fitted_reference = float(reference["accuracy_per_component"])
+    starting = np.asarray(reference["weights"], float)
+    candidates = []
+    for mu in args.mu_candidates:
+        objective = DCObjective(
+            context["fit"]["booked"], design,
+            np.zeros(len(design)), response, mode="CASE",
+            actual=context["fit"]["actual"], components=len(context["train"]),
+            lam=args.lambda_response,
+            penalize=np.r_[0., np.ones(design.shape[1]-1)],
+            accuracy_mu=mu)
+        result = pdca(objective, starting, radius=args.radius,
+                      outer=args.case_steps, backend="gurobi")
+        weights = np.asarray(result["weights"], float)
+        displayed = context["fit"]["booked"] + response.display(design @ weights)
+        ratio = float(np.abs(context["fit"]["actual"] - displayed).sum() /
+                      len(context["train"]) / fitted_reference)
+        record = dict(mu=mu, ratio=ratio, status=result["status"],
+                      weights=weights.tolist())
+        candidates.append({key: value for key, value in record.items() if key != "weights"})
+        if ratio <= 1 + args.accuracy_budget + 1e-9:
+            output = dict(**record, candidates=candidates, accuracy_met=True)
+            save(path, output)
+            return output
+        starting = weights
+    output = dict(**record, candidates=candidates, accuracy_met=False)
+    save(path, output)
+    return output
+
+
+def solve_with_retry(cache, items, durations, tag, args):
+    plans = cache.solve(items, durations, tag, tie=True)
+    unresolved = [(key, comp, idx) for key, comp, idx in items if not plans[key]["complete"]]
+    if unresolved and args.retry_seconds > args.plan_seconds:
+        fallback = training.PlannerCache(args.out / "retry", args.cores, args.retry_seconds)
+        retried = fallback.solve(unresolved, durations, tag, tie=True)
+        for key, _, _ in unresolved:
+            if retried[key]["complete"]:
+                plans[key] = retried[key]
+    return plans
+
+
+def evaluate_scenario(context, args, scenario, shared, cache):
+    link, alpha, h = scenario
+    sid = scenario_id(*scenario)
+    root, selected, policy = load_decision_policy(args, scenario)
+    response = ResponseDC(context["held"]["booked"], alpha, h, 180., 1., link=link)
+    booked = np.asarray(context["held"]["booked"], float)
+    realized = np.asarray(context["held"]["actual"], float)
+    X = full_features(context, args, scenario, root, context["eval"], "eval")
+    accuracy_fit = json.loads((root / "display_accuracy_reference.json").read_text())
+    response_fit = json.loads((args.out / "scenarios" / sid /
+                               "response_aware.json").read_text())
+    scores = {
+        "ACCURACY_TRAINED": X @ np.asarray(accuracy_fit["weights"], float),
+        "RESPONSE_AWARE": X @ np.asarray(response_fit["weights"], float),
+        "DECISION_AWARE": X @ np.asarray(policy["vf_theta"], float),
+    }
+    displays = {method: response.display(score) for method, score in scores.items()}
+    displays["PERFECT_ADVICE"] = np.clip((realized - booked)/alpha, -h, h)
+    displays["BOOKED"] = np.zeros_like(booked)
+    displays["HINDSIGHT"] = realized - booked
+    durations = {
+        method: response.reviewed_from_display(display)
+        for method, display in displays.items() if method not in ("HINDSIGHT",)
+    }
+    durations["BOOKED"] = booked
+    durations["HINDSIGHT"] = realized
+    plans = dict(shared)
+    for method in ("ACCURACY_TRAINED", "RESPONSE_AWARE", "DECISION_AWARE",
+                   "PERFECT_ADVICE"):
+        plans[method] = solve_with_retry(
+            cache, context["eval"], durations[method], f"{sid}_{method}", args)
+    rows = []
+    for key, component, positions in context["eval"]:
+        for method in METHODS:
+            solved = plans[method][key]
+            assignment = solved["assignment"]
+            metrics = evaluate(component, assignment, component.actual)
+            planned = evaluate(component, assignment, durations[method][positions])
+            realized_loads = loads(component, assignment, component.actual)
+            rows.append(dict(
+                scenario=sid, alpha=alpha, h=h, link=link,
+                method=method, method_name=METHOD_NAMES[method],
+                component=str(key), group=str(component.group),
+                week=str(component.monday), cases=int(component.n),
+                complete=bool(solved["complete"]), status=solved["status"],
+                cost=float(metrics["cost"]), planned_cost=float(planned["cost"]),
+                idle=float(metrics["idle"]), overtime=float(metrics["overtime"]),
+                mae=float(np.abs(component.actual-durations[method][positions]).sum()),
+                displayed_mae=float(np.abs(component.actual -
+                    booked[positions]-displays[method][positions]).sum()),
+                max_realized_load=float(realized_loads.max()),
+                over_720_rooms=int((realized_loads > 720).sum())))
+    return rows, dict(decision_accuracy_ratio=float(policy["accuracy_ratio"]),
+                      decision_accuracy_met=bool(selected["accuracy_met"]),
+                      response_accuracy_ratio=float(response_fit["ratio"]),
+                      response_accuracy_met=bool(response_fit["accuracy_met"]),
+                      selected_mu_decision=float(selected["mu"]),
+                      selected_mu_response=float(response_fit["mu"]))
+
+
+def complete_week_keys(rows, scenario):
+    """Keep entire calendar weeks; never report a partial week as a week."""
+    grouped = defaultdict(lambda: defaultdict(dict))
+    for row in rows:
+        if row["scenario"] == scenario:
+            grouped[row["week"]][row["component"]][row["method"]] = row
+    complete = {}
+    for week, blocks in grouped.items():
+        if all(set(METHODS) == set(methods) and
+               all(methods[m]["complete"] for m in METHODS)
+               for methods in blocks.values()):
+            complete[week] = blocks
+    return complete
+
+
+def summarize(rows, scenarios, checks):
+    by_scenario = {scenario_id(*scenario): complete_week_keys(rows, scenario_id(*scenario))
+                   for scenario in scenarios}
+    common_weeks = set.intersection(*(set(weeks) for weeks in by_scenario.values()))
+    if not common_weeks:
+        raise ValueError("No complete certified calendar weeks across the grid")
+    rng = np.random.default_rng(20261103)
+    table, bootstraps, weekly_rows = [], {}, []
+    for scenario in scenarios:
         sid = scenario_id(*scenario)
-        root = a.out / "scenarios" / sid
-        check_args = single.parse_args(single_args(a, scenario, "evaluate"))
-        _, selected = single.verified_context(check_args)
-        scale = json.loads((root / "features.json").read_text())
-        if scale.get("schema") != "structural":
-            raise ValueError("VF requires the frozen structural feature schema")
-        H, _, _ = engine.five_features(ctx, items, cache, "eval",
-            scaler=(np.asarray(scale["mean"]), np.asarray(scale["std"])),
-            schema="structural")
-        scores = np.column_stack([X, H]) @ np.asarray(selected["vf_theta"], float)
-        naive_scores = X @ naive
-        response = ResponseDC(b, alpha, h, 180., 1., link=link)
-        d = {"BOOKED": b, "ORACLE": y,
-             "NAIVE": response.reviewed(naive_scores),
-             "VF": response.reviewed(scores)}
-        displays = {"BOOKED": b, "ORACLE": y,
-                    "NAIVE": b + response.display(naive_scores),
-                    "VF": b + response.display(scores)}
-        plans = dict(shared)
-        for method in ("NAIVE", "VF"):
-            plans[method] = cache.solve(items, d[method],
-                                        "test_" + sid + "_" + method, tie=True)
-        ratio = float(selected["accuracy_ratio"])
-        policy_checks[sid] = dict(alpha=alpha, h=h, link=link,
-            training_accuracy_ratio=ratio,
-            training_accuracy_met=bool(ratio <= 1 + a.accuracy_budget + 1e-9),
-            optimizer_status=selected["vf_status"],
-            accuracy_reference=selected["accuracy_reference"],
-            initialization=selected["initialization"])
-        for key, comp, idx in items:
+        week_data = {}
+        for week in sorted(common_weeks):
+            policy_totals = {method: defaultdict(float) for method in METHODS}
+            for component in by_scenario[sid][week].values():
+                for method in METHODS:
+                    rec = component[method]
+                    for quantity in ("cost", "planned_cost", "idle", "overtime", "mae",
+                                     "displayed_mae"):
+                        policy_totals[method][quantity] += rec[quantity]
+            week_data[week] = policy_totals
             for method in METHODS:
-                rec = plans[method][key]
-                assigned = rec["assignment"]
-                measure = evaluate(comp, assigned, comp.actual)
-                room_loads = loads(comp, assigned, comp.actual)
-                result.append(dict(scenario=sid, link=link, alpha=alpha, h=h,
-                    method=method, component=str(key), week=str(comp.monday),
-                    cases=int(comp.n), complete=bool(rec["complete"]),
-                    status=rec["status"], cost=float(measure["cost"]),
-                    idle=float(measure["idle"]),
-                    overtime=float(measure["overtime"]),
-                    mae=float(np.abs(comp.actual - d[method][idx]).sum()),
-                    displayed_mae=float(np.abs(
-                        comp.actual - displays[method][idx]).sum()),
-                    max_realized_load=float(room_loads.max()),
-                    over_720_rooms=int(np.sum(room_loads > 720.)),
-                    emptied_historical_surgeon_days=int(
-                        measure["emptied_historical_surgeon_days"])))
-        engine.save(root / "grid_evaluation.json", dict(
-            status="EXPLORATORY_REUSED_2013_TEST", scenario=sid,
-            policy=policy_checks[sid],
-            entries=[r for r in result if r["scenario"] == sid]))
-    return result, policy_checks
+                weekly_rows.append(dict(scenario=sid, week=week, method=method,
+                    **{key: float(value) for key, value in policy_totals[method].items()}))
+        number_weeks = len(week_data)
+        values = {m: np.array([week_data[w][m]["cost"] for w in sorted(week_data)])
+                  for m in METHODS}
+        counts = sum(row["cases"] for row in rows if row["scenario"] == sid and
+                     row["method"] == "BOOKED" and row["week"] in common_weeks)
+        result = dict(scenario=sid, alpha=scenario[1], h=scenario[2],
+                      weeks=number_weeks, cases=counts, **checks[sid])
+        for method in METHODS:
+            for quantity in ("cost", "planned_cost", "idle", "overtime"):
+                result[f"{method}_{quantity}_per_week"] = float(np.mean([
+                    week_data[w][method][quantity] for w in week_data]))
+            result[f"{method}_mae_per_case"] = float(
+                sum(week_data[w][method]["mae"] for w in week_data)/counts)
+            result[f"{method}_displayed_mae_per_case"] = float(
+                sum(week_data[w][method]["displayed_mae"] for w in week_data)/counts)
+        denominator = values["BOOKED"].mean() - values["HINDSIGHT"].mean()
+        result["DECISION_AWARE_gap_closed_fraction"] = (
+            float((values["BOOKED"].mean()-values["DECISION_AWARE"].mean())/denominator)
+            if denominator > 1e-9 else None)
+        draws = rng.integers(0, number_weeks, size=(5000, number_weeks))
+        bootstraps[sid] = {}
+        for baseline in ("BOOKED", "ACCURACY_TRAINED", "RESPONSE_AWARE",
+                         "PERFECT_ADVICE"):
+            differences = values["DECISION_AWARE"] - values[baseline]
+            bootstraps[sid][baseline] = dict(
+                mean_weekly_difference=float(differences.mean()),
+                confidence_95=np.quantile(differences[draws].mean(axis=1),
+                                          [.025, .975]).tolist(),
+                better_weeks=int((differences < 0).sum()),
+                worse_weeks=int((differences > 0).sum()),
+                weeks=number_weeks)
+        table.append(result)
+    return table, bootstraps, weekly_rows, sorted(common_weeks)
 
 
-def group_components(rows):
-    by = defaultdict(dict)
-    for r in rows:
-        key = (r["scenario"], r["component"])
-        if r["method"] in by[key]:
-            raise ValueError("Duplicate scenario/method/component entry")
-        by[key][r["method"]] = r
-    return by
+def export_rows(path, rows):
+    if not rows:
+        return
+    with path.open("w", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=list(dict.fromkeys(
+            field for row in rows for field in row)))
+        writer.writeheader()
+        writer.writerows(rows)
 
 
-def summarize(rows, checks, a):
-    by = group_components(rows)
-    scenario_ids = [scenario_id(*s) for s in a.scenarios]
-    certified = {
-        sid: {key for (ss, key), d in by.items() if ss == sid and
-              all(m in d and d[m]["complete"] for m in METHODS)}
-        for sid in scenario_ids}
-    global_common = set.intersection(*certified.values())
-    table = []
-    for sid in scenario_ids:
-        for sample, keys in (("all_feasible", {k for (ss, k) in by if ss == sid}),
-                             ("scenario_certified", certified[sid]),
-                             ("grid_common_certified", global_common)):
-            subset = [by[(sid, key)] for key in sorted(keys)]
-            n = sum(x["BOOKED"]["cases"] for x in subset)
-            row = dict(scenario=sid, link=checks[sid]["link"],
-                alpha=checks[sid]["alpha"], h=checks[sid]["h"], sample=sample,
-                components=len(subset), cases=n,
-                training_accuracy_ratio=checks[sid]["training_accuracy_ratio"],
-                training_accuracy_met=checks[sid]["training_accuracy_met"])
-            for method in METHODS:
-                row[method + "_cost_per_case"] = (
-                    sum(x[method]["cost"] for x in subset) / n if n else None)
-                row[method + "_mae_per_case"] = (
-                    sum(x[method]["mae"] for x in subset) / n if n else None)
-                row[method + "_idle_per_case"] = (
-                    sum(x[method]["idle"] for x in subset) / n if n else None)
-                row[method + "_overtime_per_case"] = (
-                    sum(x[method]["overtime"] for x in subset) / n if n else None)
-                row[method + "_rooms_over_720"] = sum(
-                    x[method]["over_720_rooms"] for x in subset)
-            if n:
-                vf = row["VF_cost_per_case"]
-                booked = row["BOOKED_cost_per_case"]
-                oracle = row["ORACLE_cost_per_case"]
-                row["VF_minus_BOOKED"] = vf - booked
-                row["VF_minus_NAIVE"] = vf - row["NAIVE_cost_per_case"]
-                row["VF_gap_closed_fraction"] = (
-                    (booked - vf) / (booked - oracle)
-                    if booked > oracle + 1e-9 else None)
-            table.append(row)
-    # Paired calendar-week bootstraps on exactly the samples reported in the table.
-    rng = np.random.default_rng(20261029)
-    confidence = {}
-    for sid in scenario_ids:
-        confidence[sid] = {}
-        for sample, keys in (("scenario_certified", certified[sid]),
-                             ("grid_common_certified", global_common)):
-            weeks = defaultdict(lambda: defaultdict(float))
-            for key in sorted(keys):
-                block = by[(sid, key)]
-                week = block["BOOKED"]["week"]
-                weeks[week]["cases"] += block["BOOKED"]["cases"]
-                for m in METHODS:
-                    weeks[week][m] += block[m]["cost"]
-            ordered = [weeks[k] for k in sorted(weeks)]
-            results = {}
-            if ordered:
-                draws = rng.integers(0, len(ordered), size=(5000, len(ordered)))
-                den = np.array([z["cases"] for z in ordered], float)[draws].sum(axis=1)
-                for baseline in ("BOOKED", "NAIVE"):
-                    diffs = np.array([z["VF"] - z[baseline] for z in ordered])
-                    samples = diffs[draws].sum(axis=1) / den
-                    results["VF_minus_" + baseline] = dict(
-                        estimate=float(diffs.sum() / sum(z["cases"] for z in ordered)),
-                        calendar_week_bootstrap_95=np.quantile(
-                            samples, [.025, .975]).tolist(),
-                        better_weeks=int(np.sum(diffs < 0)),
-                        worse_weeks=int(np.sum(diffs > 0)),
-                        weeks=len(ordered), cases=int(sum(z["cases"] for z in ordered)))
-            confidence[sid][sample] = results
-    return table, confidence, dict(
-        status="EXPLORATORY_REUSED_2013_TEST", methods=list(METHODS),
-        scenarios=scenario_ids,
-        certification_by_scenario={s: len(v) for s, v in certified.items()},
-        grid_common_certified_components=len(global_common),
-        grid_common_certified_cases=(sum(by[(scenario_ids[0], k)]["BOOKED"]["cases"]
-                                         for k in global_common)),
-        policy_checks=checks, paired_bootstrap=confidence)
-
-
-def save_grid(a, entries, checks):
-    table, intervals, summary = summarize(entries, checks, a)
-    engine.save(a.out / "grid_summary.json", summary)
-    engine.save(a.out / "grid_table.json", table)
-    for name, records in (("grid.csv", table), ("component_results.csv", entries)):
-        if not records:
-            continue
-        with (a.out / name).open("w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(dict.fromkeys(
-                k for r in records for k in r)))
-            writer.writeheader()
-            writer.writerows(records)
-    cols = ("BOOKED", "NAIVE", "VF", "ORACLE")
-    lines = ["# VF behavioral-scenario grid", "",
-             "Exploratory reused Jan-Jun 2013 test; costs per case, same certified "
-             "components across the entire grid. No primary scenario.", "",
-             "| Link | Alpha | h (min) | Cases | BOOKED | NAIVE | VF | ORACLE | "
-             "VF - NAIVE | Accuracy met? |",
-             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
-    for row in table:
-        if row["sample"] != "grid_common_certified":
-            continue
-        def number(v):
-            return f"{v:.3f}" if v is not None else "N/A"
-        lines.append("| " + " | ".join([
-            row["link"], number(row["alpha"]), number(row["h"]),
-            str(row["cases"]), *(number(row[c + "_cost_per_case"]) for c in cols),
-            number(row.get("VF_minus_NAIVE")),
-            "yes" if row["training_accuracy_met"] else "NO"] ) + " |")
-    lines += ["", "Scenario-specific and all-feasible summaries are in grid.csv.",
-              "Paired calendar-week confidence intervals and certification counts "
-              "are in grid_summary.json."]
-    (a.out / "grid.md").write_text("\n".join(lines) + "\n")
-    print("\n".join(lines), flush=True)
-    if not all(v["training_accuracy_met"] for v in checks.values()):
-        print("WARNING: Some scenarios miss the 5% training accuracy safeguard; "
-              "inspect grid_summary.json before interpreting them.", flush=True)
+def evaluate_grid(context, args):
+    cache = training.PlannerCache(args.out, args.cores, args.plan_seconds)
+    booked = np.asarray(context["held"]["booked"], float)
+    realized = np.asarray(context["held"]["actual"], float)
+    shared = {
+        "BOOKED": solve_with_retry(cache, context["eval"], booked, "BOOKED", args),
+        "HINDSIGHT": solve_with_retry(cache, context["eval"], realized, "HINDSIGHT", args),
+    }
+    rows, checks = [], {}
+    for scenario in args.scenarios:
+        sid = scenario_id(*scenario)
+        current, check = evaluate_scenario(context, args, scenario, shared, cache)
+        rows.extend(current)
+        checks[sid] = check
+    table, uncertainty, weekly_rows, weeks = summarize(rows, args.scenarios, checks)
+    export_rows(args.out / "component_results.csv", rows)
+    export_rows(args.out / "weekly_results.csv", weekly_rows)
+    export_rows(args.out / "main_results.csv", table)
+    save(args.out / "paired_bootstrap.json", uncertainty)
+    save(args.out / "coverage.json", dict(
+        total_components=len(context["eval"]), common_complete_weeks=weeks,
+        total_calendar_weeks=len({c.monday for _, c, _ in context["eval"]}),
+        certified_by_scenario={
+            scenario_id(*sc): sum(r["complete"] for r in rows
+                if r["scenario"] == scenario_id(*sc) and r["method"] == "DECISION_AWARE")
+            for sc in args.scenarios},
+        response_accuracy_safeguard=checks))
+    return table
 
 
 def main(argv=None):
-    a = parse_args(argv)
-    ensure_contract(a)
-    single.configure_model(argparse.Namespace(turnover=0.))
-    with a.context.open("rb") as stream:
-        ctx = pickle.load(stream)
-    if a.stage in ("all", "train"):
-        fit_naive(ctx, a)
-        for scenario in a.scenarios:
-            print("\nTRAINING VF", scenario_id(*scenario), flush=True)
-            single.main(single_args(a, scenario, "train"))
-        if a.stage == "train":
-            return
-    if a.stage in ("all", "evaluate"):
-        naive = fit_naive(ctx, a) if (a.out / "naive_lad.json").exists() else None
-        if naive is None:
-            raise ValueError("NAIVE predictor missing; run --stage train first")
-        entries, checks = evaluate_rows(ctx, a, naive)
-        save_grid(a, entries, checks)
+    args = parse_args(argv)
+    prepare_output(args)
+    policy_runner.configure_model(argparse.Namespace(turnover=0.))
+    with args.context.open("rb") as input_file:
+        context = pickle.load(input_file)
+    if args.stage in ("train", "all"):
+        fit_initializer(context, args)
+        for scenario in args.scenarios:
+            selected = train_decision_policy(args, scenario)
+            root = root_for(args, scenario, selected["mu"])
+            fit_response_policy(context, args, scenario, root)
+    if args.stage in ("evaluate", "all"):
+        evaluate_grid(context, args)
+    if args.stage == "cross-evaluate":
+        from pilot.response_stress import cross_evaluate
+        cross_evaluate(context, args)
 
 
 if __name__ == "__main__":
