@@ -153,7 +153,7 @@ def policy_args(args, scenario, mu, root, stage):
     link, alpha, h = scenario
     return [
         "--stage", stage, "--context", str(args.context),
-        "--out", str(root), "--naive-start", str(args.out / "lad_initializer.json"),
+        "--out", str(root), "--initial-weights", str(args.out / "lad_initializer.json"),
         "--link", link, "--alpha", str(alpha), "--h", str(h),
         "--cores", str(args.cores), "--plan-seconds", str(args.plan_seconds),
         "--case-steps", str(args.case_steps), "--vf-outers", str(args.vf_outers),
