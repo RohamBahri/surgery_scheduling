@@ -133,6 +133,9 @@ def prepare_output(args):
     if path.exists() and json.loads(path.read_text()) != expected:
         raise ValueError("Experiment settings changed: use a fresh output directory")
     save(path, expected)
+    if args.tuning is not None:
+        (args.out / "selected_hyperparameters.json").write_bytes(
+            args.tuning.read_bytes())
 
 
 def fit_initializer(context, args):
