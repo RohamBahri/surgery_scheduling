@@ -37,7 +37,8 @@ python -m pilot.prepare_data \
 
 This creates the case features, surgeon-eligible scheduling components and
 auditable cohort/quality tables. It uses July 2011–December 2012 for training
-and January–June 2013 for evaluation.
+and January–June 2013 for evaluation. Headline descriptive statistics summarize
+**the entire retained 2011–2013 cohort**, not just the fitting sample.
 
 **2. Tune the L1 penalties on earlier training data**
 
@@ -48,10 +49,15 @@ python -m pilot.tune \
 ```
 
 This creates an independent July 2011–June 2012 fitting and July–December
-2012 validation split, using eight evenly spaced validation weeks for economical\nweekly cost comparisons. It screens λ = 0.03, 0.1, 0.3 separately for
+2012 validation split, excluding **all 2013 source records before feature
+construction**, using eight evenly spaced validation weeks for economical
+weekly cost comparisons. It screens λ = 0.03, 0.1, 0.3 separately for
 Response-aware and Decision-aware, under two anchor response assumptions.
-Decision-aware uses shortened fits **only for screening**. The chosen λ for
-each method is shared across all final scenarios. No 2013 outcomes are used
+Decision-aware uses shortened fits **only for screening**. Candidate L1 penalties
+must satisfy the 5% displayed-accuracy safeguard on the tuning fit data
+(with the common tuning multiplier μ=2). The chosen λ for each method is shared
+across the final scenarios. Tuning aborts if no accuracy-feasible setting is
+fully certified; it never silently selects an infeasible one. No 2013 outcomes are used
 for tuning. The selected file is `artifacts/lambda_tuning/selected_hyperparameters.json`.
 
 **3. Train and evaluate the eight prespecified response scenarios**
@@ -102,7 +108,8 @@ An expensive bilevel "best under review" method is intentionally excluded.
 Results are aggregated over **complete calendar weeks certified for every
 method and scenario**. Missing components are never interpreted as complete
 weekly totals. The experiment saves component- and week-level results and
-paired bootstrap intervals. Prediction MAE is in minutes per case; scheduling
+paired bootstrap intervals for every policy against Booked and for Decision-aware
+against the other learned policies. Prediction MAE is in minutes per case; scheduling
 cost, overtime and idle time are reported per calendar week.
 
 **4. Test response misspecification without retraining**
@@ -117,6 +124,7 @@ python -u -m pilot.experiment --stage cross-evaluate \
 Two representative trained scenarios are evaluated with lower actual
 acceptance and with a nonmonotone true response with a lower threshold.
 **Displayed recommendations stay fixed** when the true response changes.
+Stress-test comparisons also use paired calendar-week bootstrap intervals.
 
 **5. Generate tables, figures and the source-of-truth numbers**
 
@@ -130,7 +138,7 @@ This consumes frozen results without calling an optimizer. Outputs under
 
 - `numbers.json`: verified numerical source for paper revisions;
 - `tables/*.csv`: main results, weekly comparisons, site breakdowns,
-  accuracy statistics and paired uncertainty;
+  accuracy statistics, reachability limits, bound diagnostics and paired uncertainty;
 - `figures/*.svg` and `*.png`: accuracy versus weekly cost,
   savings by scenario, overtime/idle, weekly differences and booking errors;
 - `summary.md`: concise overview.
