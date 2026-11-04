@@ -180,6 +180,7 @@ def train_decision_policy(args, scenario):
     candidates = []
     for mu in args.mu_candidates:
         root = root_for(args, scenario, mu)
+        root.mkdir(parents=True, exist_ok=True)
         if initial_reference is not None and not (root / "display_accuracy_reference.json").exists():
             # Same scenario, features and accuracy reference for every mu.
             import shutil
