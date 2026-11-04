@@ -51,7 +51,7 @@ def test_hash_only_training_replay_uses_booked_and_frozen_vf(
     raw=np.array([6.,3.,-2.])
     with (folder/"cases_train.csv").open("w",newline="") as f:
         w=csv.writer(f)
-        w.writerow(["case_id","booked","actual","vf_raw","vf_reviewed"])
+        w.writerow(["case_id","booked","actual","decision_score","decision_reviewed"])
         for i in range(c.n):
             w.writerow([int(c.case_ids[i]),float(c.booked[i]),
                 float(c.actual[i]),float(raw[i]),float(response.reviewed(raw)[i])])
