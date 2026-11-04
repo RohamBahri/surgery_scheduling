@@ -81,7 +81,8 @@ def prepare(workbook: Path, output: Path, split_date: str = "2013-01-01",
                      case_id=evaluation.case_id.to_numpy(int), X=test_features),
         "H": train_spread, "H_eval": test_spread,
         "train": train_components, "eval": test_components,
-        "metadata": dict(split_date=str(cutoff.date()), end_date=str(end.date()),\n                         workbook_sha256=hashlib.sha256(
+        "metadata": dict(split_date=str(cutoff.date()), end_date=str(end.date()),
+                         workbook_sha256=hashlib.sha256(
             workbook.read_bytes()).hexdigest(), training_cases=len(training),
             evaluation_cases=len(evaluation), training_components=len(train_components),
             evaluation_components=len(test_components)),
