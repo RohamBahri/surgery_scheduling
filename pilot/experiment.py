@@ -74,7 +74,13 @@ def parse_args(argv=None):
     parser.add_argument("--lambda-response", type=float, default=.1)
     parser.add_argument("--mu-candidates", type=float, nargs="+",
                         default=[.5, 1., 2., 4., 8.])
+    parser.add_argument("--tuning", type=Path, default=None,
+                        help="Training-only selected_hyperparameters.json from pilot.tune")
     args = parser.parse_args(argv)
+    if args.tuning is not None:
+        selected = json.loads(args.tuning.read_text())
+        args.lambda_decision = float(selected["lambda_decision"])
+        args.lambda_response = float(selected["lambda_response"])
     if not args.context.is_file():
         parser.error(f"Study context missing: {args.context}; run python -m pilot.prepare_data")
     if args.cores < 1 or args.plan_seconds <= 0 or args.retry_seconds < args.plan_seconds:
@@ -114,6 +120,8 @@ def contract(args):
         "lambda_decision": args.lambda_decision,
         "lambda_response": args.lambda_response,
         "mu_candidates": args.mu_candidates,
+        "tuning_file_sha256": (hashlib.sha256(args.tuning.read_bytes()).hexdigest()
+                               if args.tuning is not None else None),
         "turnover": 0, "deploy_tie": "hash_only",
     }
 
