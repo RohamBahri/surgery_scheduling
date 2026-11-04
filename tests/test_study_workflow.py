@@ -23,7 +23,8 @@ def test_fixed_display_is_not_recomputed_under_new_behavior():
     actual = ResponseDC(booked, .8, 30., 180., 1., link="nonmonotone")
     observed = actual.reviewed_from_display(advice)
     np.testing.assert_allclose(observed, [118., 82.])
-    assert not np.allclose(observed, actual.reviewed(advice))
+    np.testing.assert_allclose(actual.display(advice), [22.5, -22.5])
+    assert not np.allclose(actual.display(advice), advice)
     with pytest.raises(ValueError):
         actual.reviewed_from_display(np.array([1.]))
 
