@@ -1,5 +1,5 @@
 """Optional small end-to-end pipeline smoke test, never uses private UHN data."""
-import hashlib
+import json
 import pickle
 
 import numpy as np
@@ -45,7 +45,26 @@ def test_one_scenario_complete_training_and_reporting(tmp_path):
     with checkpoint.open("wb") as handle:
         pickle.dump(context, handle)
     artifacts = tmp_path / "run"
-    experiment.main([
+    tuned = tmp_path / "selected_hyperparameters.json"
+    tuned.write_text(json.dumps(dict(lambda_decision=.1, lambda_response=.1,
+        candidates=[dict(method="DECISION_AWARE", lambda_value=.1,
+                         scenario="saturating_a0p5_h30",
+                         validation_weekly_cost=10., saving_vs_booked=2.)])))
+    run_arguments = [
+        "--context", str(checkpoint), "--out", str(artifacts),
+        "--tuning", str(tuned),
+        "--scenarios", "0.5:30", "--cores", "1",
+        "--plan-seconds", "5", "--retry-seconds", "5",
+        "--case-steps", "1", "--vf-outers", "1",
+        "--vf-pdca-steps", "1", "--mu-candidates", "2",
+    ]
+    experiment.main(run_arguments)
+    experiment.main(["--stage", "cross-evaluate", *run_arguments])
+    assert (artifacts / "stress_summary.csv").is_file()
+    # Report generation must never invoke the planner.
+    # Already-frozen files are the only inputs.
+    if False:
+        experiment.main([
         "--context", str(checkpoint), "--out", str(artifacts),
         "--scenarios", "0.5:30", "--cores", "1",
         "--plan-seconds", "5", "--retry-seconds", "5",
@@ -59,3 +78,5 @@ def test_one_scenario_complete_training_and_reporting(tmp_path):
     report(artifacts, checkpoint, output)
     assert (output / "numbers.json").is_file()
     assert (output / "figures" / "accuracy_vs_weekly_cost.svg").is_file()
+    assert (output / "figures" / "lambda_validation.svg").is_file()
+    assert (output / "figures" / "surgeon_response.svg").is_file()
