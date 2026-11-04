@@ -4,7 +4,7 @@ import pytest
 from scipy import sparse
 
 from surgery import weekly_planner as weekly
-from surgery import schedule_solver as anchored
+from surgery import schedule_solver as scheduler
 from surgery.learning import DCObjective, ResponseDC
 
 
@@ -65,8 +65,8 @@ def test_relaxed_retention_allows_empty_observed_day(monkeypatch):
         assert loads.tolist()==pytest.approx([200.,0.])
         assert weekly.evaluate(wk,[0,0],wk.booked)[
             "emptied_historical_surgeon_days"]==1
-        assert anchored.mandatory_slots(wk)==frozenset()
-        assert anchored.conservation_certificate(wk,wk.booked) is None
+        assert scheduler.mandatory_slots(wk)==frozenset()
+        assert scheduler.conservation_certificate(wk,wk.booked) is None
     with pytest.raises(ValueError,match="emptied"):
         weekly.loads(wk,[0,0],wk.booked)
 
