@@ -34,6 +34,7 @@ def test_calendar_week_is_complete_only_if_every_method_certified():
                         week == "2013-01-14" and component == "b" and
                         method == "ACCURACY_TRAINED"),
                     cases=2, cost=10.-index, planned_cost=10.-index,
+                    asymmetric_error=0., loss_bound=10.-index,
                     idle=0., overtime=0., mae=1., displayed_mae=1.))
     assert set(experiment.complete_week_keys(rows, sid)) == {"2013-01-07"}
     checks = {sid: dict(decision_accuracy_ratio=1., decision_accuracy_met=True,
