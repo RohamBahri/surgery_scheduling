@@ -97,6 +97,6 @@ def test_hash_only_primary_cost_when_gurobi_available():
     out=solve_week(w,w.booked,seconds=40.,threads=1,tie=True,hash_seed=0)
     assert out.complete,(out.status,out.hash_status)
     assert out.hash_unique
-    assert not out.balance_complete
+    assert out.primary_complete and out.tie_complete
     assert evaluate(w,out.assignment,w.booked)["cost"]==pytest.approx(
         evaluate(w,[0,0,1,1],w.booked)["cost"])
