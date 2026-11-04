@@ -53,19 +53,19 @@ def record_stage_time(root,stage,elapsed):
     print(f"{stage}: {elapsed:.1f} wall seconds",flush=True)
 
 
-def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_schema="structural"):
+def save_case_table(path,data,initial_score,decision_score,features,response_map,feature_schema="structural"):
     """Per-case replay file; does not run extra optimizer calls."""
-    case_raw=np.asarray(case_raw,float)
-    vf_raw=np.asarray(vf_raw,float)
-    case_reviewed=response_map.reviewed(case_raw)
-    vf_reviewed=response_map.reviewed(vf_raw)
-    case_display=response_map.display(case_raw)
-    vf_display=response_map.display(vf_raw)
+    initial_score=np.asarray(initial_score,float)
+    decision_score=np.asarray(decision_score,float)
+    initial_reviewed=response_map.reviewed(initial_score)
+    decision_reviewed=response_map.reviewed(decision_score)
+    initial_display=response_map.display(initial_score)
+    decision_display=response_map.display(decision_score)
     names=feature_names(feature_schema)
-    if np.asarray(features).shape!=(len(case_raw),len(names)):
+    if np.asarray(features).shape!=(len(initial_score),len(names)):
         raise ValueError("Case-table feature count does not match schema")
-    fields=["case_id","booked","actual","case_raw","case_display",
-            "case_reviewed","vf_raw","vf_display","vf_reviewed"] + [
+    fields=["case_id","booked","actual","initial_score","initial_display",
+            "initial_reviewed","decision_score","decision_display","decision_reviewed"] + [
             "feature_"+v+"_standardized" for v in names]
     path=Path(path)
     path.parent.mkdir(parents=True,exist_ok=True)
@@ -73,15 +73,15 @@ def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_sche
     with tmp.open("w",newline="") as handle:
         writer=csv.writer(handle)
         writer.writerow(fields)
-        for i in range(len(case_raw)):
+        for i in range(len(initial_score)):
             writer.writerow([int(data["case_id"][i]),
                              float(data["booked"][i]),float(data["actual"][i]),
-                             float(case_raw[i]),float(case_display[i]),
-                             float(case_reviewed[i]),float(vf_raw[i]),
-                             float(vf_display[i]),float(vf_reviewed[i]),
+                             float(initial_score[i]),float(initial_display[i]),
+                             float(initial_reviewed[i]),float(decision_score[i]),
+                             float(decision_display[i]),float(decision_reviewed[i]),
                              *np.asarray(features[i],float).tolist()])
     tmp.replace(path)
-    print(f"Saved {len(case_raw)} per-case records: {path}",flush=True)
+    print(f"Saved {len(initial_score)} per-case records: {path}",flush=True)
 
 
 def _plan_job(job):
@@ -359,7 +359,7 @@ def work(ctx,root,args):
         if args.stage=="case":
             return
         draft_started=time.perf_counter()
-        case_raw=np.asarray(data["X"],float)@coef
+        initial_score=np.asarray(data["X"],float)@coef
         H,(mu,sd),_=five_features(
             ctx,train,cache,"train",schema=args.features)
         save(root/"features.json",dict(
@@ -424,10 +424,10 @@ def work(ctx,root,args):
                  accuracy_gate=(args.accuracy_gate=="on"),
                  require_complete_deployment=False)
         chosen=np.asarray(state["theta"],float)
-        vf_raw=X@chosen
+        decision_score=X@chosen
         save(root/"selected_policy.json",dict(
-               method="DECISION_AWARE",case_coeff=coef.tolist(),
-               vf_theta=chosen.tolist(),
+               method="DECISION_AWARE",initial_coefficients=coef.tolist(),
+               decision_weights=chosen.tolist(),
                lambda_case=(json.loads(
                     (root/"case_policy.json").read_text())["lambda_case"]
                     if args.initial_weights is None else None),
@@ -446,13 +446,13 @@ def work(ctx,root,args):
                accuracy_reference=float(accuracy_reference),
                accuracy_limit=float(accuracy_reference*(1+args.accuracy_budget)),
                accuracy_achieved=float(np.abs(
-                   actual-b-response_map.display(vf_raw)
+                   actual-b-response_map.display(decision_score)
                    ).sum()/len(train)),
                training_uses_deployment_ties=(args.train_tie=="deployed"),
                train_tie=args.train_tie,accuracy_gate=args.accuracy_gate,
                accuracy_reference_kind="fitted_display_mae_reference",
                accuracy_ratio=float(np.abs(
-                   actual-b-response_map.display(vf_raw)
+                   actual-b-response_map.display(decision_score)
                    ).sum()/len(train)/accuracy_reference),
                training_incomplete_tie_counts=[
                    int(row["uncertified_planner_instances"])
@@ -460,9 +460,9 @@ def work(ctx,root,args):
                relaxed_required_days=True,
                turnover_minutes=float(__import__(
                     "surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
-               vf_status=state["status"]))
-        save_case_table(root/"cases_train.csv",data,case_raw,
-                        vf_raw,H,response_map,args.features)
+               decision_status=state["status"]))
+        save_case_table(root/"cases_train.csv",data,initial_score,
+                        decision_score,H,response_map,args.features)
         record_stage_time(root,"vf",time.perf_counter()-vf_started)
         return
     if args.stage=="evaluate":
@@ -483,8 +483,8 @@ def eval_2013(ctx,root,args,cache,selected):
     held=ctx["held"];items=ctx["eval"]
     b=np.asarray(held["booked"],float)
     c=ResponseDC(b,args.alpha,args.h,args.cap,1.,link=args.link)
-    coef=np.asarray(selected["case_coeff"],float)
-    theta=np.asarray(selected["vf_theta"],float)
+    coef=np.asarray(selected["initial_coefficients"],float)
+    theta=np.asarray(selected["decision_weights"],float)
     raw=np.asarray(held["X"],float)@coef
     record=json.loads((root/"features.json").read_text())
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
@@ -492,13 +492,13 @@ def eval_2013(ctx,root,args,cache,selected):
     if schema!=args.features:
         raise ValueError("Evaluation VF feature schema differs from trained policy")
     H,_,_=five_features(ctx,items,cache,"eval",scaler=scale,schema=schema)
-    vf_raw=np.column_stack([held["X"],H])@theta
+    decision_score=np.column_stack([held["X"],H])@theta
     # Evaluate the response assumed for THIS configured policy.
     # Alternative true-response scenarios are separate frozen-display audits.
-    ds={"BOOKED":b,"VF":c.reviewed(vf_raw)}
-    displayed={"BOOKED":b,"VF":b+c.display(vf_raw)}
-    save_case_table(root/"cases_test.csv",held,raw,vf_raw,H,c,schema)
-    if not np.allclose(c.reviewed(vf_raw),ds["VF"],atol=1e-8):
+    ds={"BOOKED":b,"VF":c.reviewed(decision_score)}
+    displayed={"BOOKED":b,"VF":b+c.display(decision_score)}
+    save_case_table(root/"cases_test.csv",held,raw,decision_score,H,c,schema)
+    if not np.allclose(c.reviewed(decision_score),ds["VF"],atol=1e-8):
         raise AssertionError("Frozen VF response differs from deployed duration")
     plans={label:cache.solve(items,d,"eval_"+label,tie=True)
            for label,d in ds.items()}
@@ -547,7 +547,7 @@ def train_probe(ctx,root,args,cache):
         scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),
         plans=original,schema=schema)
     X=np.asarray(data["X"],float)
-    raw=np.column_stack([X,H])@np.asarray(selected["vf_theta"],float)
+    raw=np.column_stack([X,H])@np.asarray(selected["decision_weights"],float)
     reviewed=c.reviewed(raw)
     if not np.allclose(reviewed,c.reviewed(raw),atol=1e-8):
         raise AssertionError("Training and deployment durations differ")
