@@ -45,6 +45,18 @@ def mean_validation_cost(context, predictions, cache, label, validation_weeks):
 def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300,
          accuracy_mu=2.):
     output.mkdir(parents=True, exist_ok=True)
+    if not np.isfinite(accuracy_mu) or accuracy_mu < 0:
+        raise ValueError("Tuning accuracy penalty must be nonnegative and finite")
+    settings = dict(
+        workbook_sha256=hashlib.sha256(workbook.read_bytes()).hexdigest(),
+        split_date="2012-07-01", end_date="2013-01-01",
+        lambdas=[float(v) for v in lambdas], accuracy_mu=float(accuracy_mu),
+        anchors=[dict(alpha=a, h=h) for _, a, h in ANCHORS],
+        planner_seconds=float(seconds))
+    settings_file = output / "tuning_contract.json"
+    if settings_file.exists() and json.loads(settings_file.read_text()) != settings:
+        raise ValueError("Tuning settings changed: use a fresh --out directory")
+    experiment.save(settings_file, settings)
     context_file = output / "context.pkl"
     if not context_file.exists():
         context = prepare(workbook, context_file, "2012-07-01", "2013-01-01")
