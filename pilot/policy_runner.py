@@ -22,7 +22,7 @@ from pilot.operational_audit import audit_policy
 from surgery.learning import ResponseDC
 from surgery.weekly_planner import evaluate
 
-DEFAULT_CONTEXT=Path("artifacts/objective_selection_12h/objective_selection_2013/context.pkl")
+DEFAULT_CONTEXT=Path("artifacts/context.pkl")
 
 
 def read(path):
@@ -40,7 +40,7 @@ def parse_args(argv=None):
     p.add_argument("--context",type=Path,default=DEFAULT_CONTEXT)
     p.add_argument("--out",type=Path,default=Path("artifacts/vf_final_hash"))
     p.add_argument("--alpha",type=float,default=.8)
-    p.add_argument("--naive-start",type=Path,default=None,
+    p.add_argument("--initial-weights",type=Path,default=None,
                    help="Shared train-only LAD start; bypass CASE training")
     p.add_argument("--h",type=float,default=30.)
     p.add_argument("--link",choices=("saturating","nonmonotone"),
@@ -76,10 +76,10 @@ def parse_args(argv=None):
         a.audit_seconds<=0 or a.audit_threshold<=0):
         p.error("Invalid numerical budget")
     a.context=a.context.resolve()
-    if a.naive_start is not None:
-        a.naive_start=a.naive_start.resolve()
-        if not a.naive_start.is_file():
-            p.error("Missing naive initializer: "+str(a.naive_start))
+    if a.initial_weights is not None:
+        a.initial_weights=a.initial_weights.resolve()
+        if not a.initial_weights.is_file():
+            p.error("Missing LAD initializer: "+str(a.initial_weights))
     a.out=a.out.resolve()
     return a
 
@@ -107,7 +107,7 @@ def engine_args(a,stage):
         "--accuracy-mu",str(a.accuracy_mu),
         "--accuracy-budget",str(a.accuracy_budget),
         "--accuracy-gate",a.accuracy_gate,"--train-tie",a.train_tie]+(
-        ["--naive-start",str(a.naive_start)] if a.naive_start else [])
+        ["--initial-weights",str(a.initial_weights)] if a.initial_weights else [])
 
 
 def run_engine(a,stage):
@@ -128,7 +128,7 @@ def verified_context(a):
                   vf_pdca_steps=a.vf_pdca_steps,cuts=a.cuts,
                   case_radius=a.radius,vf_radius=a.radius,
                   plan_seconds=a.plan_seconds,
-                  naive_start_sha=(file_sha(a.naive_start) if a.naive_start else None),
+                  initial_weights_sha=(file_sha(a.initial_weights) if a.initial_weights else None),
                   accuracy_mu=a.accuracy_mu,accuracy_budget=a.accuracy_budget)
     if (contract.get("turnover")!=0. or
         contract.get("relaxed_required_days") is not True or
@@ -153,7 +153,7 @@ def verified_context(a):
         not np.isclose(policy.get("lambda_vf",-1),a.lambda_vf) or
         len(policy.get("vf_theta",[]))!=83 or
         policy.get("initialization","CASE")!=(
-            "NAIVE_LAD" if a.naive_start else "CASE")):
+            "LAD_INITIALIZER" if a.initial_weights else "CASE")):
         raise ValueError("Frozen VF policy incompatible with requested settings")
     with a.context.open("rb") as stream:
         context=pickle.load(stream)
