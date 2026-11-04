@@ -31,7 +31,7 @@ def test_prepare_from_single_workbook(tmp_path):
     assert study["fit"]["X"].shape[1] == study["held"]["X"].shape[1]
     assert study["H"].shape == (2, 2)
     assert study["H_eval"].shape == (1, 2)
-    assert len(study["train"]) == len(study["eval"]) == 1
+    assert len(study["train"]) == 2 and len(study["eval"]) == 1
     assert (checkpoint.parent / "retained_cases.csv").is_file()
 
     validation_checkpoint = tmp_path / "tuning" / "context.pkl"
