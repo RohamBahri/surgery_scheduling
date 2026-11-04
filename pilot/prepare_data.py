@@ -34,14 +34,30 @@ def assemble_components(cohort, events, part):
     return rows, items
 
 
-def prepare(workbook: Path, output: Path, split_date: str = "2013-01-01"):
+def prepare(workbook: Path, output: Path, split_date: str = "2013-01-01",
+            end_date: str = "2013-07-01"):
     if not workbook.is_file():
         raise FileNotFoundError(workbook)
     cutoff = pd.Timestamp(split_date)
     if not pd.Timestamp("2011-07-01") < cutoff < pd.Timestamp("2013-07-01"):
         raise ValueError("Split date must lie within the study period")
+    end = pd.Timestamp(end_date)
+    if not cutoff < end <= pd.Timestamp("2013-07-01"):
+        raise ValueError("End date must follow the split and not exceed the study period")
     raw = pd.read_excel(workbook)
+    if end < pd.Timestamp("2013-07-01"):
+        # Filter the source records *before* cohort construction. In particular,
+        # the 2013 outcomes never enter the tuning context, features or rosters.
+        date_columns = ("Enter Room Date", "Actual Start Date",
+                        "Actual Stop Date", "Leave Room Date")
+        case_date = pd.to_datetime(raw[date_columns[0]], errors="coerce")
+        for column in date_columns[1:]:
+            case_date = case_date.fillna(
+                pd.to_datetime(raw[column], errors="coerce"))
+        raw = raw.loc[case_date.notna() & (case_date < end)].copy()
     cohort, audit, excluded, quality = build_cohort(raw)
+    if not cohort.date.lt(end).all():
+        raise AssertionError("Cases after the study end date entered the cohort")
     cohort["split"] = np.where(cohort.date < cutoff, "train", "test")
     cohort = cohort.sort_values(["group", "date", "surgeon", "case_id"]).reset_index(drop=True)
     events = performed_events(raw)
@@ -65,7 +81,7 @@ def prepare(workbook: Path, output: Path, split_date: str = "2013-01-01"):
                      case_id=evaluation.case_id.to_numpy(int), X=test_features),
         "H": train_spread, "H_eval": test_spread,
         "train": train_components, "eval": test_components,
-        "metadata": dict(split_date=str(cutoff.date()), workbook_sha256=hashlib.sha256(
+        "metadata": dict(split_date=str(cutoff.date()), end_date=str(end.date()),\n                         workbook_sha256=hashlib.sha256(
             workbook.read_bytes()).hexdigest(), training_cases=len(training),
             evaluation_cases=len(evaluation), training_components=len(train_components),
             evaluation_components=len(test_components)),
@@ -92,8 +108,9 @@ def main():
     parser.add_argument("--workbook", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("artifacts/context.pkl"))
     parser.add_argument("--split-date", default="2013-01-01")
+    parser.add_argument("--end-date", default="2013-07-01")
     args = parser.parse_args()
-    prepare(args.workbook, args.out, args.split_date)
+    prepare(args.workbook, args.out, args.split_date, args.end_date)
 
 
 if __name__ == "__main__":
