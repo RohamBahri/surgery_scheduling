@@ -4,7 +4,7 @@ import pytest
 
 from surgery.weekly_data import Week
 from surgery.weekly_planner import loads, evaluate
-from surgery.nonmonotone_learning import ResponseDC, mm_vf
+from surgery.learning import ResponseDC, mm_vf
 from pilot.operational_audit import necessary_peak_bounds, audit_policy
 
 
@@ -57,7 +57,7 @@ def test_operational_audit_reports_confirmed_avoidable_peak(tmp_path,monkeypatch
 
 
 def test_direct_mm_accepts_only_proven_exact_vf_improvement(tmp_path,monkeypatch):
-    from surgery import nonmonotone_learning as nl
+    from surgery import learning as nl
     w=Week("TGH","2012-01-02",((0,"OR1"),(0,"OR2")),
         np.array([1,2]),("S1",),np.array([0,0]),np.array([0,0]),
         ((0,1),),((0,),),np.array([100.,100.]),
@@ -92,7 +92,7 @@ def test_hash_only_primary_cost_when_gurobi_available():
         probe.dispose()
     except gp.GurobiError:
         pytest.skip("No working Gurobi license")
-    from surgery.anchored_weekly_solver import solve_week
+    from surgery.schedule_solver import solve_week
     w=example()
     out=solve_week(w,w.booked,seconds=40.,threads=1,tie=True,hash_seed=0)
     assert out.complete,(out.status,out.hash_status)

@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from surgery.weekly_data import Week
-from surgery.vf_features import (structural_features,booked_plan_features,
+from surgery.features import (structural_features,booked_plan_features,
                                  feature_names,standardize_features)
-from pilot._joint_vf_engine import five_features
+from pilot.policy_training import five_features
 
 
 def sample():

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pilot import run_joint_vf as runner
-from pilot import _joint_vf_engine as engine
-from surgery.nonmonotone_learning import ResponseDC
+from pilot import policy_runner as runner
+from pilot import policy_training as engine
+from surgery.learning import ResponseDC
 from surgery.weekly_data import Week
 
 
@@ -36,7 +36,7 @@ def test_cli_defaults_are_the_final_hash_specification(tmp_path):
 
 
 def test_feature_schema_only_structural():
-    from surgery.vf_features import feature_names
+    from surgery.features import feature_names
     assert len(feature_names("structural"))==6
     with pytest.raises(ValueError,match="Only"):
         feature_names("baseline")

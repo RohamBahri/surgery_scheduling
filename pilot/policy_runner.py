@@ -17,9 +17,9 @@ from pathlib import Path
 
 import numpy as np
 
-from pilot import _joint_vf_engine as engine
+from pilot import policy_training as engine
 from pilot.operational_audit import audit_policy
-from surgery.nonmonotone_learning import ResponseDC
+from surgery.learning import ResponseDC
 from surgery.weekly_planner import evaluate
 
 DEFAULT_CONTEXT=Path("artifacts/objective_selection_12h/objective_selection_2013/context.pkl")
@@ -87,17 +87,17 @@ def parse_args(argv=None):
 def configure_model(a):
     os.environ["SURGERY_TURNOVER_MINUTES"]="0"
     os.environ["SURGERY_RELAX_REQUIRED_DAYS"]="1"
-    from surgery import weekly_planner,anchored_weekly_solver,nonmonotone_learning
+    from surgery import weekly_planner,schedule_solver,learning
     weekly_planner.TURNOVER=0.
     weekly_planner.RELAX_REQUIRED_DAYS=True
-    anchored_weekly_solver.TURNOVER=0.
-    nonmonotone_learning.TURNOVER=0.
+    schedule_solver.TURNOVER=0.
+    learning.TURNOVER=0.
 
 
 def engine_args(a,stage):
     return ["--stage",stage,"--context",str(a.context),"--out",str(a.out),
         "--link",a.link,"--alpha",str(a.alpha),"--h",str(a.h),
-        "--vf-features",a.vf_features,"--vf-lambda-absolute",str(a.lambda_vf),
+        "--vf-features",a.features,"--vf-lambda-absolute",str(a.lambda_vf),
         "--vf-loading","uniform","--vf-plan-penalty","1",
         "--case-steps",str(a.case_steps),"--vf-outers",str(a.vf_outers),
         "--vf-pdca-steps",str(a.vf_pdca_steps),"--cuts",str(a.cuts),
@@ -122,7 +122,7 @@ def run_engine(a,stage):
 def verified_context(a):
     contract=read(a.out/"run_contract.json")
     expected=dict(context=file_sha(a.context),alpha=a.alpha,h=a.h,
-                  link=a.link,vf_features="structural",
+                  link=a.link,features="structural",
                   vf_lambda_absolute=a.lambda_vf,
                   case_steps=a.case_steps,vf_outers=a.vf_outers,
                   vf_pdca_steps=a.vf_pdca_steps,cuts=a.cuts,
@@ -143,8 +143,8 @@ def verified_context(a):
     if bad:
         raise ValueError("Frozen policy configuration mismatch: "+str(bad))
     policy=read(a.out/"selected_policy.json")
-    if (policy.get("method")!="JOINT_VF" or
-        policy.get("vf_features")!="structural" or
+    if (policy.get("method")!="DECISION_AWARE" or
+        policy.get("features")!="structural" or
         policy.get("accuracy_reference_kind")!="fitted_display_mae_reference" or
         policy.get("accuracy_gate")!=a.accuracy_gate or
         policy.get("training_uses_deployment_ties")!=(a.train_tie=="deployed") or

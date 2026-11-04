@@ -4,8 +4,8 @@ import pytest
 from scipy import sparse
 
 from surgery import weekly_planner as weekly
-from surgery import anchored_weekly_solver as anchored
-from surgery.nonmonotone_learning import DCObjective, ResponseDC
+from surgery import schedule_solver as anchored
+from surgery.learning import DCObjective, ResponseDC
 
 
 @pytest.mark.parametrize("link",["saturating","nonmonotone"])
@@ -38,7 +38,7 @@ def test_quadratic_solver_includes_displayed_accuracy_if_licensed():
         model.optimize();model.dispose()
     except gp.GurobiError:
         pytest.skip("Gurobi license unavailable")
-    from surgery.nonmonotone_learning import pdca
+    from surgery.learning import pdca
     b=np.array([100.,120.]);y=np.array([140.,90.])
     X=np.array([[1.,1.],[1.,-1.]])
     response=ResponseDC(b,alpha=.8,h=30.,link="saturating")
@@ -89,7 +89,7 @@ def test_display_only_objective_exactly_matches_pre_response_accuracy(link):
 
 def test_display_reference_fit_uses_same_features_and_improves_accuracy(
         tmp_path,monkeypatch):
-    from pilot._joint_vf_engine import displayed_reference_fit
+    from pilot.policy_training import displayed_reference_fit
     from surgery.weekly_data import Week
     b=np.array([120.,110.]);actual=np.array([150.,95.])
     X=np.array([[1.,1.,.5],[1.,-1.,-.5]])
@@ -104,7 +104,7 @@ def test_display_reference_fit_uses_same_features_and_improves_accuracy(
         assert objective.X.shape[1]==3
         return dict(weights=start.tolist(),status="NO_VERIFIED_DESCENT",
                     iterations=[])
-    monkeypatch.setattr("pilot._joint_vf_engine.pdca",fake_pdca)
+    monkeypatch.setattr("pilot.policy_training.pdca",fake_pdca)
     w,score=displayed_reference_fit(
         dict(booked=b,actual=actual),[("k",week,np.arange(2))],
         X,c,start,tmp_path,4,"gurobi",100.)
@@ -114,7 +114,7 @@ def test_display_reference_fit_uses_same_features_and_improves_accuracy(
 
 
 def test_primary_training_and_accuracy_gate_defaults(tmp_path):
-    from pilot.run_joint_vf import parse_args
+    from pilot.policy_runner import parse_args
     context=tmp_path/"context.pkl"
     context.write_bytes(b"checkpoint")
     a=parse_args(["--context",str(context)])
@@ -131,7 +131,7 @@ def test_display_only_pdca_exact_qp_if_licensed():
         q=m.addVar();m.setObjective(q*q);m.optimize();m.dispose()
     except gp.GurobiError:
         pytest.skip("No Gurobi license")
-    from surgery.nonmonotone_learning import pdca
+    from surgery.learning import pdca
     b=np.array([100.,120.]);actual=np.array([125.,110.])
     X=np.array([[1.,1.],[1.,-1.]])
     c=ResponseDC(b,.8,30.,180.,1.,link="saturating")

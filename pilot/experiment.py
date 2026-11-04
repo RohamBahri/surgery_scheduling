@@ -11,9 +11,9 @@ from pathlib import Path
 
 import numpy as np
 
-from pilot import _joint_vf_engine as engine
-from pilot import run_joint_vf as single
-from surgery.nonmonotone_learning import ResponseDC
+from pilot import policy_training as engine
+from pilot import policy_runner as single
+from surgery.learning import ResponseDC
 from surgery.weekly_planner import evaluate, loads
 
 METHODS = ("BOOKED", "NAIVE", "VF", "ORACLE")
@@ -76,7 +76,7 @@ def contract(a):
                 vf_pdca_steps=a.vf_pdca_steps, cuts=a.cuts, radius=a.radius,
                 accuracy_mu=a.accuracy_mu, accuracy_budget=a.accuracy_budget,
                 lambda_vf=a.lambda_vf, turnover=0, train_tie="primary",
-                deploy_tie="hash_only", vf_features="77_case_plus_6_structural")
+                deploy_tie="hash_only", features="77_case_plus_6_structural")
 
 
 def ensure_contract(a):
@@ -151,7 +151,7 @@ def evaluate_rows(ctx, a, naive):
         root = a.out / "scenarios" / sid
         check_args = single.parse_args(single_args(a, scenario, "evaluate"))
         _, selected = single.verified_context(check_args)
-        scale = json.loads((root / "vf_features.json").read_text())
+        scale = json.loads((root / "features.json").read_text())
         if scale.get("schema") != "structural":
             raise ValueError("VF requires the frozen structural feature schema")
         H, _, _ = engine.five_features(ctx, items, cache, "eval",

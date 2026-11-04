@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from surgery.nonmonotone_learning import (
+from surgery.learning import (
     C_OVER, C_UNDER, ResponseDC, DCObjective, response, pdca,
     room_matrix, library_value, mm_vf, choose_library_schedules)
 
@@ -161,14 +161,14 @@ def test_library_mm_trains_and_keeps_feasible_timeout_incumbent(tmp_path,backend
     for r in results["history"]:
         if r["accepted"]:
             assert r["guaranteed_exact_vf_decrease_lower_bound"]>0.
-    assert results["policy_spec"]=="joint_vf_direct_zero_turnover_v1"
+    assert results["policy_spec"]=="decision_aware_direct_zero_turnover_v1"
 
 
 def test_runner_help_imports_without_training():
     import subprocess,sys
     from pathlib import Path
-    entry=Path(__file__).resolve().parents[1]/"pilot"/"run_joint_vf.py"
-    out=subprocess.run([sys.executable,"-m","pilot.run_joint_vf","--help"],cwd=entry.parents[1],
+    entry=Path(__file__).resolve().parents[1]/"pilot"/"policy_runner.py"
+    out=subprocess.run([sys.executable,"-m","pilot.policy_runner","--help"],cwd=entry.parents[1],
                        capture_output=True,text=True,timeout=25)
     assert out.returncode==0,out.stderr
     assert "evaluate" in out.stdout and "structural" in out.stdout
@@ -176,7 +176,7 @@ def test_runner_help_imports_without_training():
 
 
 def test_case_lad_and_penalty_rules_on_small_instance():
-    from pilot._joint_vf_engine import lad_start,train_lambda
+    from pilot.policy_training import lad_start,train_lambda
     X=np.array([[1.,-2.],[1.,-1.],[1.,0.],[1.,1.],[1.,2.]])
     actual_error=4.+2.*X[:,1]
     w,diag=lad_start(X,actual_error,lam=0.,components=1,box=30.)
@@ -184,7 +184,7 @@ def test_case_lad_and_penalty_rules_on_small_instance():
     assert np.max(abs(X@w-actual_error))<1e-5
     h=np.column_stack([np.ones(10),np.linspace(-2,2,10),
                        np.zeros(10)])
-    # Joint VF has an intercept; lambda excludes column zero.
+    # Decision-aware has an intercept; lambda excludes column zero.
     a=train_lambda(h,2,intercept=False)
     b=train_lambda(h,2,intercept=True)
     assert a>0 and b>0 and a!=pytest.approx(b)
@@ -215,7 +215,7 @@ def test_exact_case_qp_matches_convex_majorizer_when_licensed():
         m.dispose()
     except gp.GurobiError as exc:
         pytest.skip(str(exc))
-    from surgery.nonmonotone_learning import ConvexEpigraphQP
+    from surgery.learning import ConvexEpigraphQP
     rng=np.random.default_rng(77)
     n,p=24,5
     b=np.linspace(1.,150.,n)
@@ -244,7 +244,7 @@ def test_exact_case_qp_matches_convex_majorizer_when_licensed():
 
 def test_vf_cut_cap_does_not_stop_accepted_progress(monkeypatch):
     """A hit cut budget is not a spurious pDCA stopping condition."""
-    from surgery import nonmonotone_learning as nl
+    from surgery import learning as nl
     class QuadraticObjective:
         mode="VF"
         def parts(self,w):
@@ -304,14 +304,14 @@ def test_case_exact_qp_improves_with_70_shared_features():
 
 
 
-def test_joint_vf_uses_all_coefficients_and_unpenalized_intercept():
+def test_decision_aware_uses_all_coefficients_and_unpenalized_intercept():
     week=toy_week()
     items=[("toy",week,np.arange(week.n))]
     m=ResponseDC(week.booked,.8,30.,180.,1.)
     X=np.column_stack([np.ones(week.n),np.array([-1.,0.,1.]),
                        np.array([.5,-1.,2.])])
     w=np.array([5.,2.,-3.])
-    from surgery.nonmonotone_learning import planned_cost_fast
+    from surgery.learning import planned_cost_fast
     d=m.reviewed(X@w)
     library={"toy":[[0,0,0],[0,1,1]]}
     z=min(library["toy"],key=lambda z:planned_cost_fast(week,z,d))
@@ -335,7 +335,7 @@ def test_vf_exact_epigraph_qp_matches_dc_on_joint_features():
         probe.optimize();probe.dispose()
     except gp.GurobiError:
         pytest.skip("Gurobi license unavailable")
-    from surgery.nonmonotone_learning import ConvexEpigraphQP
+    from surgery.learning import ConvexEpigraphQP
     week=toy_week()
     items=[("toy",week,np.arange(week.n))]
     X=np.column_stack([np.ones(week.n),np.array([-1.,0.,1.]),
@@ -360,7 +360,7 @@ def test_vf_exact_epigraph_qp_matches_dc_on_joint_features():
 
 
 def test_fast_planned_cost_matches_current_weekly_evaluate_exactly():
-    from surgery.nonmonotone_learning import planned_cost_fast
+    from surgery.learning import planned_cost_fast
     from surgery.weekly_planner import evaluate
     c=toy_week()
     rng=np.random.default_rng(2101)
@@ -391,7 +391,7 @@ def test_pdca_progress_jsonl_persists_iteration_diagnostics(tmp_path,capsys):
 
 
 def test_case_csv_writer_has_all_raw_display_reviewed_and_features(tmp_path):
-    from pilot._joint_vf_engine import save_case_table
+    from pilot.policy_training import save_case_table
     import csv
     b=np.array([10.,100.])
     X=np.ones((2,6))

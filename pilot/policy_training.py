@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Internal engine: structural joint-VF learning with reusable initialization.
+"""Internal engine: structural decision-aware learning with reusable initialization.
 
-Invoked through pilot.run_joint_vf. The feature representation is frozen;
+Invoked through pilot.policy_runner. The feature representation is frozen;
 behavioral parameters and numerical budgets may vary as explicit configurations.
 """
 from __future__ import annotations
@@ -26,11 +26,11 @@ from scipy import sparse
 from scipy.optimize import linprog
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from surgery.nonmonotone_learning import (
+from surgery.learning import (
     ResponseDC, DCObjective, choose_library_schedules, mm_vf, pdca,
     response, room_matrix, score_loadings)
 from surgery.weekly_planner import evaluate, loads
-from surgery.vf_features import booked_plan_features, feature_names, standardize_features
+from surgery.features import booked_plan_features, feature_names, standardize_features
 
 
 def save(path,obj):
@@ -86,7 +86,7 @@ def save_case_table(path,data,case_raw,vf_raw,features,response_map,feature_sche
 
 def _plan_job(job):
     key,c,d,seconds,tie=job
-    from surgery.anchored_weekly_solver import solve_week
+    from surgery.schedule_solver import solve_week
     result=solve_week(c,np.asarray(d,float),seconds=seconds,
                       threads=1,tie=tie,hash_seed=0)
     # A time-limited optimizer may return a sound incumbent without a proof.
@@ -361,9 +361,9 @@ def work(ctx,root,args):
         draft_started=time.perf_counter()
         case_raw=np.asarray(data["X"],float)@coef
         H,(mu,sd),_=five_features(
-            ctx,train,cache,"train",schema=args.vf_features)
-        save(root/"vf_features.json",dict(
-            schema=args.vf_features,names=list(feature_names(args.vf_features)),
+            ctx,train,cache,"train",schema=args.features)
+        save(root/"features.json",dict(
+            schema=args.features,names=list(feature_names(args.features)),
             mean=mu.tolist(),std=sd.tolist()))
         # No provisional BOOKED/CASE planner solves: exact VF queries only
         # the current policy's planner in each direct-MM iteration.
@@ -383,7 +383,7 @@ def work(ctx,root,args):
         corr=np.divide(hc.T@xc,denom,out=np.zeros((H.shape[1],Xcase.shape[1])),
                        where=denom>1e-12)
         audit=[]
-        for j,name in enumerate(feature_names(args.vf_features)):
+        for j,name in enumerate(feature_names(args.features)):
             exact=[int(k) for k in range(Xcase.shape[1])
                    if np.allclose(H[:,j],Xcase[:,k],rtol=1e-10,atol=1e-10)]
             candidates=np.argsort(-np.abs(corr[j]))[:3]
@@ -426,7 +426,7 @@ def work(ctx,root,args):
         chosen=np.asarray(state["theta"],float)
         vf_raw=X@chosen
         save(root/"selected_policy.json",dict(
-               method="JOINT_VF",case_coeff=coef.tolist(),
+               method="DECISION_AWARE",case_coeff=coef.tolist(),
                vf_theta=chosen.tolist(),
                lambda_case=(json.loads(
                     (root/"case_policy.json").read_text())["lambda_case"]
@@ -436,8 +436,8 @@ def work(ctx,root,args):
                lambda_vf=float(vf_lam),vf_penalty=penalty.tolist(),
                vf_lambda_scale=args.vf_lambda_scale,
                vf_plan_penalty=args.vf_plan_penalty,
-               vf_loading=args.vf_loading,vf_features=args.vf_features,
-               vf_feature_names=list(feature_names(args.vf_features)),link=args.link,
+               vf_loading=args.vf_loading,features=args.features,
+               vf_feature_names=list(feature_names(args.features)),link=args.link,
                cap=args.cap,alpha=args.alpha,h=args.h,
                train_components=len(train),train_cases=len(b),
                accuracy_kind="displayed_mae",
@@ -462,7 +462,7 @@ def work(ctx,root,args):
                     "surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                vf_status=state["status"]))
         save_case_table(root/"cases_train.csv",data,case_raw,
-                        vf_raw,H,response_map,args.vf_features)
+                        vf_raw,H,response_map,args.features)
         record_stage_time(root,"vf",time.perf_counter()-vf_started)
         return
     if args.stage=="evaluate":
@@ -486,10 +486,10 @@ def eval_2013(ctx,root,args,cache,selected):
     coef=np.asarray(selected["case_coeff"],float)
     theta=np.asarray(selected["vf_theta"],float)
     raw=np.asarray(held["X"],float)@coef
-    record=json.loads((root/"vf_features.json").read_text())
+    record=json.loads((root/"features.json").read_text())
     scale=np.asarray(record["mean"]),np.asarray(record["std"])
     schema=record.get("schema","baseline")
-    if schema!=args.vf_features:
+    if schema!=args.features:
         raise ValueError("Evaluation VF feature schema differs from trained policy")
     H,_,_=five_features(ctx,items,cache,"eval",scaler=scale,schema=schema)
     vf_raw=np.column_stack([held["X"],H])@theta
@@ -538,10 +538,10 @@ def train_probe(ctx,root,args,cache):
     booked=np.asarray(data["booked"],float)
     selected=json.loads((root/"selected_policy.json").read_text())
     c=ResponseDC(booked,args.alpha,args.h,args.cap,1.,link=args.link)
-    scale=json.loads((root/"vf_features.json").read_text())
+    scale=json.loads((root/"features.json").read_text())
     original=cache.solve(items,booked,"train_booked",tie=True)
     schema=scale.get("schema","baseline")
-    if schema!=args.vf_features:
+    if schema!=args.features:
         raise ValueError("Probe VF feature schema differs from trained policy")
     H,_,_=five_features(ctx,items,cache,"train",
         scaler=(np.asarray(scale["mean"]),np.asarray(scale["std"])),
@@ -635,7 +635,7 @@ def main():
                     default="all")
     ap.add_argument("--context",type=Path,default=Path(
        "artifacts/objective_selection_12h/objective_selection_2013/context.pkl"))
-    ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_joint_vf_mm"))
+    ap.add_argument("--out",type=Path,default=Path("artifacts/nominal_decision_aware_mm"))
     ap.add_argument("--cap",type=float,default=180.)
     ap.add_argument("--case-steps",type=int,default=200)
     ap.add_argument("--vf-outers",type=int,default=30)
@@ -685,10 +685,10 @@ def main():
         raise FileNotFoundError("Naive initializer unavailable: "+str(args.naive_start))
     with args.context.open("rb") as f:
         ctx=pickle.load(f)
-    from surgery import nonmonotone_learning as core
-    from surgery import weekly_planner, anchored_weekly_solver, vf_features
+    from surgery import learning as core
+    from surgery import weekly_planner, schedule_solver, features
     fingerprint=sha(b"".join(Path(mod.__file__).read_bytes() for mod in
-        (sys.modules[__name__],core,weekly_planner,anchored_weekly_solver,vf_features)))
+        (sys.modules[__name__],core,weekly_planner,schedule_solver,features)))
     settings=dict(context=sha(args.context.read_bytes()),source=fingerprint,
                   turnover=float(__import__("surgery.weekly_planner",fromlist=["TURNOVER"]).TURNOVER),
                   relaxed_required_days=True,
@@ -709,7 +709,7 @@ def main():
     if args.naive_start is not None:
         settings["naive_start_sha"]=sha(args.naive_start.read_bytes())
     # Absent defaults retain compatibility with prior tuning checkpoints.
-    settings["vf_features"]="structural"
+    settings["features"]="structural"
     if args.vf_lambda_absolute is not None:
         settings["vf_lambda_absolute"]=args.vf_lambda_absolute
     args.out.mkdir(parents=True,exist_ok=True)
@@ -731,7 +731,7 @@ def main():
                   "speed/reporting revision (source history saved)",flush=True)
     else:
         save(contract,settings)
-    print("UHN joint VF:",len(ctx["train"]),"train components;",
+    print("UHN decision-aware:",len(ctx["train"]),"train components;",
           len(ctx["eval"]),"evaluation components; configured response",
           flush=True)
     work(ctx,args.out,args)

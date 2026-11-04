@@ -1,4 +1,4 @@
-"""Schedule-independent structural features for the single joint-VF policy.
+"""Schedule-independent structural features for the single decision-aware policy.
 
 Features use only bookings, eligibility, rostered capacity and historical
 training-derived spread scores. No provisional plan, actual duration,

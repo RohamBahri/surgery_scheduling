@@ -81,7 +81,7 @@ def conservation_certificate(week, duration):
 
 
 @dataclass
-class AnchoredResult(Result):
+class ScheduleResult(Result):
     """Audit trail for the exact deployed selection, not merely its cost."""
     primary_status: str = ""
     hash_status: str = ""
@@ -130,7 +130,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
     feasible set, duration data, or optimality requirements.
     """
     from gurobipy import GRB
-    seed = int(os.getenv("SURGERY_ANCHORED_HASH_SEED", "0")
+    seed = int(os.getenv("SURGERY_HASH_SEED", "0")
                if hash_seed is None else hash_seed)
     if seed < 0 or not math.isfinite(seconds) or seconds <= 0 or threads < 1:
         raise ValueError("Invalid hash seed, time budget, or thread count")
@@ -140,7 +140,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
     if all(len(week.allowed[int(s)]) == 1 for s in week.surgeon):
         z = list(map(int, week.original))
         val = evaluate(week, z, d)["cost"]
-        return AnchoredResult(z, val, val, True, "ANALYTIC_UNIQUE", 0.,
+        return ScheduleResult(z, val, val, True, "ANALYTIC_UNIQUE", 0.,
                               True, True, 0., 0.,
                               primary_status="ANALYTIC_UNIQUE",
                               hash_status="ANALYTIC_UNIQUE",
@@ -174,7 +174,7 @@ def solve_week(week, duration, *, seconds=120., threads=1, tie=True,
         elapsed = time.monotonic() - start
         z = selected if selected is not None else primary_z
         checked = evaluate(week,z,d)["cost"] if z is not None else None
-        return AnchoredResult(
+        return ScheduleResult(
             z, checked, best_bound, complete, status, elapsed,
             primary_ok, tie_ok, primary_elapsed, max(0., elapsed-primary_elapsed),
             primary_status=primary_status, hash_status=hash_status,

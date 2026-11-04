@@ -1,4 +1,4 @@
-"""Response-aware CASE benchmark and joint VF with library MM/pDCA.
+"""Response-aware CASE benchmark and decision-aware with library MM/pDCA.
 
 VF learns all case and booking-plan coefficients with the exact scheduling
 cost, retaining the response model and verified objective descent.
@@ -16,7 +16,7 @@ C_OVER = 1.75
 C_UNDER = 1.0
 KAPPA = C_OVER + C_UNDER
 CAPACITY = 480.
-TURNOVER = _planner.TURNOVER  # Set consistently by run_joint_vf startup.
+TURNOVER = _planner.TURNOVER  # Set consistently by policy_runner startup.
 
 
 def response(u, alpha=.8, h=30.):
@@ -674,9 +674,9 @@ def mm_vf(items, booked, X, response_map, actual, *,
     root=Path(root)
     root.mkdir(parents=True,exist_ok=True)
     status=root/"vf_direct_progress.json"
-    spec=(dict(policy_spec="joint_vf_direct_zero_turnover_v1")
+    spec=(dict(policy_spec="decision_aware_direct_zero_turnover_v1")
           if legacy else
-          dict(policy_spec="joint_vf_accuracy_display_v1",
+          dict(policy_spec="decision_aware_accuracy_display_v1",
               accuracy_mu=float(accuracy_mu),
               accuracy_reference=float(accuracy_reference),
               accuracy_budget=float(accuracy_budget),

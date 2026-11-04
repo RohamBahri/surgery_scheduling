@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from surgery.nonmonotone_learning import (
+from surgery.learning import (
     DCObjective, ResponseDC, mm_vf, response, score_loadings)
 
 
@@ -67,8 +67,8 @@ def test_saturating_training_matches_frozen_three_regime_deployment():
 
 
 def test_only_public_runner_exposes_structural_configuration():
-    script=Path(__file__).parents[1]/"pilot"/"run_joint_vf.py"
-    p=subprocess.run([sys.executable,"-m","pilot.run_joint_vf","--help"],
+    script=Path(__file__).parents[1]/"pilot"/"policy_runner.py"
+    p=subprocess.run([sys.executable,"-m","pilot.policy_runner","--help"],
                      cwd=script.parents[1],capture_output=True,text=True,check=True)
     for flag in ("--stage","--alpha","--h","--link","--lambda-vf",
                  "--accuracy-mu","--accuracy-budget","--vf-features"):

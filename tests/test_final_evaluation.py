@@ -3,7 +3,7 @@ import json
 
 import numpy as np
 
-from pilot import _joint_vf_engine as engine
+from pilot import policy_training as engine
 from surgery.weekly_data import Week
 
 
@@ -15,11 +15,11 @@ def test_final_evaluation_uses_hash_only_deployment_and_two_methods(
         ((0,1),),((0,),),b,np.array([110.,125.]),()).validate()
     ctx=dict(held=dict(booked=b,X=np.ones((2,77))),
              eval=[("week",c,np.arange(2))])
-    (tmp_path/"vf_features.json").write_text(json.dumps(dict(
+    (tmp_path/"features.json").write_text(json.dumps(dict(
         schema="structural",mean=[0.]*6,std=[1.]*6)))
     selected=dict(case_coeff=[0.]*77,vf_theta=[0.]*83)
     args=type("Args",(),dict(alpha=.8,h=30.,cap=180.,link="saturating",
-                            vf_features="structural"))()
+                            features="structural"))()
     monkeypatch.setattr(engine,"five_features",
         lambda *a,**k:(np.zeros((2,6)),None,None))
     monkeypatch.setattr(engine,"save_case_table",lambda *a,**k:None)

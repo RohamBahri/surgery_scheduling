@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pilot import run_vf_grid as grid
+from pilot import experiment as grid
 
 
 def test_six_scenarios_and_contract(tmp_path):
