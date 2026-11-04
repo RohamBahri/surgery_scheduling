@@ -17,7 +17,7 @@ def test_final_evaluation_uses_hash_only_deployment_and_two_methods(
              eval=[("week",c,np.arange(2))])
     (tmp_path/"features.json").write_text(json.dumps(dict(
         schema="structural",mean=[0.]*6,std=[1.]*6)))
-    selected=dict(case_coeff=[0.]*77,vf_theta=[0.]*83)
+    selected=dict(initial_coefficients=[0.]*77,decision_weights=[0.]*83)
     args=type("Args",(),dict(alpha=.8,h=30.,cap=180.,link="saturating",
                             features="structural"))()
     monkeypatch.setattr(engine,"five_features",
