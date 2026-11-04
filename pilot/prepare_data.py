@@ -80,6 +80,9 @@ def prepare(workbook: Path, output: Path, split_date: str = "2013-01-01"):
         json.dumps({"metadata": metadata, "audit": audit}, indent=2, default=str))
     excluded.to_csv(output.parent / "excluded_cases.csv", index=False)
     quality.to_csv(output.parent / "data_quality.csv", index=False)
+    cohort[["case_id", "group", "date", "surgeon", "procedure", "service",
+            "room", "booked", "actual", "split"]].to_csv(
+                output.parent / "retained_cases.csv", index=False)
     print(json.dumps(metadata, indent=2))
     return context
 
