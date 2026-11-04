@@ -108,7 +108,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
                     arguments[option + 1] = "20"
                     policy_runner.main(arguments)
                     policy = json.loads((folder / "selected_policy.json").read_text())
-                    weights = np.asarray(policy["vf_theta"], float)
+                    weights = np.asarray(policy["decision_weights"], float)
                 reviewed = response_validation.reviewed(validation_design @ weights)
                 value = mean_validation_cost(
                     context, reviewed, cache,
