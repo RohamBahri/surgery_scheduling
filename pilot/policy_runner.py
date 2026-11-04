@@ -45,7 +45,7 @@ def parse_args(argv=None):
     p.add_argument("--h",type=float,default=30.)
     p.add_argument("--link",choices=("saturating","nonmonotone"),
                    default="saturating")
-    p.add_argument("--vf-features",choices=("structural",),default="structural")
+    p.add_argument("--features",choices=("structural",),default="structural")
     p.add_argument("--turnover",type=float,default=0.)
     p.add_argument("--accuracy-mu",type=float,default=2.)
     p.add_argument("--accuracy-budget",type=float,default=.05)
@@ -97,7 +97,7 @@ def configure_model(a):
 def engine_args(a,stage):
     return ["--stage",stage,"--context",str(a.context),"--out",str(a.out),
         "--link",a.link,"--alpha",str(a.alpha),"--h",str(a.h),
-        "--vf-features",a.features,"--vf-lambda-absolute",str(a.lambda_vf),
+        "--features",a.features,"--vf-lambda-absolute",str(a.lambda_vf),
         "--vf-loading","uniform","--vf-plan-penalty","1",
         "--case-steps",str(a.case_steps),"--vf-outers",str(a.vf_outers),
         "--vf-pdca-steps",str(a.vf_pdca_steps),"--cuts",str(a.cuts),
@@ -142,6 +142,8 @@ def verified_context(a):
          if contract.get(k)!=v}
     if bad:
         raise ValueError("Frozen policy configuration mismatch: "+str(bad))
+    with a.context.open("rb") as stream:
+        context=pickle.load(stream)
     policy=read(a.out/"selected_policy.json")
     if (policy.get("method")!="DECISION_AWARE" or
         policy.get("features")!="structural" or
@@ -151,12 +153,10 @@ def verified_context(a):
         not np.isclose(policy.get("accuracy_mu",-1),a.accuracy_mu) or
         not np.isclose(policy.get("accuracy_budget",-1),a.accuracy_budget) or
         not np.isclose(policy.get("lambda_vf",-1),a.lambda_vf) or
-        len(policy.get("vf_theta",[]))!=83 or
+        len(policy.get("vf_theta",[]))!=int(context["fit"]["X"].shape[1])+6 or
         policy.get("initialization","CASE")!=(
             "LAD_INITIALIZER" if a.initial_weights else "CASE")):
         raise ValueError("Frozen VF policy incompatible with requested settings")
-    with a.context.open("rb") as stream:
-        context=pickle.load(stream)
     return context,policy
 
 
