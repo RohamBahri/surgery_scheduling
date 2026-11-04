@@ -46,7 +46,13 @@ def test_calendar_week_is_complete_only_if_every_method_certified():
     assert table[0]["weeks"] == 1
     assert table[0]["BOOKED_cost_per_week"] == 20.
     assert table[0]["DECISION_AWARE_cost_per_week"] == 14.
-    assert intervals[sid]["BOOKED"]["mean_weekly_difference"] == -6.
+    assert intervals[sid]["DECISION_AWARE_minus_BOOKED"]["mean_weekly_difference"] == -6.
+    assert intervals[sid]["ACCURACY_TRAINED_minus_BOOKED"]["mean_weekly_difference"] == -2.
+    assert intervals[sid]["RESPONSE_AWARE_minus_BOOKED"]["mean_weekly_difference"] == -4.
+    assert intervals[sid]["PERFECT_ADVICE_minus_BOOKED"]["mean_weekly_difference"] == -8.
+    assert intervals[sid]["HINDSIGHT_minus_BOOKED"]["mean_weekly_difference"] == -10.
+    assert table[0]["PERFECT_ADVICE_gap_closed_fraction"] == pytest.approx(.8)
+    assert table[0]["ACCURACY_TRAINED_gap_closed_fraction"] == pytest.approx(.2)
     assert len(weekly) == len(experiment.METHODS)
 
 
