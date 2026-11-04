@@ -66,12 +66,12 @@ def test_saturating_training_matches_frozen_three_regime_deployment():
     assert np.allclose(deployed,d,rtol=0,atol=1e-9)
 
 
-def test_only_public_runner_exposes_structural_configuration():
+def test_policy_runner_exposes_structural_configuration():
     script=Path(__file__).parents[1]/"pilot"/"policy_runner.py"
     p=subprocess.run([sys.executable,"-m","pilot.policy_runner","--help"],
                      cwd=script.parents[1],capture_output=True,text=True,check=True)
     for flag in ("--stage","--alpha","--h","--link","--lambda-vf",
-                 "--accuracy-mu","--accuracy-budget","--vf-features"):
+                 "--accuracy-mu","--accuracy-budget","--features"):
         assert flag in p.stdout
     for obsolete in ("--true-alpha","--true-h","--true-link","--seeds"):
         assert obsolete not in p.stdout
