@@ -48,7 +48,7 @@ python -m pilot.tune \
 ```
 
 This creates an independent July 2011–June 2012 fitting and July–December
-2012 validation split. It screens λ = 0.03, 0.1, 0.3 separately for
+2012 validation split, using eight evenly spaced validation weeks for economical\nweekly cost comparisons. It screens λ = 0.03, 0.1, 0.3 separately for
 Response-aware and Decision-aware, under two anchor response assumptions.
 Decision-aware uses shortened fits **only for screening**. The chosen λ for
 each method is shared across all final scenarios. No 2013 outcomes are used
