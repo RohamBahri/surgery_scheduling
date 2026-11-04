@@ -61,16 +61,6 @@ def test_one_scenario_complete_training_and_reporting(tmp_path):
     experiment.main(run_arguments)
     experiment.main(["--stage", "cross-evaluate", *run_arguments])
     assert (artifacts / "stress_summary.csv").is_file()
-    # Report generation must never invoke the planner.
-    # Already-frozen files are the only inputs.
-    if False:
-        experiment.main([
-        "--context", str(checkpoint), "--out", str(artifacts),
-        "--scenarios", "0.5:30", "--cores", "1",
-        "--plan-seconds", "5", "--retry-seconds", "5",
-        "--case-steps", "1", "--vf-outers", "1",
-        "--vf-pdca-steps", "1", "--mu-candidates", "2",
-    ])
     assert (artifacts / "main_results.csv").is_file()
     assert (artifacts / "weekly_results.csv").is_file()
     from analysis.report import report
