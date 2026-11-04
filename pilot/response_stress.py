@@ -35,6 +35,7 @@ def cross_evaluate(context, args):
     reference = experiment.solve_with_retry(
         cache, context["eval"], booked, "BOOKED", args)
     rows, summary = [], []
+    rng = np.random.default_rng(20261103)
     for scenario in anchors:
         sid = experiment.scenario_id(*scenario)
         root, _, policy = experiment.load_decision_policy(args, scenario)
@@ -97,12 +98,22 @@ def cross_evaluate(context, args):
                 differences = np.array([weekly[week][method] -
                                         weekly[week]["BOOKED"]
                                         for week in sorted(complete_weeks)])
+                if len(differences):
+                    indices = rng.integers(0, len(differences), size=(5000, len(differences)))
+                    ci_low, ci_high = np.quantile(
+                        differences[indices].mean(axis=1), [.025, .975])
+                else:
+                    ci_low = ci_high = None
                 summary.append(dict(
                     trained_scenario=sid, stress=label, actual_alpha=alpha,
                     actual_h=threshold, method=method,
                     complete_weeks=len(complete_weeks),
                     mean_weekly_difference=float(differences.mean())
                         if len(differences) else None,
+                    confidence_low=float(ci_low) if ci_low is not None else None,
+                    confidence_high=float(ci_high) if ci_high is not None else None,
+                    improved_weeks=int((differences < 0).sum()),
+                    worsened_weeks=int((differences > 0).sum()),
                     rejection_share=float(rejection.mean()),
                     attenuation_share=float(attenuated.mean())))
     experiment.export_rows(args.out / "stress_weekly.csv", rows)
