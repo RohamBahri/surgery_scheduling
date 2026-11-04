@@ -29,14 +29,16 @@ def tuning_features(context):
             np.column_stack([context["held"]["X"], validation_structural]))
 
 
-def mean_validation_cost(context, predictions, cache, label, seconds):
+def mean_validation_cost(context, predictions, cache, label, validation_weeks):
     from surgery.weekly_planner import evaluate
-    plans = cache.solve(context["eval"], predictions, label, tie=True)
+    selected_items = [item for item in context["eval"]
+                      if item[1].monday in validation_weeks]
+    plans = cache.solve(selected_items, predictions, label, tie=True)
     if not all(plan["complete"] for plan in plans.values()):
         return None
     total = sum(evaluate(component, plans[key]["assignment"], component.actual)["cost"]
-                for key, component, positions in context["eval"])
-    weeks = len({comp.monday for _, comp, _ in context["eval"]})
+                for key, component, positions in selected_items)
+    weeks = len(validation_weeks)
     return float(total / weeks)
 
 
@@ -64,8 +66,12 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
     start = np.r_[initialization, np.zeros(fit_design.shape[1] -
                                            len(initialization))]
     cache = policy_training.PlannerCache(output / "validation_plans", cores, seconds)
+    available_weeks = sorted({component.monday for _, component, _ in context["eval"]})
+    positions = np.linspace(0, len(available_weeks)-1,
+                            num=min(8, len(available_weeks)), dtype=int)
+    validation_weeks = {available_weeks[i] for i in positions}
     base = mean_validation_cost(
-        context, validation_booked, cache, "Booked", seconds)
+        context, validation_booked, cache, "Booked", validation_weeks)
     if base is None:
         raise RuntimeError("Booked validation plans are not all certified")
     records = []
@@ -112,7 +118,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
                 reviewed = response_validation.reviewed(validation_design @ weights)
                 value = mean_validation_cost(
                     context, reviewed, cache,
-                    f"{method}_lambda_{lam:g}_{scenario_name}", seconds)
+                    f"{method}_lambda_{lam:g}_{scenario_name}", validation_weeks)
                 records.append(dict(method=method, lambda_value=float(lam),
                     scenario=scenario_name, validation_weekly_cost=value,
                     saving_vs_booked=None if value is None else base-value))
@@ -138,6 +144,7 @@ def tune(workbook: Path, output: Path, lambdas, *, cores=15, seconds=300):
         split_date="2012-07-01",
         anchors=[dict(alpha=s[1], h=s[2]) for s in ANCHORS],
         validation_booked_weekly_cost=base,
+        validation_weeks=sorted(validation_weeks),
         candidates=records))
     print(json.dumps(selected, indent=2))
     return selected
