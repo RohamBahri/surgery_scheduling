@@ -48,7 +48,7 @@ def cross_evaluate(context, args):
         fitted = {
             "ACCURACY_TRAINED": np.asarray(fitted_accuracy["weights"], float),
             "RESPONSE_AWARE": np.asarray(fitted_response["weights"], float),
-            "DECISION_AWARE": np.asarray(policy["vf_theta"], float),
+            "DECISION_AWARE": np.asarray(policy["decision_weights"], float),
         }
         # These displays are never changed when the true behavior changes.
         displays = {method: nominal.display(features @ weights)
