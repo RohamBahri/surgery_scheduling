@@ -352,7 +352,7 @@ def work(ctx,root,args):
                     not np.isfinite(coef).all() or
                     np.max(np.abs(coef))>args.case_radius+1e-9):
                 raise ValueError("Invalid shared naive LAD initializer")
-            if init.get("context_sha")!=sha(args.context.read_bytes()):
+            if init.get("context_sha256")!=sha(args.context.read_bytes()):
                 raise ValueError("Naive LAD initializer fitted on another context")
             print("VF: reusing scenario-independent naive LAD start",
                   args.naive_start,flush=True)
